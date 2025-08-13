@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🤖 Arbitrage Bot - Testnet Only</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <div class="logo">
+                    <h1>🤖 Arbitrage Bot</h1>
+                    <span class="testnet-badge">TESTNET ONLY</span>
+                </div>
+                <div class="connection-status">
+                    <div id="serverStatus" class="status-indicator offline">
+                        <span class="dot"></span>
+                        <span class="text">Server</span>
+                    </div>
+                    <div id="walletStatus" class="status-indicator offline">
+                        <span class="dot"></span>
+                        <span class="text">MetaMask</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main">
+        <div class="container">
+            <!-- Wallet Connection -->
+            <section class="wallet-section">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>🦊 Connessione Wallet</h2>
+                    </div>
+                    <div class="card-content">
+                        <div id="walletInfo" class="wallet-info hidden">
+                            <div class="wallet-details">
+                                <div class="detail">
+                                    <span class="label">Indirizzo:</span>
+                                    <span id="walletAddress" class="value"></span>
+                                </div>
+                                <div class="detail">
+                                    <span class="label">Rete:</span>
+                                    <span id="walletNetwork" class="value"></span>
+                                </div>
+                                <div class="detail">
+                                    <span class="label">Saldo:</span>
+                                    <span id="walletBalance" class="value"></span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="wallet-actions">
+                            <button id="connectWallet" class="btn btn-primary">
+                                🦊 Connetti MetaMask
+                            </button>
+                            <button id="disconnectWallet" class="btn btn-secondary hidden">
+                                Disconnetti
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Dashboard -->
+            <section class="dashboard">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">📊</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="totalOpportunities">0</div>
+                            <div class="stat-label">Opportunità Trovate</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">⚡</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="executedTrades">0</div>
+                            <div class="stat-label">Trade Eseguiti</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">💰</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="totalProfit">0.000</div>
+                            <div class="stat-label">Profitto Totale (ETH)</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📈</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="successRate">0%</div>
+                            <div class="stat-label">Tasso Successo</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Opportunities -->
+            <section class="opportunities-section">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>🔍 Opportunità di Arbitraggio</h2>
+                        <div class="card-actions">
+                            <button id="refreshOpportunities" class="btn btn-outline">
+                                🔄 Aggiorna
+                            </button>
+                            <div class="auto-refresh">
+                                <input type="checkbox" id="autoRefresh" checked>
+                                <label for="autoRefresh">Auto-refresh</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-content">
+                        <div id="opportunitiesLoading" class="loading">
+                            <div class="spinner"></div>
+                            <span>Ricerca opportunità...</span>
+                        </div>
+                        <div id="opportunitiesList" class="opportunities-list hidden">
+                            <!-- Le opportunità verranno inserite qui dinamicamente -->
+                        </div>
+                        <div id="noOpportunities" class="no-data hidden">
+                            <div class="no-data-icon">🔍</div>
+                            <div class="no-data-text">Nessuna opportunità trovata</div>
+                            <div class="no-data-subtitle">Il bot continua a monitorare i prezzi...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Price Monitor -->
+            <section class="prices-section">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>💹 Monitor Prezzi</h2>
+                        <div class="network-selector">
+                            <select id="networkSelect">
+                                <option value="ethereum">Ethereum (Goerli)</option>
+                                <option value="bsc">BSC (Testnet)</option>
+                                <option value="polygon">Polygon (Amoy)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="card-content">
+                        <div id="pricesGrid" class="prices-grid">
+                            <!-- I prezzi verranno inseriti qui dinamicamente -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Transaction History -->
+            <section class="history-section">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>📜 Storico Transazioni</h2>
+                        <div class="card-actions">
+                            <button id="clearHistory" class="btn btn-outline btn-danger">
+                                🗑️ Pulisci
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-content">
+                        <div id="historyList" class="history-list">
+                            <!-- Lo storico verrà inserito qui dinamicamente -->
+                        </div>
+                        <div id="noHistory" class="no-data">
+                            <div class="no-data-icon">📜</div>
+                            <div class="no-data-text">Nessuna transazione</div>
+                            <div class="no-data-subtitle">Le transazioni eseguite appariranno qui</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-info">
+                    <span>⚠️ Solo per uso su testnet</span>
+                    <span>•</span>
+                    <span>Non utilizzare su mainnet</span>
+                    <span>•</span>
+                    <span>Versione 1.0.0</span>
+                </div>
+                <div class="footer-links">
+                    <a href="https://github.com" target="_blank">GitHub</a>
+                    <a href="#" onclick="showSecurityInfo()">Sicurezza</a>
+                    <a href="#" onclick="showHelp()">Aiuto</a>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Modals -->
+    <div id="executeModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>⚡ Esegui Arbitraggio</h3>
+                <button class="modal-close" onclick="closeModal('executeModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="executeDetails"></div>
+                <div class="modal-actions">
+                    <button id="confirmExecute" class="btn btn-primary">Conferma Esecuzione</button>
+                    <button class="btn btn-secondary" onclick="closeModal('executeModal')">Annulla</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="securityModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>🛡️ Informazioni Sicurezza</h3>
+                <button class="modal-close" onclick="closeModal('securityModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="security-info">
+                    <h4>🔒 Protezioni Attive</h4>
+                    <ul>
+                        <li>✅ Modalità testnet forzata</li>
+                        <li>✅ Nessuna gestione chiavi private</li>
+                        <li>✅ Integrazione MetaMask sicura</li>
+                        <li>✅ Simulazione pre-esecuzione</li>
+                        <li>✅ Limiti automatici</li>
+                    </ul>
+                    <h4>⚠️ Avvertenze</h4>
+                    <ul>
+                        <li>Solo per uso educativo e testing</li>
+                        <li>Non utilizzare mai su mainnet</li>
+                        <li>Verificare sempre le transazioni</li>
+                        <li>Mantenere fondi testnet limitati</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- Scripts -->
+    <script src="app.js"></script>
+</body>
+</html>

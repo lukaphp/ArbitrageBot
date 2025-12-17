@@ -575,6 +575,18 @@ class ArbitrageBotApp {
         const modal = document.getElementById('executeModal');
         const detailsDiv = document.getElementById('executeDetails');
         
+        // CLEANUP: Rimuovi eventuali pulsanti statici residui (fix per cache/doppi pulsanti)
+        // Cerca elementi .modal-actions che sono figli diretti di .modal-body
+        if (modal) {
+            const modalBody = modal.querySelector('.modal-body');
+            if (modalBody) {
+                const staticActions = Array.from(modalBody.children).filter(
+                    child => child.classList.contains('modal-actions')
+                );
+                staticActions.forEach(el => el.remove());
+            }
+        }
+        
         const profit = opportunity.profit || opportunity.estimatedProfit || 0;
         const inputAmount = opportunity.inputAmount || opportunity.optimalAmount || 1;
         const profitPercentage = ((profit / inputAmount) * 100).toFixed(2);

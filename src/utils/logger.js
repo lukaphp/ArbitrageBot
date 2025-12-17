@@ -22,11 +22,14 @@ class SecureLogger {
       error: 3
     };
     
-    this.currentLevel = this.logLevels[LOGGING_CONFIG.level] || 1;
+    this.currentLevel = this.logLevels[LOGGING_CONFIG.level] !== undefined ? this.logLevels[LOGGING_CONFIG.level] : 1;
     this.logDirectory = LOGGING_CONFIG.logDirectory;
     
-    // Crea directory log se abilitata
-    if (LOGGING_CONFIG.enableFileLogging) {
+    // Debug temporaneo per verificare il livello di log
+    console.log(`🔧 Logger initialized - Level: ${LOGGING_CONFIG.level}, CurrentLevel: ${this.currentLevel}, LogLevels[${LOGGING_CONFIG.level}]: ${this.logLevels[LOGGING_CONFIG.level]}`);
+    
+    // Crea directory log se abilitata (skip su Vercel)
+    if (LOGGING_CONFIG.enableFileLogging && !process.env.VERCEL) {
       this.ensureLogDirectory();
     }
     
@@ -84,7 +87,7 @@ class SecureLogger {
    * Scrive log su file se abilitato
    */
   writeToFile(level, message, data = null) {
-    if (!LOGGING_CONFIG.enableFileLogging) return;
+    if (!LOGGING_CONFIG.enableFileLogging || process.env.VERCEL) return;
     
     try {
       const timestamp = this.getTimestamp();

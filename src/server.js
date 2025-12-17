@@ -97,7 +97,7 @@ class ArbitrageBotServer {
           bot: {
             running: this.isRunning,
             uptime: process.uptime(),
-            mode: config.security.networkMode,
+            mode: config.SECURITY_CONFIG.networkMode,
             version: '1.0.0'
           },
           blockchain: blockchainConnection.getConnectionStatus(),

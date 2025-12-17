@@ -64,7 +64,11 @@ class BlockchainConnection {
     }
     
     if (this.providers.size === 0) {
-      throw new Error('Nessun provider blockchain disponibile!');
+      if (process.env.VERCEL) {
+        logger.warn('⚠️ Nessun provider blockchain disponibile (OK per Vercel serverless)');
+      } else {
+        throw new Error('Nessun provider blockchain disponibile!');
+      }
     }
     
     // Se siamo in un browser, inizializza anche MetaMask

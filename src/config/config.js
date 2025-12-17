@@ -58,23 +58,27 @@ export const DEX_CONFIG = {
       quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6'
     },
     sushiswap: {
-      name: 'SushiSwap',
+      name: 'SushiSwap V2',
       router: '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506',
-      factory: '0xc35DADB65012eC5796536bD9864eD8773aBc74C4'
+      factory: '0xc35DADB65012eC5796536bD9864eD8773aBc74C4',
+      enabled: false // Disabilitato - non deployato su Sepolia testnet
     }
   },
   bsc: {
     pancakeswap: {
       name: 'PancakeSwap V3',
       router: '0x1b81D678ffb9C0263b24A97847620C99d213eB14',
-      factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865'
+      factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865',
+      quoter: '0xbC203d7f83677c7ed3F7acEc959963E7F4ECC5C2',
+      enabled: false // Disabilitato temporaneamente - pool non disponibili su testnet
     }
   },
   polygon: {
     quickswap: {
-      name: 'QuickSwap',
+      name: 'QuickSwap V2',
       router: '0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff',
-      factory: '0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32'
+      factory: '0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32',
+      enabled: true // Abilitato con prezzi simulati per Amoy testnet
     }
   }
 };
@@ -183,7 +187,13 @@ export function validateConfig() {
   if (errors.length > 0) {
     console.error('❌ Errori di configurazione:');
     errors.forEach(error => console.error(`  - ${error}`));
-    process.exit(1);
+    
+    // Su Vercel non usciamo, logghiamo solo l'errore
+    if (!process.env.VERCEL) {
+      process.exit(1);
+    } else {
+      console.warn('⚠️ Esecuzione continuata nonostante errori di configurazione (Ambiente Vercel)');
+    }
   }
   
   console.log('✅ Configurazione validata - Modalità TESTNET attiva');

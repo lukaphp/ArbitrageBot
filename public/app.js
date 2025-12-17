@@ -513,9 +513,13 @@ class ArbitrageBotApp {
         try {
             // Mostra modal di conferma
             const response = await fetch(`/api/opportunities/${opportunityId}`);
-            const opportunity = await response.json();
+            const result = await response.json();
             
-            this.showExecuteModal(opportunity);
+            if (result.success && result.data) {
+                this.showExecuteModal(result.data);
+            } else {
+                throw new Error(result.error || 'Dati opportunità non validi');
+            }
             
         } catch (error) {
             console.error('Errore preparazione esecuzione:', error);

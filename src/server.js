@@ -116,6 +116,11 @@ class ArbitrageBotServer {
     // API Prezzi
     this.app.get('/api/prices', async (req, res) => {
       try {
+        // Vercel fix: Ensure data is loaded
+        if (process.env.VERCEL && priceFeedManager.priceCache.size === 0) {
+           await priceFeedManager.initializePriceCache();
+        }
+
         const { network, token } = req.query;
         let prices;
         
@@ -141,6 +146,14 @@ class ArbitrageBotServer {
     // API Opportunità
     this.app.get('/api/opportunities', async (req, res) => {
       try {
+        // Vercel fix: Run analysis on demand
+        if (process.env.VERCEL) {
+           if (priceFeedManager.priceCache.size === 0) {
+               await priceFeedManager.initializePriceCache();
+           }
+           await arbitrageAnalyzer.analyzeAllOpportunities();
+        }
+
         const opportunities = arbitrageAnalyzer.getBestOpportunities();
         res.json({ success: true, data: opportunities });
       } catch (error) {

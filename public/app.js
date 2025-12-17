@@ -15,8 +15,16 @@ class ArbitrageBotApp {
     async init() {
         console.log('🤖 Inizializzazione Arbitrage Bot Web App...');
         
-        // Inizializza Socket.IO
-        this.initSocket();
+        // Detect Vercel environment
+        this.isVercel = window.location.hostname.includes('vercel.app');
+
+        if (!this.isVercel) {
+            // Inizializza Socket.IO solo se non siamo su Vercel
+            this.initSocket();
+        } else {
+            console.log('☁️ Vercel detected - switching to polling mode');
+            this.updateServerStatus(true);
+        }
         
         // Inizializza event listeners
         this.initEventListeners();
@@ -56,6 +64,10 @@ class ArbitrageBotApp {
         
         this.socket.on('transactionUpdate', (data) => {
             this.updateTransactionHistory(data);
+        });
+        
+        this.socket.on('opportunitiesUpdate', (opportunities) => {
+            this.displayOpportunities(opportunities);
         });
         
         this.socket.on('statsUpdate', (data) => {
@@ -185,10 +197,26 @@ class ArbitrageBotApp {
             });
             
             // Notifica il server
-            this.socket.emit('walletConnected', {
-                address: this.walletAddress,
-                chainId: network.chainId
-            });
+            if (this.socket) {
+                this.socket.emit('walletConnected', {
+                    address: this.walletAddress,
+                    chainId: network.chainId
+                });
+            } else {
+                // API fallback per Vercel
+                try {
+                    await fetch('/api/wallet/connect', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            address: this.walletAddress,
+                            chainId: network.chainId
+                        })
+                    });
+                } catch (e) {
+                    console.error('Error notifying server:', e);
+                }
+            }
             
             this.showToast('Wallet connesso con successo', 'success');
             console.log('✅ Wallet connesso:', this.walletAddress);
@@ -205,7 +233,10 @@ class ArbitrageBotApp {
         this.signer = null;
         
         this.updateWalletUI(null);
-        this.socket.emit('walletDisconnected');
+        
+        if (this.socket) {
+            this.socket.emit('walletDisconnected');
+        }
         
         this.showToast('Wallet disconnesso', 'success');
         console.log('🔌 Wallet disconnesso');
@@ -327,11 +358,12 @@ class ArbitrageBotApp {
             document.getElementById('noOpportunities').classList.add('hidden');
             
             const response = await fetch('/api/opportunities');
-            const opportunities = await response.json();
+            const result = await response.json();
+            const opportunities = result.success ? result.data : [];
             
             document.getElementById('opportunitiesLoading').classList.add('hidden');
             
-            if (opportunities.length > 0) {
+            if (opportunities && opportunities.length > 0) {
                 this.displayOpportunities(opportunities);
                 document.getElementById('opportunitiesList').classList.remove('hidden');
             } else {
@@ -359,46 +391,58 @@ class ArbitrageBotApp {
         const div = document.createElement('div');
         div.className = 'opportunity-item';
         
-        const profitPercentage = ((opportunity.profit / opportunity.inputAmount) * 100).toFixed(2);
+        // Gestisci sia il formato vecchio che quello nuovo
+        const token = opportunity.token || opportunity.pair || 'N/A';
+        const fromDex = opportunity.fromDex || opportunity.dexA || 'N/A';
+        const toDex = opportunity.toDex || opportunity.dexB || 'N/A';
+        const buyPrice = opportunity.buyPrice || opportunity.priceA || 0;
+        const sellPrice = opportunity.sellPrice || opportunity.priceB || 0;
+        const profit = opportunity.estimatedProfit || opportunity.profit || 0;
+        const profitPercentage = opportunity.profitPercentage || ((profit / (opportunity.optimalAmount || opportunity.inputAmount || 1)) * 100) || 0;
+        const gasCost = opportunity.gasCosts?.totalGasCost || opportunity.estimatedGas || 'N/A';
+        const confidence = opportunity.confidence || 'N/A';
         
         div.innerHTML = `
             <div class="opportunity-header">
-                <div class="opportunity-pair">${opportunity.pair}</div>
-                <div class="opportunity-profit">+${profitPercentage}%</div>
+                <div class="opportunity-pair">${token}</div>
+                <div class="opportunity-profit">+${profitPercentage.toFixed(2)}%</div>
             </div>
             <div class="opportunity-details">
                 <div class="opportunity-detail">
-                    <span class="label">DEX A:</span>
-                    <span class="value">${opportunity.dexA}</span>
+                    <span class="label">Compra su:</span>
+                    <span class="value">${fromDex}</span>
                 </div>
                 <div class="opportunity-detail">
-                    <span class="label">DEX B:</span>
-                    <span class="value">${opportunity.dexB}</span>
+                    <span class="label">Vendi su:</span>
+                    <span class="value">${toDex}</span>
                 </div>
                 <div class="opportunity-detail">
-                    <span class="label">Prezzo A:</span>
-                    <span class="value">${opportunity.priceA.toFixed(6)}</span>
+                    <span class="label">Prezzo Acquisto:</span>
+                    <span class="value">${buyPrice.toFixed(6)}</span>
                 </div>
                 <div class="opportunity-detail">
-                    <span class="label">Prezzo B:</span>
-                    <span class="value">${opportunity.priceB.toFixed(6)}</span>
+                    <span class="label">Prezzo Vendita:</span>
+                    <span class="value">${sellPrice.toFixed(6)}</span>
                 </div>
                 <div class="opportunity-detail">
-                    <span class="label">Profitto:</span>
-                    <span class="value">${opportunity.profit.toFixed(6)} ETH</span>
+                    <span class="label">Profitto Stimato:</span>
+                    <span class="value">${profit.toFixed(6)} ETH</span>
                 </div>
                 <div class="opportunity-detail">
                     <span class="label">Gas Stimato:</span>
-                    <span class="value">${opportunity.estimatedGas || 'N/A'}</span>
+                    <span class="value">${typeof gasCost === 'number' ? gasCost.toFixed(6) + ' ETH' : gasCost}</span>
+                </div>
+                <div class="opportunity-detail">
+                    <span class="label">Confidenza:</span>
+                    <span class="value">${typeof confidence === 'number' ? confidence + '%' : confidence}</span>
                 </div>
             </div>
             <div class="opportunity-actions">
                 <button class="btn btn-outline" onclick="app.simulateArbitrage('${opportunity.id}')">
                     🧪 Simula
                 </button>
-                <button class="btn btn-primary" onclick="app.executeArbitrage('${opportunity.id}')" 
-                        ${!this.isConnected ? 'disabled' : ''}>
-                    ⚡ Esegui
+                <button class="btn btn-primary" onclick="app.executeArbitrage('${opportunity.id}')">
+                    ⚡ Esegui ${!this.isConnected ? '(Simulazione)' : ''}
                 </button>
             </div>
         `;
@@ -429,9 +473,11 @@ class ArbitrageBotApp {
     }
 
     async executeArbitrage(opportunityId) {
+        // In modalità testnet, permettiamo l'esecuzione senza wallet per la simulazione
+        // Controlliamo se siamo in testnet verificando se il server accetta esecuzioni senza wallet
         if (!this.isConnected) {
-            this.showToast('Connetti prima il wallet', 'warning');
-            return;
+            // Proviamo comunque l'esecuzione - il server deciderà se è permessa
+            console.log('⚠️ Tentativo di esecuzione senza wallet connesso (modalità testnet)');
         }
         
         try {
@@ -451,22 +497,29 @@ class ArbitrageBotApp {
         const modal = document.getElementById('executeModal');
         const detailsDiv = document.getElementById('executeDetails');
         
-        const profitPercentage = ((opportunity.profit / opportunity.inputAmount) * 100).toFixed(2);
+        const profit = opportunity.profit || opportunity.estimatedProfit || 0;
+        const inputAmount = opportunity.inputAmount || opportunity.optimalAmount || 1;
+        const profitPercentage = ((profit / inputAmount) * 100).toFixed(2);
+        
+        const pairDisplay = `${opportunity.token} (${opportunity.fromDex} → ${opportunity.toDex})`;
+        const gasDisplay = opportunity.gasCosts ? 
+            `${opportunity.gasCosts.totalGasCost.toFixed(6)} ETH` : 
+            'Calcolo in corso...';
         
         detailsDiv.innerHTML = `
             <div class="execution-details">
                 <h4>Dettagli Esecuzione</h4>
                 <div class="detail">
                     <span class="label">Coppia:</span>
-                    <span class="value">${opportunity.pair}</span>
+                    <span class="value">${pairDisplay}</span>
                 </div>
                 <div class="detail">
                     <span class="label">Profitto Stimato:</span>
-                    <span class="value">${opportunity.profit.toFixed(6)} ETH (+${profitPercentage}%)</span>
+                    <span class="value">${profit.toFixed(6)} ETH (+${profitPercentage}%)</span>
                 </div>
                 <div class="detail">
                     <span class="label">Gas Stimato:</span>
-                    <span class="value">${opportunity.estimatedGas || 'Calcolo in corso...'}</span>
+                    <span class="value">${gasDisplay}</span>
                 </div>
                 <div class="warning">
                     ⚠️ <strong>Attenzione:</strong> Questa è una transazione reale su testnet. 
@@ -493,7 +546,7 @@ class ArbitrageBotApp {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    walletAddress: this.walletAddress
+                    walletAddress: this.walletAddress || null // Permetti null in modalità testnet
                 })
             });
             
@@ -520,7 +573,10 @@ class ArbitrageBotApp {
         try {
             const network = document.getElementById('networkSelect').value;
             const response = await fetch(`/api/prices?network=${network}`);
-            const prices = await response.json();
+            const result = await response.json();
+            
+            // Estrai i prezzi dalla struttura di risposta dell'API
+            const prices = result.success ? result.data : {};
             
             this.displayPrices(prices);
             
@@ -664,10 +720,31 @@ class ArbitrageBotApp {
             clearInterval(this.refreshInterval);
         }
         
-        this.refreshInterval = setInterval(() => {
-            this.refreshOpportunities();
-            this.refreshPrices();
-        }, 30000); // Refresh ogni 30 secondi
+        // Su Vercel usiamo un polling più frequente (5s) perché non abbiamo WebSocket
+        // In locale usiamo 30s perché abbiamo WebSocket per il real-time
+        const interval = this.isVercel ? 5000 : 30000;
+        
+        this.refreshInterval = setInterval(async () => {
+            await this.refreshOpportunities();
+            await this.refreshPrices();
+            
+            // Su Vercel aggiorniamo anche stats e history via polling
+            if (this.isVercel) {
+                try {
+                    const statsResponse = await fetch('/api/stats');
+                    if (statsResponse.ok) {
+                        const stats = await statsResponse.json();
+                        this.updateStats(stats);
+                    }
+                    // Refresh history occasionally? Let's do it every loop for simplicity
+                    // await this.refreshHistory(); 
+                } catch (e) {
+                    console.error('Polling error:', e);
+                }
+            }
+        }, interval); 
+        
+        console.log(`⏰ Auto-refresh attivo (intervallo: ${interval}ms)`);
     }
 
     stopAutoRefresh() {

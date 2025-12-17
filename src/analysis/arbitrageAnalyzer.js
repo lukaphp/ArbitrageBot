@@ -47,10 +47,12 @@ class ArbitrageAnalyzer {
         throw new Error('Sistema prezzi non attivo. Avviare prima priceFeeds.');
       }
       
+      // Imposta isRunning PRIMA di avviare il timer
+      this.isRunning = true;
+      
       // Avvia analisi periodica
       this.startPeriodicAnalysis();
       
-      this.isRunning = true;
       logger.info('✅ Analizzatore arbitraggio attivo');
       
     } catch (error) {
@@ -99,24 +101,60 @@ class ArbitrageAnalyzer {
    */
   async analyzeAllOpportunities() {
     const allPrices = priceFeeds.getAllCurrentPrices();
-    const newOpportunities = [];
+    let newOpportunities = [];
     
-    // Analizza ogni rete
-    for (const [networkName, networkTokens] of Object.entries(allPrices)) {
-      // Analizza ogni token
-      for (const [tokenSymbol, tokenData] of Object.entries(networkTokens)) {
-        const opportunities = await this.analyzeTokenArbitrage(
-          networkName, 
-          tokenSymbol, 
-          tokenData.prices
-        );
-        
-        newOpportunities.push(...opportunities);
+    logger.debug('🔍 Inizio analisi opportunità di arbitraggio...');
+    logger.debug(`📊 Dati prezzi ricevuti:`, Object.keys(allPrices).length > 0 ? Object.keys(allPrices) : 'Nessun dato disponibile');
+    
+    // Se siamo su Polygon testnet, genera sempre opportunità simulate
+    if (Object.keys(allPrices).includes('polygon')) {
+      logger.info('🎭 Generazione opportunità simulate per Polygon Amoy testnet');
+      newOpportunities = this.generateMockArbitrageOpportunities();
+    }
+    // Se non siamo su Polygon, controlla se ci sono prezzi reali
+    else if (Object.keys(allPrices).length > 0) {
+      const hasAnyRealPrices = Object.values(allPrices).some(networkTokens =>
+        Object.values(networkTokens).some(tokenData => 
+          Object.values(tokenData.prices || {}).some(priceData => 
+            priceData.source === 'on-chain' && priceData.price > 0
+          )
+        )
+      );
+      
+      if (!hasAnyRealPrices) {
+        logger.info('🎭 Generazione opportunità simulate - nessun prezzo reale disponibile');
+        newOpportunities = this.generateMockArbitrageOpportunities();
       }
     }
     
+    // Se non abbiamo opportunità simulate, procedi con analisi normale
+    if (newOpportunities.length === 0) {
+      // Analizza ogni rete
+      for (const [networkName, networkTokens] of Object.entries(allPrices)) {
+        logger.debug(`📡 Analizzando rete: ${networkName}`);
+        
+        // Analizza ogni token
+        for (const [tokenSymbol, tokenData] of Object.entries(networkTokens)) {
+          logger.debug(`💰 Prezzi ${tokenSymbol} su ${networkName}:`, Object.keys(tokenData.prices).length > 0 ? tokenData.prices : 'Nessun prezzo disponibile');
+          
+          const opportunities = await this.analyzeTokenArbitrage(
+            networkName, 
+            tokenSymbol, 
+            tokenData.prices
+          );
+          
+          logger.debug(`🎯 Opportunità trovate per ${tokenSymbol}: ${opportunities.length}`);
+          newOpportunities.push(...opportunities);
+        }
+      }
+    }
+    
+    logger.debug(`📊 Totale opportunità grezze trovate: ${newOpportunities.length}`);
+    
     // Filtra e ordina opportunità
     const validOpportunities = this.filterAndRankOpportunities(newOpportunities);
+    
+    logger.debug(`✅ Opportunità filtrate: ${validOpportunities.length}`);
     
     // Aggiorna cache opportunità
     this.updateOpportunityCache(validOpportunities);
@@ -135,6 +173,8 @@ class ArbitrageAnalyzer {
           opp.estimatedProfit
         );
       });
+    } else {
+      logger.debug('❌ Nessuna opportunità di arbitraggio trovata in questo ciclo');
     }
   }
   
@@ -375,6 +415,8 @@ class ArbitrageAnalyzer {
    * Ottiene migliori opportunità correnti
    */
   getBestOpportunities(limit = 10) {
+    logger.debug(`🔍 getBestOpportunities chiamato - Cache size: ${this.opportunities.size}`);
+    
     const opportunities = Array.from(this.opportunities.values())
       .filter(opp => {
         // Filtra opportunità troppo vecchie
@@ -388,7 +430,33 @@ class ArbitrageAnalyzer {
       })
       .slice(0, limit);
     
+    logger.debug(`🔍 getBestOpportunities restituisce ${opportunities.length} opportunità`);
     return opportunities;
+  }
+
+  /**
+   * Ottiene opportunità specifica per ID
+   */
+  getOpportunityById(id) {
+    logger.debug(`🔍 getOpportunityById chiamato per ID: ${id}`);
+    
+    const opportunity = this.opportunities.get(id);
+    
+    if (!opportunity) {
+      logger.debug(`❌ Opportunità con ID ${id} non trovata`);
+      return null;
+    }
+    
+    // Verifica se l'opportunità è ancora valida
+    const age = Date.now() - opportunity.timestamp;
+    if (age > 60000) { // Max 1 minuto
+      logger.debug(`⏰ Opportunità con ID ${id} troppo vecchia (${age}ms)`);
+      this.opportunities.delete(id);
+      return null;
+    }
+    
+    logger.debug(`✅ Opportunità con ID ${id} trovata e valida`);
+    return opportunity;
   }
   
   /**
@@ -411,6 +479,88 @@ class ArbitrageAnalyzer {
   incrementTransactionCount() {
     this.dailyTransactionCount++;
     logger.info(`📊 Transazioni oggi: ${this.dailyTransactionCount}/${ARBITRAGE_CONFIG.dailyTransactionLimit}`);
+  }
+  
+  /**
+   * Genera opportunità di arbitraggio simulate per testnet
+   */
+  generateMockArbitrageOpportunities() {
+    const mockOpportunities = [];
+    const tokens = ['WETH', 'USDC', 'USDT', 'WMATIC'];
+    const dexes = ['QuickSwap', 'SushiSwap', 'Uniswap'];
+    const timestamp = Date.now();
+    
+    // Genera 3-5 opportunità simulate
+    const numOpportunities = Math.floor(Math.random() * 3) + 3;
+    
+    for (let i = 0; i < numOpportunities; i++) {
+      const token = tokens[Math.floor(Math.random() * tokens.length)];
+      const fromDex = dexes[Math.floor(Math.random() * dexes.length)];
+      let toDex = dexes[Math.floor(Math.random() * dexes.length)];
+      
+      // Assicurati che fromDex e toDex siano diversi
+      while (toDex === fromDex) {
+        toDex = dexes[Math.floor(Math.random() * dexes.length)];
+      }
+      
+      // Genera prezzi simulati con differenze realistiche
+      const basePrice = this.getBaseMockPrice(token);
+      const priceDifference = (Math.random() * 0.05 + 0.01) * basePrice; // 1-6% differenza
+      const buyPrice = basePrice;
+      const sellPrice = basePrice + priceDifference;
+      
+      const profitPercentage = (priceDifference / buyPrice) * 100;
+      const optimalAmount = Math.random() * 0.5 + 0.1; // 0.1-0.6 ETH
+      const grossProfit = optimalAmount * priceDifference;
+      const gasCosts = Math.random() * 0.01 + 0.005; // 0.005-0.015 ETH gas
+      const slippageCost = grossProfit * 0.01; // 1% slippage
+      const netProfit = grossProfit - gasCosts - slippageCost;
+      const netProfitPercentage = (netProfit / (optimalAmount * buyPrice)) * 100;
+      
+      // Solo opportunità con profitto positivo
+      if (netProfitPercentage > this.minProfitPercentage) {
+        mockOpportunities.push({
+          id: `mock-polygon-${token}-${fromDex}-${toDex}-${timestamp}-${i}`,
+          network: 'polygon',
+          token: token,
+          fromDex: fromDex,
+          toDex: toDex,
+          buyPrice: buyPrice,
+          sellPrice: sellPrice,
+          priceDifference: priceDifference,
+          profitPercentage: netProfitPercentage,
+          grossProfitPercentage: profitPercentage,
+          optimalAmount: optimalAmount,
+          estimatedProfit: netProfit,
+          grossProfit: grossProfit,
+          gasCosts: {
+            totalGasCost: gasCosts,
+            swapGas: gasCosts * 0.6,
+            transferGas: gasCosts * 0.4
+          },
+          slippageCost: slippageCost,
+          timestamp: timestamp + i * 1000, // Spread timestamps
+          confidence: Math.floor(Math.random() * 20) + 75 // 75-95% confidence
+        });
+      }
+    }
+    
+    logger.info(`🎭 Generate ${mockOpportunities.length} opportunità simulate`);
+    return mockOpportunities;
+  }
+  
+  /**
+   * Ottiene prezzo base simulato per token
+   */
+  getBaseMockPrice(token) {
+    const basePrices = {
+      'WETH': 2500 + (Math.random() * 200 - 100), // $2400-2600
+      'USDC': 1.0 + (Math.random() * 0.02 - 0.01), // $0.99-1.01
+      'USDT': 1.0 + (Math.random() * 0.02 - 0.01), // $0.99-1.01
+      'WMATIC': 0.8 + (Math.random() * 0.4 - 0.2)  // $0.6-1.2
+    };
+    
+    return basePrices[token] || 100;
   }
   
   /**

@@ -77,28 +77,54 @@ class TransactionExecutor {
       // 3. Verifica bilanci e approvazioni
       await this.checkBalancesAndApprovals(opportunity);
       
-      // 4. Esecuzione transazione reale
-      const result = await this.executeArbitrageTransaction(opportunity);
-      
-      // 5. Monitoraggio e conferma
-      const confirmation = await this.monitorTransaction(result.txHash);
-      
-      // 6. Calcolo profitto reale
-      const actualProfit = await this.calculateActualProfit(opportunity, confirmation);
-      
-      // 7. Aggiorna statistiche
-      this.updateExecutionHistory(opportunity, result, actualProfit);
-      arbitrageAnalyzer.incrementTransactionCount();
-      
-      logger.transactionSuccess(result.txHash, actualProfit);
-      
-      return {
-        success: true,
-        txHash: result.txHash,
-        actualProfit,
-        gasUsed: confirmation.gasUsed,
-        opportunity
-      };
+      // 4. Esecuzione transazione (reale o simulata)
+      if (SECURITY_CONFIG.networkMode === 'testnet') {
+        // Modalità simulazione - non esegue transazioni reali
+        logger.info('🧪 Modalità testnet: simulando esecuzione arbitraggio...');
+        
+        const simulatedResult = {
+          success: true,
+          txHash: `0x${'0'.repeat(64)}`, // Hash fittizio
+          actualProfit: opportunity.profitPercentage * opportunity.optimalAmount / 100,
+          gasUsed: 300000, // Gas simulato
+          opportunity,
+          simulated: true
+        };
+        
+        // Aggiorna statistiche con dati simulati
+        this.updateExecutionHistory(opportunity, simulatedResult, simulatedResult.actualProfit);
+        arbitrageAnalyzer.incrementTransactionCount();
+        
+        logger.info('✅ Simulazione arbitraggio completata', {
+          profit: simulatedResult.actualProfit,
+          gasUsed: simulatedResult.gasUsed
+        });
+        
+        return simulatedResult;
+      } else {
+        // Modalità produzione - esecuzione reale
+        const result = await this.executeArbitrageTransaction(opportunity);
+        
+        // 5. Monitoraggio e conferma
+        const confirmation = await this.monitorTransaction(result.txHash);
+        
+        // 6. Calcolo profitto reale
+        const actualProfit = await this.calculateActualProfit(opportunity, confirmation);
+        
+        // 7. Aggiorna statistiche
+        this.updateExecutionHistory(opportunity, result, actualProfit);
+        arbitrageAnalyzer.incrementTransactionCount();
+        
+        logger.transactionSuccess(result.txHash, actualProfit);
+        
+        return {
+          success: true,
+          txHash: result.txHash,
+          actualProfit,
+          gasUsed: confirmation.gasUsed,
+          opportunity
+        };
+      }
       
     } catch (error) {
       logger.transactionFailed(error.message);
@@ -171,7 +197,16 @@ class TransactionExecutor {
       logger.info('🧪 Avvio simulazione arbitraggio...');
       
       const provider = blockchainConnection.getProvider(opportunity.network);
-      const signer = blockchainConnection.getSigner();
+      
+      // In modalità testnet, non serve un signer reale per la simulazione
+      let signer = null;
+      if (SECURITY_CONFIG.networkMode !== 'testnet') {
+        try {
+          signer = blockchainConnection.getSigner();
+        } catch (error) {
+          logger.warn('⚠️ Signer non disponibile, continuando con simulazione semplificata');
+        }
+      }
       
       // Simula prima swap (compra)
       const buySimulation = await this.simulateSwap(
@@ -260,22 +295,36 @@ class TransactionExecutor {
    * Verifica bilanci e approvazioni necessarie
    */
   async checkBalancesAndApprovals(opportunity) {
-    const signer = blockchainConnection.getSigner();
-    const walletAddress = await signer.getAddress();
-    
-    // Verifica bilancio ETH per gas
-    const ethBalance = await blockchainConnection.getNativeBalance();
-    const estimatedGasCost = opportunity.gasCosts.totalGasCost;
-    
-    if (parseFloat(ethBalance) < estimatedGasCost * 2) { // Buffer 2x
-      throw new Error(`Bilancio ETH insufficiente per gas: ${ethBalance} ETH`);
+    // In modalità testnet/simulazione, salta i controlli reali del wallet
+    if (SECURITY_CONFIG.networkMode === 'testnet') {
+      logger.info('🧪 Modalità testnet: saltando controlli bilanci reali');
+      return true;
     }
     
-    // Verifica bilancio token iniziale (se necessario)
-    const tokenAddress = TOKENS[opportunity.network][opportunity.token];
-    if (tokenAddress) {
-      const tokenBalance = await blockchainConnection.getTokenBalance(tokenAddress);
-      logger.debug(`Bilancio ${opportunity.token}: ${tokenBalance}`);
+    try {
+      const signer = blockchainConnection.getSigner();
+      const walletAddress = await signer.getAddress();
+      
+      // Verifica bilancio ETH per gas
+      const ethBalance = await blockchainConnection.getNativeBalance();
+      const estimatedGasCost = opportunity.gasCosts.totalGasCost;
+      
+      if (parseFloat(ethBalance) < estimatedGasCost * 2) { // Buffer 2x
+        throw new Error(`Bilancio ETH insufficiente per gas: ${ethBalance} ETH`);
+      }
+      
+      // Verifica bilancio token iniziale (se necessario)
+      const tokenAddress = TOKENS[opportunity.network][opportunity.token];
+      if (tokenAddress) {
+        const tokenBalance = await blockchainConnection.getTokenBalance(tokenAddress);
+        logger.debug(`Bilancio ${opportunity.token}: ${tokenBalance}`);
+      }
+    } catch (error) {
+      if (SECURITY_CONFIG.networkMode === 'testnet') {
+        logger.warn('⚠️ Errore controlli bilanci in testnet, continuando simulazione');
+        return true;
+      }
+      throw error;
     }
     
     logger.info('✅ Bilanci verificati');

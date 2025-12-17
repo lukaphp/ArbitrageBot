@@ -95,22 +95,34 @@ class PriceFeedManager {
   async initializePriceCache() {
     logger.info('📊 Inizializzazione cache prezzi...');
     
+    const promises = [];
+
     for (const [networkName, tokens] of Object.entries(TOKENS)) {
       for (const [tokenSymbol, tokenAddress] of Object.entries(tokens)) {
-        try {
-          // Ottieni prezzi da tutte le fonti disponibili
-          const prices = await this.getAllPricesForToken(networkName, tokenSymbol, tokenAddress);
-          
-          const cacheKey = `${networkName}-${tokenSymbol}`;
-          this.priceCache.set(cacheKey, prices);
-          this.lastUpdate.set(cacheKey, Date.now());
-          
-          logger.debug(`💰 Prezzi iniziali ${tokenSymbol} su ${networkName}`, prices);
-          
-        } catch (error) {
-          logger.warn(`⚠️ Errore inizializzazione prezzi ${tokenSymbol}:`, error.message);
-        }
+        promises.push(this.loadTokenPrice(networkName, tokenSymbol, tokenAddress));
       }
+    }
+
+    await Promise.allSettled(promises);
+    logger.info(`✅ Cache prezzi inizializzata (${this.priceCache.size} entry)`);
+  }
+
+  /**
+   * Carica prezzo singolo token (helper per inizializzazione)
+   */
+  async loadTokenPrice(networkName, tokenSymbol, tokenAddress) {
+    try {
+      // Ottieni prezzi da tutte le fonti disponibili
+      const prices = await this.getAllPricesForToken(networkName, tokenSymbol, tokenAddress);
+      
+      const cacheKey = `${networkName}-${tokenSymbol}`;
+      this.priceCache.set(cacheKey, prices);
+      this.lastUpdate.set(cacheKey, Date.now());
+      
+      logger.debug(`💰 Prezzi iniziali ${tokenSymbol} su ${networkName}`, prices);
+      
+    } catch (error) {
+      logger.warn(`⚠️ Errore inizializzazione prezzi ${tokenSymbol}:`, error.message);
     }
   }
   
@@ -124,9 +136,12 @@ class PriceFeedManager {
     const dexPrices = await this.getDexPrices(networkName, tokenSymbol, tokenAddress);
     Object.assign(prices, dexPrices);
     
-    // Prezzi da API esterne
-    const apiPrices = await this.getApiPrices(tokenSymbol);
-    Object.assign(prices, apiPrices);
+    // In testnet saltiamo le API esterne per velocità e per evitare conflitti con i prezzi simulati
+    if (SECURITY_CONFIG.networkMode !== 'testnet') {
+      // Prezzi da API esterne
+      const apiPrices = await this.getApiPrices(tokenSymbol);
+      Object.assign(prices, apiPrices);
+    }
     
     return prices;
   }

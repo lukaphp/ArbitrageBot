@@ -53,7 +53,7 @@ class ArbitrageBotApp {
             this.showToast('Disconnesso dal server', 'error');
         });
         
-        this.socket.on('priceUpdate', (data) => {
+        this.socket.on('pricesUpdate', (data) => {
             this.updatePrices(data);
         });
         
@@ -693,10 +693,14 @@ class ArbitrageBotApp {
         container.innerHTML = '';
         
         if (prices && typeof prices === 'object') {
-            Object.entries(prices).forEach(([token, tokenPrices]) => {
-                if (tokenPrices && typeof tokenPrices === 'object') {
-                    Object.entries(tokenPrices).forEach(([dex, priceData]) => {
-                        if (priceData && typeof priceData === 'object') {
+            Object.entries(prices).forEach(([token, tokenData]) => {
+                // Supporta sia la struttura diretta che quella con .prices (nuova struttura server)
+                const dexMap = (tokenData && tokenData.prices) ? tokenData.prices : tokenData;
+                
+                if (dexMap && typeof dexMap === 'object') {
+                    Object.entries(dexMap).forEach(([dex, priceData]) => {
+                        // Filtra solo oggetti validi con proprietà price
+                        if (priceData && typeof priceData === 'object' && priceData.price !== undefined) {
                             const priceElement = this.createPriceElement(token, dex, priceData);
                             container.appendChild(priceElement);
                         }
@@ -704,6 +708,11 @@ class ArbitrageBotApp {
                 }
             });
         }
+    }
+
+    // Alias per compatibilità con socket update
+    updatePrices(prices) {
+        this.displayPrices(prices);
     }
 
     createPriceElement(token, dex, priceData) {

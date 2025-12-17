@@ -438,20 +438,10 @@ class BotTester {
       this.recordTest('Sanitizzazione log', true, 'Dati sensibili filtrati');
       
       // Test log specifici
-      logger.logArbitrageOpportunity({
-        token: 'WETH',
-        network: 'goerli',
-        profitPercentage: 2.5,
-        fromDex: 'uniswap',
-        toDex: 'sushiswap'
-      });
+      logger.arbitrageOpportunity('uniswap', 'sushiswap', 'WETH', 2.5, 0.0002);
       this.recordTest('Log opportunità', true);
       
-      logger.logTransactionStart({
-        id: 'test-tx-123',
-        token: 'WETH',
-        amount: 0.01
-      });
+      logger.transactionStart('arbitrage', 'uniswap', 'sushiswap', 0.01);
       this.recordTest('Log transazioni', true);
       
     } catch (error) {

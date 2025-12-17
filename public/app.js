@@ -576,7 +576,14 @@ class ArbitrageBotApp {
         const detailsDiv = document.getElementById('executeDetails');
         
         // CLEANUP: Rimuovi eventuali pulsanti statici residui (fix per cache/doppi pulsanti)
-        // Cerca elementi .modal-actions che sono figli diretti di .modal-body
+        // 1. Rimuovi pulsanti vecchi specifici per ID
+        const oldBtn = document.getElementById('confirmExecute');
+        if (oldBtn) {
+            const container = oldBtn.closest('.modal-actions');
+            if (container) container.remove();
+        }
+
+        // 2. Cerca elementi .modal-actions che sono figli diretti di .modal-body
         if (modal) {
             const modalBody = modal.querySelector('.modal-body');
             if (modalBody) {

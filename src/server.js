@@ -552,8 +552,7 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 // Avvia server solo se eseguito direttamente
-import { fileURLToPath } from 'url';
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (process.argv[1] === __filename) {
   server.start();
 }
 

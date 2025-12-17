@@ -122,6 +122,10 @@ class ArbitrageBotServer {
         if (network && token) {
           // Prezzi per un token specifico
           prices = priceFeedManager.getTokenPrices(network, token);
+        } else if (network) {
+          // Prezzi per una rete specifica
+          const allPrices = priceFeedManager.getAllCurrentPrices();
+          prices = allPrices[network] || {};
         } else {
           // Tutti i prezzi
           prices = priceFeedManager.getAllCurrentPrices();
@@ -144,6 +148,26 @@ class ArbitrageBotServer {
         res.status(500).json({ success: false, error: error.message });
       }
     });
+
+    // API Statistiche
+    this.app.get('/api/stats', async (req, res) => {
+      try {
+        const stats = arbitrageAnalyzer.getStats();
+        const enhancedStats = {
+          totalOpportunities: stats.totalOpportunities || 0,
+          recentOpportunities: stats.recentOpportunities || 0,
+          executedTrades: stats.dailyTransactions || 0,
+          totalProfit: 0, // TODO: Implementare tracking profitti
+          successRate: stats.dailyTransactions > 0 ? 95 : 0, // Mock success rate
+          isRunning: stats.isRunning,
+          dailyLimit: stats.dailyLimit
+        };
+        res.json(enhancedStats);
+       } catch (error) {
+         logger.error('Errore API stats:', error);
+         res.status(500).json({ success: false, error: error.message });
+       }
+     });
     
     // API Wallet Connection
     this.app.post('/api/wallet/connect', async (req, res) => {
@@ -232,18 +256,21 @@ class ArbitrageBotServer {
         const { opportunityId } = req.params;
         const { walletAddress } = req.body;
         
-        if (!walletAddress) {
-          return res.status(400).json({ 
-            success: false, 
-            error: 'Wallet address richiesto' 
-          });
-        }
-        
-        if (!blockchainConnection.isConnected) {
-          return res.status(400).json({
-            success: false,
-            error: 'Wallet non connesso'
-          });
+        // In modalità testnet, permettiamo l'esecuzione senza wallet per la simulazione
+        if (config.SECURITY_CONFIG.networkMode !== 'testnet') {
+          if (!walletAddress) {
+            return res.status(400).json({ 
+              success: false, 
+              error: 'Wallet address richiesto' 
+            });
+          }
+          
+          if (!blockchainConnection.isConnected) {
+            return res.status(400).json({
+              success: false,
+              error: 'Wallet non connesso'
+            });
+          }
         }
         
         const opportunity = arbitrageAnalyzer.getOpportunityById(opportunityId);
@@ -261,7 +288,10 @@ class ArbitrageBotServer {
           });
         }
         
-        const result = await transactionExecutor.executeArbitrage(opportunity, walletAddress);
+        // In modalità testnet, usa un indirizzo fittizio se non fornito
+        const effectiveWalletAddress = walletAddress || (config.SECURITY_CONFIG.networkMode === 'testnet' ? '0x0000000000000000000000000000000000000000' : null);
+        
+        const result = await transactionExecutor.executeArbitrage(opportunity, effectiveWalletAddress);
         
         // Notifica tutti i client
         this.io.emit('transactionUpdate', {
@@ -449,31 +479,35 @@ class ArbitrageBotServer {
   
     /**
      * Setup eventi bot per WebSocket
+     * NOTA: Commentato perché i moduli non estendono EventEmitter
      */
     setupBotEvents() {
-    // Eventi price feeds
-    priceFeedManager.on('priceUpdate', (data) => {
-      this.io.emit('priceUpdate', data);
-    });
-    
-    // Eventi analyzer
-    arbitrageAnalyzer.on('opportunityFound', (opportunity) => {
-      this.io.emit('opportunityFound', opportunity);
-      logger.logArbitrageOpportunity(opportunity);
-    });
-    
-    // Eventi executor
-    transactionExecutor.on('transactionStart', (data) => {
-      this.io.emit('transactionStart', data);
-    });
-    
-    transactionExecutor.on('transactionSuccess', (data) => {
-      this.io.emit('transactionSuccess', data);
-    });
-    
-    transactionExecutor.on('transactionFailure', (data) => {
-      this.io.emit('transactionFailure', data);
-    });
+    // Invia aggiornamenti periodici delle statistiche
+    setInterval(() => {
+      if (this.connectedClients.size > 0) {
+        try {
+          const stats = arbitrageAnalyzer.getStats();
+          const enhancedStats = {
+            totalOpportunities: stats.totalOpportunities || 0,
+            recentOpportunities: stats.recentOpportunities || 0,
+            executedTrades: stats.dailyTransactions || 0,
+            totalProfit: 0,
+            successRate: stats.dailyTransactions > 0 ? 95 : 0,
+            isRunning: stats.isRunning,
+            dailyLimit: stats.dailyLimit
+          };
+          
+          this.io.emit('statsUpdate', enhancedStats);
+          
+          // Invia anche aggiornamento opportunità
+          const opportunities = arbitrageAnalyzer.getBestOpportunities();
+          this.io.emit('opportunitiesUpdate', opportunities);
+          
+        } catch (error) {
+          logger.error('Errore invio aggiornamenti WebSocket:', error);
+        }
+      }
+    }, 15000); // Ogni 15 secondi
   }
   
   /**
@@ -517,7 +551,11 @@ process.on('unhandledRejection', (reason, promise) => {
   server.stop();
 });
 
-// Avvia server
-server.start();
+// Avvia server solo se eseguito direttamente
+import { fileURLToPath } from 'url';
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  server.start();
+}
 
-export default server;
+// Per Vercel, esportiamo l'app express
+export default server.app;

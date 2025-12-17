@@ -169,9 +169,49 @@
                         </div>
                     </div>
                     <div class="card-content">
-                        <div id="historyList" class="history-list">
-                            <!-- Lo storico verrà inserito qui dinamicamente -->
+                        <!-- Filtri Storico -->
+                        <div class="history-filters">
+                            <div class="filter-group">
+                                <label for="dateFilterStart">Da:</label>
+                                <input type="date" id="dateFilterStart" class="form-input">
+                            </div>
+                            <div class="filter-group">
+                                <label for="dateFilterEnd">A:</label>
+                                <input type="date" id="dateFilterEnd" class="form-input">
+                            </div>
+                            <div class="filter-group">
+                                <label for="sortFilter">Ordina:</label>
+                                <select id="sortFilter" class="form-select">
+                                    <option value="date-desc">Data (Recenti)</option>
+                                    <option value="date-asc">Data (Meno recenti)</option>
+                                    <option value="profit-desc">Profitto (Alto-Basso)</option>
+                                    <option value="profit-asc">Profitto (Basso-Alto)</option>
+                                </select>
+                            </div>
+                            <div class="filter-actions">
+                                <button id="resetFilters" class="btn btn-sm btn-outline">Reset</button>
+                            </div>
                         </div>
+
+                        <div class="table-container">
+                            <table class="history-table">
+                                <thead>
+                                    <tr>
+                                        <th>Data</th>
+                                        <th>Coppia</th>
+                                        <th>Network</th>
+                                        <th>Profitto</th>
+                                        <th>Gas</th>
+                                        <th>Stato</th>
+                                        <th>Azioni</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="historyList">
+                                    <!-- Lo storico verrà inserito qui dinamicamente -->
+                                </tbody>
+                            </table>
+                        </div>
+                        
                         <div id="noHistory" class="no-data">
                             <div class="no-data-icon">📜</div>
                             <div class="no-data-text">Nessuna transazione</div>

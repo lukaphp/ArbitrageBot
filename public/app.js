@@ -8,6 +8,7 @@ class ArbitrageBotApp {
         this.isConnected = false;
         this.autoRefresh = true;
         this.refreshInterval = null;
+        this.fullHistory = []; // Cache per storico completo
         
         this.init();
     }
@@ -110,6 +111,26 @@ class ArbitrageBotApp {
         });
         
         // History
+        // History Filters
+        const filterElements = ['dateFilterStart', 'dateFilterEnd', 'sortFilter'];
+        filterElements.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('change', () => this.filterAndDisplayHistory());
+            }
+        });
+
+        const resetFiltersBtn = document.getElementById('resetFilters');
+        if (resetFiltersBtn) {
+            resetFiltersBtn.addEventListener('click', () => {
+                document.getElementById('dateFilterStart').value = '';
+                document.getElementById('dateFilterEnd').value = '';
+                document.getElementById('sortFilter').value = 'date-desc';
+                this.filterAndDisplayHistory();
+            });
+        }
+        
+        // Clear History
         document.getElementById('clearHistory').addEventListener('click', () => {
             this.clearHistory();
         });
@@ -442,10 +463,14 @@ class ArbitrageBotApp {
         const profitPercentage = opportunity.profitPercentage || ((profit / (opportunity.optimalAmount || opportunity.inputAmount || 1)) * 100) || 0;
         const gasCost = opportunity.gasCosts?.totalGasCost || opportunity.estimatedGas || 'N/A';
         const confidence = opportunity.confidence || 'N/A';
+        const isSimulated = opportunity.isMock || false;
         
         div.innerHTML = `
             <div class="opportunity-header">
-                <div class="opportunity-pair">${token}</div>
+                <div class="opportunity-pair">
+                    ${token}
+                    ${isSimulated ? '<span class="badge badge-sim">SIM</span>' : ''}
+                </div>
                 <div class="opportunity-profit">+${profitPercentage.toFixed(2)}%</div>
             </div>
             <div class="opportunity-details">
@@ -687,11 +712,15 @@ class ArbitrageBotApp {
                         </div>
                     `;
                     
+                    const actualProfit = result.data.actualProfit || 0;
+                    const profitClass = actualProfit < 0 ? 'negative' : 'positive';
+                    const profitSymbol = actualProfit > 0 ? '+' : '';
+                    
                     resultDiv.innerHTML = `
                         ✅ <strong>Simulazione Completata!</strong><br>
                         ${steps}
                         <div class="final-profit">
-                            Profitto Netto: <strong>${result.data.actualProfit ? result.data.actualProfit.toFixed(6) : '0.000'} ETH</strong>
+                            Profitto Netto: <strong class="${profitClass}">${profitSymbol}${actualProfit.toFixed(6)} ETH</strong>
                         </div>
                     `;
                 }
@@ -787,11 +816,15 @@ class ArbitrageBotApp {
         const change = priceData.change || 0;
         const changeClass = change >= 0 ? 'positive' : 'negative';
         const changeSymbol = change >= 0 ? '+' : '';
+        const isMock = priceData.source === 'mock-testnet';
         
         div.innerHTML = `
             <div class="price-header">
                 <div class="price-token">${token}</div>
-                <div class="price-dex">${dex}</div>
+                <div class="price-dex">
+                    ${dex}
+                    ${isMock ? '<span class="badge badge-sim" style="font-size: 0.6em; padding: 1px 3px; margin-left: 3px;">SIM</span>' : ''}
+                </div>
             </div>
             <div class="price-value">$${price.toFixed(6)}</div>
             <div class="price-change ${changeClass}">
@@ -805,7 +838,8 @@ class ArbitrageBotApp {
     async refreshHistory() {
         let serverHistory = [];
         try {
-            const response = await fetch('/api/history');
+            // Richiedi tutto lo storico (limit=all)
+            const response = await fetch('/api/history?limit=all');
             const data = await response.json();
             if (data.success && Array.isArray(data.data)) {
                 serverHistory = data.data;
@@ -833,12 +867,52 @@ class ArbitrageBotApp {
             }
         });
         
-        const combinedHistory = Array.from(combinedMap.values());
+        this.fullHistory = Array.from(combinedMap.values());
         
-        // Ordina per data decrescente
-        combinedHistory.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        // Applica filtri e visualizza
+        this.filterAndDisplayHistory();
+    }
+
+    filterAndDisplayHistory() {
+        if (!this.fullHistory) return;
+
+        let filtered = [...this.fullHistory];
         
-        this.displayHistory(combinedHistory);
+        // Filtri Date
+        const startDateVal = document.getElementById('dateFilterStart')?.value;
+        const endDateVal = document.getElementById('dateFilterEnd')?.value;
+        
+        if (startDateVal) {
+            const start = new Date(startDateVal);
+            start.setHours(0, 0, 0, 0);
+            filtered = filtered.filter(tx => new Date(tx.timestamp) >= start);
+        }
+        
+        if (endDateVal) {
+            const end = new Date(endDateVal);
+            end.setHours(23, 59, 59, 999);
+            filtered = filtered.filter(tx => new Date(tx.timestamp) <= end);
+        }
+        
+        // Ordinamento
+        const sortVal = document.getElementById('sortFilter')?.value || 'date-desc';
+        
+        filtered.sort((a, b) => {
+            const dateA = new Date(a.timestamp);
+            const dateB = new Date(b.timestamp);
+            const profitA = a.profit || 0;
+            const profitB = b.profit || 0;
+            
+            switch (sortVal) {
+                case 'date-desc': return dateB - dateA;
+                case 'date-asc': return dateA - dateB;
+                case 'profit-desc': return profitB - profitA;
+                case 'profit-asc': return profitA - profitB;
+                default: return dateB - dateA;
+            }
+        });
+        
+        this.displayHistory(filtered);
     }
 
     getLocalHistory() {
@@ -861,8 +935,8 @@ class ArbitrageBotApp {
                 status: 'success' // Assumiamo successo se arriviamo qui
             });
             
-            // Mantieni solo ultimi 50
-            const trimmed = history.slice(0, 50);
+            // Mantieni solo ultime 1000
+            const trimmed = history.slice(0, 1000);
             localStorage.setItem('arbitrage_history', JSON.stringify(trimmed));
             
             // Aggiorna UI
@@ -877,64 +951,68 @@ class ArbitrageBotApp {
         const noHistory = document.getElementById('noHistory');
         
         if (!Array.isArray(history) || history.length === 0) {
-            if (container) container.classList.add('hidden');
+            // Se non ci sono dati, nascondi la tabella (il container) e mostra il messaggio vuoto
+            const tableContainer = document.querySelector('.table-container');
+            if (tableContainer) tableContainer.classList.add('hidden');
             if (noHistory) noHistory.classList.remove('hidden');
             return;
         }
         
+        // Altrimenti mostra la tabella
+        const tableContainer = document.querySelector('.table-container');
+        if (tableContainer) tableContainer.classList.remove('hidden');
+        if (noHistory) noHistory.classList.add('hidden');
+        
         if (container) {
-            container.classList.remove('hidden');
             container.innerHTML = '';
             
             history.forEach(tx => {
-                const historyElement = this.createHistoryElement(tx);
-                container.appendChild(historyElement);
+                const historyRow = this.createHistoryElement(tx);
+                container.appendChild(historyRow);
             });
         }
-        
-        if (noHistory) noHistory.classList.add('hidden');
     }
 
-    createHistoryElement(transaction) {
-        const div = document.createElement('div');
-        div.className = `history-item ${transaction.status}`;
+    createHistoryElement(tx) {
+        const tr = document.createElement('tr');
         
-        const date = new Date(transaction.timestamp).toLocaleString('it-IT');
-        const isSimulated = transaction.simulated || transaction.txHash.startsWith('0x0000');
+        const date = new Date(tx.timestamp).toLocaleString();
         
-        div.innerHTML = `
-            <div class="history-header">
-                <div class="history-pair">${transaction.pair}</div>
-                <div class="history-status ${transaction.status}">${transaction.status}</div>
-            </div>
-            <div class="history-details">
-                <div class="detail">
-                    <span class="label">Data:</span>
-                    <span class="value">${date}</span>
-                </div>
-                <div class="detail">
-                    <span class="label">Profitto:</span>
-                    <span class="value">${transaction.profit?.toFixed(6) || 'N/A'} ETH</span>
-                </div>
-                <div class="detail">
-                    <span class="label">Gas:</span>
-                    <span class="value">${transaction.gasUsed || 'N/A'}</span>
-                </div>
-                ${transaction.txHash ? `
-                <div class="detail">
-                    <span class="label">TX Hash:</span>
-                    <span class="value">
-                        <a href="#" onclick="app.viewTransaction('${transaction.txHash}', ${isSimulated})">
-                            ${transaction.txHash.slice(0, 10)}...
-                        </a>
-                        ${isSimulated ? '<span title="Transazione Simulata (Testnet)" style="font-size: 0.7em; background: #444; padding: 2px 4px; border-radius: 4px; margin-left: 5px;">SIM</span>' : ''}
-                    </span>
-                </div>
-                ` : ''}
-            </div>
+        // Normalizzazione dati
+        const profit = tx.actualProfit || tx.profit || 0;
+        const profitClass = profit >= 0 ? 'profit-positive' : 'profit-negative';
+        const profitSign = profit >= 0 ? '+' : '';
+        const pair = tx.opportunity ? tx.opportunity.pair : (tx.pair || 'N/A');
+        
+        // Gestione Gas
+        let gasDisplay = 'N/A';
+        if (tx.gasUsed) {
+            gasDisplay = `${tx.gasUsed}`;
+        }
+        
+        // Link Explorer
+        let hashDisplay = tx.txHash ? `${tx.txHash.substring(0, 6)}...${tx.txHash.substring(62)}` : 'Pending';
+        if (tx.txHash && tx.txHash !== '0x' + '0'.repeat(64) && !tx.txHash.startsWith('0x0000')) {
+             // Goerli Explorer (assumendo Goerli per testnet)
+             hashDisplay = `<a href="https://goerli.etherscan.io/tx/${tx.txHash}" target="_blank" title="Vedi su Etherscan">${hashDisplay} ↗</a>`;
+        } else if (tx.simulated) {
+             hashDisplay = `<span title="Simulazione">🧪 SIM</span>`;
+        }
+
+        const statusClass = tx.status === 'success' || tx.success ? 'success' : 'failed';
+        const statusLabel = tx.status === 'success' || tx.success ? 'Completato' : 'Fallito';
+
+        tr.innerHTML = `
+            <td>${date}</td>
+            <td><strong>${pair}</strong></td>
+            <td>Goerli</td>
+            <td class="${profitClass}">${profitSign}${parseFloat(profit).toFixed(6)} ETH</td>
+            <td>${gasDisplay}</td>
+            <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
+            <td>${hashDisplay}</td>
         `;
         
-        return div;
+        return tr;
     }
 
     updateStats(stats) {
@@ -946,7 +1024,23 @@ class ArbitrageBotApp {
             
             if (totalOpportunitiesEl) totalOpportunitiesEl.textContent = stats.totalOpportunities || 0;
             if (executedTradesEl) executedTradesEl.textContent = stats.executedTrades || 0;
-            if (totalProfitEl) totalProfitEl.textContent = (stats.totalProfit || 0).toFixed(6);
+            
+            if (totalProfitEl) {
+                const profit = stats.totalProfit || 0;
+                totalProfitEl.textContent = profit.toFixed(6);
+                
+                // Colora il profitto totale
+                if (profit < 0) {
+                    totalProfitEl.classList.add('negative');
+                    totalProfitEl.classList.remove('positive');
+                } else if (profit > 0) {
+                    totalProfitEl.classList.add('positive');
+                    totalProfitEl.classList.remove('negative');
+                } else {
+                    totalProfitEl.classList.remove('positive', 'negative');
+                }
+            }
+            
             if (successRateEl) successRateEl.textContent = `${stats.successRate || 0}%`;
         }
     }
@@ -1015,19 +1109,19 @@ class ArbitrageBotApp {
         }
     }
 
-    viewTransaction(txHash, isSimulated = false) {
+    viewTransaction(txHash, isSimulated = false, network = 'ethereum') {
         if (isSimulated || txHash.startsWith('0x0000')) {
             this.showToast('ℹ️ Transazione simulata (Testnet Mode)', 'info');
             return;
         }
 
-        // Apri explorer della transazione
-        const network = document.getElementById('networkSelect').value;
+        // Usa il network della transazione, o quello selezionato come fallback
+        const targetNetwork = network || document.getElementById('networkSelect').value;
         let explorerUrl;
         
-        switch (network) {
+        switch (targetNetwork) {
             case 'ethereum':
-                explorerUrl = `https://goerli.etherscan.io/tx/${txHash}`;
+                explorerUrl = `https://sepolia.etherscan.io/tx/${txHash}`;
                 break;
             case 'bsc':
                 explorerUrl = `https://testnet.bscscan.com/tx/${txHash}`;
@@ -1036,7 +1130,7 @@ class ArbitrageBotApp {
                 explorerUrl = `https://amoy.polygonscan.com/tx/${txHash}`;
                 break;
             default:
-                explorerUrl = `#`;
+                explorerUrl = `https://sepolia.etherscan.io/tx/${txHash}`;
         }
         
         window.open(explorerUrl, '_blank');

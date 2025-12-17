@@ -166,12 +166,14 @@ class ArbitrageBotServer {
     this.app.get('/api/stats', async (req, res) => {
       try {
         const stats = arbitrageAnalyzer.getStats();
+        const execStats = transactionExecutor.getExecutionStats();
+        
         const enhancedStats = {
           totalOpportunities: stats.totalOpportunities || 0,
           recentOpportunities: stats.recentOpportunities || 0,
-          executedTrades: stats.dailyTransactions || 0,
-          totalProfit: 0, // TODO: Implementare tracking profitti
-          successRate: stats.dailyTransactions > 0 ? 95 : 0, // Mock success rate
+          executedTrades: execStats.totalExecutions || 0,
+          totalProfit: execStats.totalProfit24h || 0,
+          successRate: execStats.successRate || 0,
           isRunning: stats.isRunning,
           dailyLimit: stats.dailyLimit
         };
@@ -339,8 +341,10 @@ class ArbitrageBotServer {
     // API Storico
     this.app.get('/api/history', async (req, res) => {
       try {
-        const { limit = 50 } = req.query;
-        const history = transactionExecutor.getRecentExecutions(parseInt(limit));
+        const { limit = 100 } = req.query;
+        // Se limit è 'all', restituisce tutto (fino al limite interno del transactionExecutor)
+        const limitVal = limit === 'all' ? 1000 : parseInt(limit);
+        const history = transactionExecutor.getRecentExecutions(limitVal);
         res.json({ success: true, data: history });
       } catch (error) {
         logger.error('Errore API history:', error);
@@ -500,12 +504,14 @@ class ArbitrageBotServer {
       if (this.connectedClients.size > 0) {
         try {
           const stats = arbitrageAnalyzer.getStats();
+          const execStats = transactionExecutor.getExecutionStats();
+          
           const enhancedStats = {
             totalOpportunities: stats.totalOpportunities || 0,
             recentOpportunities: stats.recentOpportunities || 0,
-            executedTrades: stats.dailyTransactions || 0,
-            totalProfit: 0,
-            successRate: stats.dailyTransactions > 0 ? 95 : 0,
+            executedTrades: execStats.totalExecutions || 0,
+            totalProfit: execStats.totalProfit24h || 0,
+            successRate: execStats.successRate || 0,
             isRunning: stats.isRunning,
             dailyLimit: stats.dailyLimit
           };

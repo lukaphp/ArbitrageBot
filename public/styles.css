@@ -306,6 +306,14 @@ body {
     line-height: 1;
 }
 
+.stat-value.negative {
+    color: #e53e3e;
+}
+
+.stat-value.positive {
+    color: #48bb78;
+}
+
 .stat-label {
     font-size: 0.875rem;
     color: #718096;
@@ -418,6 +426,24 @@ body {
     border-radius: 4px;
 }
 
+.badge {
+    display: inline-block;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7em;
+    font-weight: 600;
+    line-height: 1;
+    text-align: center;
+    white-space: nowrap;
+    vertical-align: baseline;
+    margin-left: 0.5rem;
+}
+
+.badge-sim {
+    color: #fff;
+    background-color: #718096;
+}
+
 .price-value {
     font-size: 1.25rem;
     font-weight: 700;
@@ -440,57 +466,135 @@ body {
 }
 
 /* History */
-.history-list {
+
+/* Filters */
+.history-filters {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    margin-bottom: 1.5rem;
+    padding: 1rem;
+    background: #f8fafc;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+}
+
+.filter-group {
     display: flex;
     flex-direction: column;
-    gap: 1rem;
-    max-height: 400px;
-    overflow-y: auto;
+    gap: 0.25rem;
 }
 
-.history-item {
-    background: #f7fafc;
+.filter-group label {
+    font-size: 0.85rem;
+    color: #4a5568;
+    font-weight: 500;
+}
+
+.form-input, .form-select {
+    padding: 0.5rem;
+    border: 1px solid #cbd5e0;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    color: #2d3748;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.form-input:focus, .form-select:focus {
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.btn-sm {
+    padding: 0.4rem 0.8rem;
+    font-size: 0.85rem;
+}
+
+/* History Table */
+.table-container {
+    overflow-x: auto;
     border-radius: 8px;
+    border: 1px solid #e2e8f0;
+}
+
+.history-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    background: white;
+}
+
+.history-table th,
+.history-table td {
     padding: 1rem;
-    border-left: 4px solid #667eea;
+    text-align: left;
+    border-bottom: 1px solid #e2e8f0;
 }
 
-.history-item.success {
-    border-left-color: #48bb78;
+.history-table th {
+    background: #f7fafc;
+    font-weight: 600;
+    color: #4a5568;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
 }
 
-.history-item.failed {
-    border-left-color: #e53e3e;
+.history-table tr:last-child td {
+    border-bottom: none;
 }
 
-.history-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.5rem;
+.history-table tr:hover {
+    background: #f8fafc;
 }
 
-.history-status {
-    padding: 0.25rem 0.75rem;
-    border-radius: 12px;
+.history-table .profit-positive {
+    color: #48bb78;
+    font-weight: 600;
+}
+
+.history-table .profit-negative {
+    color: #e53e3e;
+    font-weight: 600;
+}
+
+.status-badge {
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
     font-size: 0.75rem;
     font-weight: 600;
     text-transform: uppercase;
 }
 
-.history-status.success {
-    background: #c6f6d5;
-    color: #22543d;
+.status-badge.success {
+    background: #def7ec;
+    color: #03543f;
 }
 
-.history-status.failed {
-    background: #fed7d7;
-    color: #742a2a;
+.status-badge.failed {
+    background: #fde8e8;
+    color: #9b1c1c;
 }
 
-.history-status.pending {
-    background: #fef5e7;
-    color: #744210;
+.btn-icon {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1.1rem;
+    padding: 0.25rem;
+    border-radius: 4px;
+    transition: background 0.2s;
+}
+
+.btn-icon:hover {
+    background: #edf2f7;
+}
+
+/* History List - Deprecated / Fallback if needed */
+.history-list {
+    /* Removed old styles */
 }
 
 /* Loading & No Data */
@@ -540,7 +644,31 @@ body {
     opacity: 0.8;
 }
 
-/* Modals */
+/* Network Tag */
+.network-tag {
+    font-size: 0.7em;
+    background: #e2e8f0;
+    color: #4a5568;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 8px;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+/* Badge SIM */
+.badge-sim {
+    background: #4a5568;
+    color: white;
+    font-size: 0.65em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    vertical-align: middle;
+    display: inline-block;
+}
+
+/* Modal */
 .modal {
     position: fixed;
     top: 0;

@@ -540,7 +540,8 @@ class ArbitrageAnalyzer {
           },
           slippageCost: slippageCost,
           timestamp: timestamp + i * 1000, // Spread timestamps
-          confidence: Math.floor(Math.random() * 20) + 75 // 75-95% confidence
+          confidence: Math.floor(Math.random() * 20) + 75, // 75-95% confidence
+          isMock: true // Flag per indicare dati simulati
         });
       }
     }

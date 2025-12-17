@@ -82,11 +82,24 @@ class TransactionExecutor {
         // Modalità simulazione - non esegue transazioni reali
         logger.info('🧪 Modalità testnet: simulando esecuzione arbitraggio...');
         
+        const gasUsed = 300000 + Math.floor(Math.random() * 50000); // Gas simulato variabile
+        
+        // Usa la stessa logica di calcolo profitto della produzione per coerenza
+        const confirmation = {
+            gasUsed,
+            status: 1
+        };
+        
+        const actualProfit = await this.calculateActualProfit(opportunity, confirmation);
+        
+        // Genera un hash univoco casuale per evitare collisioni nello storico
+        const randomHash = Array.from({length: 64}, () => Math.floor(Math.random() * 16).toString(16)).join('');
+
         const simulatedResult = {
           success: true,
-          txHash: `0x${'0'.repeat(64)}`, // Hash fittizio
-          actualProfit: opportunity.profitPercentage * opportunity.optimalAmount / 100,
-          gasUsed: 300000, // Gas simulato
+          txHash: `0x${randomHash}`, 
+          actualProfit,
+          gasUsed, 
           opportunity,
           simulated: true
         };
@@ -401,11 +414,26 @@ class TransactionExecutor {
       BigInt(confirmation.gasUsed) * ethers.parseUnits('20', 'gwei')
     ));
     
-    // Simula profitto reale (90-95% della stima)
-    const efficiency = 0.9 + Math.random() * 0.05;
+    // Simula profitto reale con possibilità di perdita
+    // Introduciamo maggiore volatilità per simulare slippage elevato o front-running
+    let efficiency;
+    const randomScenario = Math.random();
+    
+    if (randomScenario < 0.1) {
+        // 10% di probabilità di "bad trade" (slippage alto o ritardo)
+        efficiency = Math.random() * 0.5; // 0% - 50% del profitto atteso
+    } else if (randomScenario < 0.3) {
+        // 20% di probabilità di efficienza ridotta
+        efficiency = 0.5 + Math.random() * 0.3; // 50% - 80%
+    } else {
+        // 70% di probabilità di esecuzione normale
+        efficiency = 0.8 + Math.random() * 0.3; // 80% - 110%
+    }
+
     const actualProfit = (estimatedProfit * efficiency) - actualGasCost;
     
-    return Math.max(0, actualProfit);
+    // Rimuoviamo il limite a 0 per permettere perdite
+    return actualProfit;
   }
   
   /**
@@ -447,9 +475,9 @@ class TransactionExecutor {
     
     this.executionHistory.push(execution);
     
-    // Mantieni solo ultime 100 esecuzioni
-    if (this.executionHistory.length > 100) {
-      this.executionHistory = this.executionHistory.slice(-100);
+    // Mantieni solo ultime 1000 esecuzioni
+    if (this.executionHistory.length > 1000) {
+      this.executionHistory = this.executionHistory.slice(-1000);
     }
   }
   
@@ -512,21 +540,26 @@ class TransactionExecutor {
     return this.executionHistory
       .slice(-limit)
       .reverse()
-      .map(exec => ({
-        id: exec.id,
-        timestamp: exec.timestamp,
-        pair: `${exec.opportunity.token} (${exec.opportunity.fromDex} → ${exec.opportunity.toDex})`,
-        token: exec.opportunity.token,
-        network: exec.opportunity.network,
-        profitPercentage: exec.opportunity.profitPercentage,
-        profit: exec.actualProfit, // Mapped for UI
-        actualProfit: exec.actualProfit,
-        gasUsed: exec.result.gasUsed,
-        status: exec.success ? 'success' : 'failed', // Mapped for UI
-        success: exec.success,
-        simulated: exec.result.simulated || false,
-        txHash: exec.result.txHash
-      }));
+      .map(exec => {
+        const opp = exec.opportunity || {};
+        const res = exec.result || {};
+        
+        return {
+          id: exec.id,
+          timestamp: exec.timestamp,
+          pair: opp.token ? `${opp.token} (${opp.fromDex} → ${opp.toDex})` : 'Coppia sconosciuta',
+          token: opp.token || 'Unknown',
+          network: opp.network || 'ethereum',
+          profitPercentage: opp.profitPercentage || 0,
+          profit: exec.actualProfit, // Mapped for UI
+          actualProfit: exec.actualProfit,
+          gasUsed: res.gasUsed || 0,
+          status: exec.success ? 'success' : 'failed', // Mapped for UI
+          success: exec.success,
+          simulated: res.simulated || false,
+          txHash: res.txHash || '0x0000000000000000000000000000000000000000'
+        };
+      });
   }
 }
 

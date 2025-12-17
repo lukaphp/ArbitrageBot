@@ -515,11 +515,16 @@ class TransactionExecutor {
       .map(exec => ({
         id: exec.id,
         timestamp: exec.timestamp,
+        pair: `${exec.opportunity.token} (${exec.opportunity.fromDex} → ${exec.opportunity.toDex})`,
         token: exec.opportunity.token,
         network: exec.opportunity.network,
         profitPercentage: exec.opportunity.profitPercentage,
+        profit: exec.actualProfit, // Mapped for UI
         actualProfit: exec.actualProfit,
+        gasUsed: exec.result.gasUsed,
+        status: exec.success ? 'success' : 'failed', // Mapped for UI
         success: exec.success,
+        simulated: exec.result.simulated || false,
         txHash: exec.result.txHash
       }));
   }

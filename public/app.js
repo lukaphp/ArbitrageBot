@@ -575,15 +575,13 @@ class ArbitrageBotApp {
         const modal = document.getElementById('executeModal');
         const detailsDiv = document.getElementById('executeDetails');
         
-        // CLEANUP: Rimuovi eventuali pulsanti statici residui (fix per cache/doppi pulsanti)
-        // 1. Rimuovi pulsanti vecchi specifici per ID
+        // CLEANUP: Rimuovi eventuali pulsanti statici residui
         const oldBtn = document.getElementById('confirmExecute');
         if (oldBtn) {
             const container = oldBtn.closest('.modal-actions');
             if (container) container.remove();
         }
 
-        // 2. Cerca elementi .modal-actions che sono figli diretti di .modal-body
         if (modal) {
             const modalBody = modal.querySelector('.modal-body');
             if (modalBody) {
@@ -622,26 +620,46 @@ class ArbitrageBotApp {
                     ⚠️ <strong>Attenzione:</strong> Questa è una transazione reale su testnet.
                     Verifica tutti i dettagli prima di procedere.
                 </div>
+                <div id="executionResult" class="execution-result hidden"></div>
             </div>
             <div class="modal-actions">
                 <button class="btn btn-primary" id="confirmExecuteBtn">Conferma Esecuzione</button>
-                <button class="btn btn-outline" onclick="app.closeModal('executeModal')">Annulla</button>
+                <button class="btn btn-outline" id="cancelExecuteBtn" onclick="app.closeModal('executeModal')">Annulla</button>
             </div>
         `;
         
         // Bind click event for confirm button
         const confirmBtn = document.getElementById('confirmExecuteBtn');
         if (confirmBtn) {
-            confirmBtn.onclick = () => this.confirmExecution(opportunity);
+            confirmBtn.onclick = () => this.confirmExecution(opportunity.id);
         }
         
         this.showModal('executeModal');
     }
 
     async confirmExecution(opportunityId) {
+        const confirmBtn = document.getElementById('confirmExecuteBtn');
+        const cancelBtn = document.getElementById('cancelExecuteBtn');
+        const resultDiv = document.getElementById('executionResult');
+        
+        if (confirmBtn) {
+            confirmBtn.disabled = true;
+            confirmBtn.innerHTML = '<span class="spinner-small"></span> Esecuzione in corso...';
+        }
+        if (cancelBtn) {
+            cancelBtn.disabled = true;
+        }
+        
+        // Mostra messaggio di stato
+        if (resultDiv) {
+            resultDiv.className = 'execution-result info';
+            resultDiv.innerHTML = '🔄 Simulazione transazione in corso...';
+            resultDiv.classList.remove('hidden');
+        }
+
         try {
-            this.closeModal('executeModal');
-            this.showToast('Esecuzione in corso...', 'info');
+            // this.closeModal('executeModal'); // NON chiudere subito
+            // this.showToast('Esecuzione in corso...', 'info');
             
             const response = await fetch(`/api/execute/${opportunityId}`, {
                 method: 'POST',
@@ -656,19 +674,65 @@ class ArbitrageBotApp {
             const result = await response.json();
             
             if (result.success) {
+                // Successo UI nel modale
+                if (resultDiv) {
+                    resultDiv.className = 'execution-result success';
+                    
+                    const opp = result.data.opportunity || {};
+                    const steps = `
+                        <div class="execution-steps">
+                            <div class="step">1. 🛒 Compra ${opp.optimalAmount ? opp.optimalAmount.toFixed(4) : '0.00'} ${opp.token || 'TOKEN'} su <strong>${opp.fromDex || 'DEX A'}</strong></div>
+                            <div class="step">2. 💰 Vendi su <strong>${opp.toDex || 'DEX B'}</strong></div>
+                            <div class="step">3. ⛽ Gas Utilizzato: ~${result.data.gasUsed || 0} Gwei</div>
+                        </div>
+                    `;
+                    
+                    resultDiv.innerHTML = `
+                        ✅ <strong>Simulazione Completata!</strong><br>
+                        ${steps}
+                        <div class="final-profit">
+                            Profitto Netto: <strong>${result.data.actualProfit ? result.data.actualProfit.toFixed(6) : '0.000'} ETH</strong>
+                        </div>
+                    `;
+                }
+                
+                if (confirmBtn) {
+                    confirmBtn.innerHTML = '✅ Completato';
+                    confirmBtn.classList.remove('btn-primary');
+                    confirmBtn.classList.add('btn-success');
+                }
+                
                 this.showToast('Transazione inviata con successo!', 'success');
-                // Aggiorna le statistiche e lo storico
+                
+                // Aggiorna le statistiche e lo storico dopo breve attesa
                 setTimeout(() => {
+                    this.closeModal('executeModal');
                     this.refreshHistory();
                     this.loadInitialData();
-                }, 2000);
+                }, 4000); // Aumentato tempo lettura
             } else {
-                this.showToast(`Esecuzione fallita: ${result.error}`, 'error');
+                throw new Error(result.error || 'Errore sconosciuto');
             }
             
         } catch (error) {
             console.error('Errore esecuzione:', error);
+            
+            // Errore UI nel modale
+            if (resultDiv) {
+                resultDiv.className = 'execution-result error';
+                resultDiv.innerHTML = `❌ Errore: ${error.message}`;
+            }
+            
             this.showToast('Errore durante l\'esecuzione', 'error');
+            
+            // Riabilita pulsanti
+            if (confirmBtn) {
+                confirmBtn.disabled = false;
+                confirmBtn.innerHTML = 'Riprova';
+            }
+            if (cancelBtn) {
+                cancelBtn.disabled = false;
+            }
         }
     }
 
@@ -836,6 +900,7 @@ class ArbitrageBotApp {
         div.className = `history-item ${transaction.status}`;
         
         const date = new Date(transaction.timestamp).toLocaleString('it-IT');
+        const isSimulated = transaction.simulated || transaction.txHash.startsWith('0x0000');
         
         div.innerHTML = `
             <div class="history-header">
@@ -859,9 +924,10 @@ class ArbitrageBotApp {
                 <div class="detail">
                     <span class="label">TX Hash:</span>
                     <span class="value">
-                        <a href="#" onclick="app.viewTransaction('${transaction.txHash}')">
+                        <a href="#" onclick="app.viewTransaction('${transaction.txHash}', ${isSimulated})">
                             ${transaction.txHash.slice(0, 10)}...
                         </a>
+                        ${isSimulated ? '<span title="Transazione Simulata (Testnet)" style="font-size: 0.7em; background: #444; padding: 2px 4px; border-radius: 4px; margin-left: 5px;">SIM</span>' : ''}
                     </span>
                 </div>
                 ` : ''}
@@ -949,7 +1015,12 @@ class ArbitrageBotApp {
         }
     }
 
-    viewTransaction(txHash) {
+    viewTransaction(txHash, isSimulated = false) {
+        if (isSimulated || txHash.startsWith('0x0000')) {
+            this.showToast('ℹ️ Transazione simulata (Testnet Mode)', 'info');
+            return;
+        }
+
         // Apri explorer della transazione
         const network = document.getElementById('networkSelect').value;
         let explorerUrl;

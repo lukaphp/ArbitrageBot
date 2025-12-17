@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "name": "arbitrage-bot-testnet",
   "routes": [
     {
       "src": "/api/(.*)",
@@ -17,8 +16,5 @@
   ],
   "env": {
     "NODE_ENV": "production"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }

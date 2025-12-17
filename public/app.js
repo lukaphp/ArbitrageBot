@@ -129,13 +129,24 @@ class ArbitrageBotApp {
         });
     }
 
-    checkMetaMaskAvailability(retries = 3) {
+    async checkMetaMaskAvailability(retries = 3) {
         console.log(`🔍 Debug - Checking MetaMask availability (attempt ${4-retries}/3)...`);
         
         if (typeof window.ethereum !== 'undefined') {
             console.log('🦊 MetaMask rilevato');
             this.provider = new ethers.providers.Web3Provider(window.ethereum);
             document.getElementById('connectWallet').disabled = false;
+            
+            // Tenta riconnessione automatica se già autorizzato
+            try {
+                const accounts = await this.provider.listAccounts();
+                if (accounts.length > 0) {
+                    console.log('🔄 Riconnessione automatica...');
+                    this.connectWallet();
+                }
+            } catch (err) {
+                console.warn('Errore verifica account:', err);
+            }
         } else if (retries > 0) {
             console.log('⏳ MetaMask non ancora disponibile, riprovo tra 1s...');
             setTimeout(() => this.checkMetaMaskAvailability(retries - 1), 1000);
@@ -527,6 +538,39 @@ class ArbitrageBotApp {
         }
     }
 
+    async confirmExecution(opportunity) {
+        try {
+            this.showToast('Esecuzione in corso...', 'info');
+            
+            const response = await fetch('/api/execute', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    opportunityId: opportunity.id,
+                    mode: 'production' // O 'simulation' based on config
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                this.showToast('Esecuzione completata con successo!', 'success');
+                this.closeModal('executeModal');
+                
+                // Salva nello storico locale per persistenza su Vercel
+                if (result.data) {
+                    this.saveTransactionLocally(result.data);
+                }
+            } else {
+                this.showToast(`Esecuzione fallita: ${result.error}`, 'error');
+            }
+            
+        } catch (error) {
+            console.error('Errore esecuzione:', error);
+            this.showToast('Errore durante l\'esecuzione', 'error');
+        }
+    }
+
     showExecuteModal(opportunity) {
         const modal = document.getElementById('executeModal');
         const detailsDiv = document.getElementById('executeDetails');
@@ -549,22 +593,28 @@ class ArbitrageBotApp {
                 </div>
                 <div class="detail">
                     <span class="label">Profitto Stimato:</span>
-                    <span class="value">${profit.toFixed(6)} ETH (+${profitPercentage}%)</span>
+                    <span class="value">${profit.toFixed(6)} ETH (${profitPercentage}%)</span>
                 </div>
                 <div class="detail">
                     <span class="label">Gas Stimato:</span>
                     <span class="value">${gasDisplay}</span>
                 </div>
-                <div class="warning">
-                    ⚠️ <strong>Attenzione:</strong> Questa è una transazione reale su testnet. 
+                <div class="warning-box">
+                    ⚠️ <strong>Attenzione:</strong> Questa è una transazione reale su testnet.
                     Verifica tutti i dettagli prima di procedere.
                 </div>
             </div>
+            <div class="modal-actions">
+                <button class="btn btn-primary" id="confirmExecuteBtn">Conferma Esecuzione</button>
+                <button class="btn btn-outline" onclick="app.closeModal('executeModal')">Annulla</button>
+            </div>
         `;
         
-        document.getElementById('confirmExecute').onclick = () => {
-            this.confirmExecution(opportunity.id);
-        };
+        // Bind click event for confirm button
+        const confirmBtn = document.getElementById('confirmExecuteBtn');
+        if (confirmBtn) {
+            confirmBtn.onclick = () => this.confirmExecution(opportunity);
+        }
         
         this.showModal('executeModal');
     }
@@ -661,14 +711,72 @@ class ArbitrageBotApp {
     }
 
     async refreshHistory() {
+        let serverHistory = [];
         try {
             const response = await fetch('/api/history');
-            const history = await response.json();
-            
-            this.displayHistory(history);
-            
+            const data = await response.json();
+            if (data.success && Array.isArray(data.data)) {
+                serverHistory = data.data;
+            }
         } catch (error) {
-            console.error('Errore refresh storico:', error);
+            console.error('Errore refresh storico server:', error);
+        }
+
+        // Recupera storico locale (persistente su Vercel/refresh)
+        const localHistory = this.getLocalHistory();
+        
+        // Unisci gli storici rimuovendo duplicati (basato su txHash)
+        const combinedMap = new Map();
+        
+        // Aggiungi prima lo storico server (più affidabile per status)
+        serverHistory.forEach(tx => {
+            if (tx.txHash) combinedMap.set(tx.txHash, tx);
+            else combinedMap.set(JSON.stringify(tx), tx); // Fallback per tx senza hash
+        });
+        
+        // Aggiungi locale se non esiste (o aggiorna se necessario)
+        localHistory.forEach(tx => {
+            if (tx.txHash && !combinedMap.has(tx.txHash)) {
+                combinedMap.set(tx.txHash, tx);
+            }
+        });
+        
+        const combinedHistory = Array.from(combinedMap.values());
+        
+        // Ordina per data decrescente
+        combinedHistory.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        
+        this.displayHistory(combinedHistory);
+    }
+
+    getLocalHistory() {
+        try {
+            const stored = localStorage.getItem('arbitrage_history');
+            return stored ? JSON.parse(stored) : [];
+        } catch (e) {
+            console.error('Errore lettura history locale:', e);
+            return [];
+        }
+    }
+
+    saveTransactionLocally(transaction) {
+        try {
+            const history = this.getLocalHistory();
+            // Aggiungi in cima
+            history.unshift({
+                ...transaction,
+                timestamp: new Date().toISOString(),
+                status: 'success' // Assumiamo successo se arriviamo qui
+            });
+            
+            // Mantieni solo ultimi 50
+            const trimmed = history.slice(0, 50);
+            localStorage.setItem('arbitrage_history', JSON.stringify(trimmed));
+            
+            // Aggiorna UI
+            this.refreshHistory();
+        } catch (e) {
+            console.error('Errore salvataggio history locale:', e);
         }
     }
 

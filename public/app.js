@@ -129,28 +129,28 @@ class ArbitrageBotApp {
         });
     }
 
-    checkMetaMaskAvailability() {
-        console.log('🔍 Debug - Checking MetaMask availability...');
-        console.log('🔍 Debug - window.ethereum:', typeof window.ethereum);
-        console.log('🔍 Debug - window.ethereum object:', window.ethereum);
+    checkMetaMaskAvailability(retries = 3) {
+        console.log(`🔍 Debug - Checking MetaMask availability (attempt ${4-retries}/3)...`);
         
         if (typeof window.ethereum !== 'undefined') {
             console.log('🦊 MetaMask rilevato');
-            console.log('🔍 Debug - MetaMask provider info:', {
-                isMetaMask: window.ethereum.isMetaMask,
-                chainId: window.ethereum.chainId,
-                selectedAddress: window.ethereum.selectedAddress
-            });
             this.provider = new ethers.providers.Web3Provider(window.ethereum);
+            document.getElementById('connectWallet').disabled = false;
+        } else if (retries > 0) {
+            console.log('⏳ MetaMask non ancora disponibile, riprovo tra 1s...');
+            setTimeout(() => this.checkMetaMaskAvailability(retries - 1), 1000);
         } else {
-            console.warn('⚠️ MetaMask non trovato');
-            this.showToast('MetaMask non trovato. Installa l\'estensione MetaMask.', 'warning');
-            document.getElementById('connectWallet').disabled = true;
+            console.warn('⚠️ MetaMask non trovato dopo vari tentativi');
+            this.showToast('MetaMask non trovato. Assicurati di avere l\'estensione installata.', 'warning');
         }
     }
 
     async connectWallet() {
         console.log('🔍 Debug - connectWallet called');
+        
+        if (!this.provider && typeof window.ethereum !== 'undefined') {
+            this.provider = new ethers.providers.Web3Provider(window.ethereum);
+        }
         
         if (!this.provider) {
             console.log('🔍 Debug - No provider available');
@@ -160,28 +160,23 @@ class ArbitrageBotApp {
 
         try {
             console.log('🔄 Connessione a MetaMask...');
-            console.log('🔍 Debug - About to request accounts...');
             
             // Richiedi accesso agli account
             const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-            console.log('🔍 Debug - Accounts received:', accounts);
             
             this.signer = this.provider.getSigner();
             this.walletAddress = await this.signer.getAddress();
             
             // Verifica la rete
             const network = await this.provider.getNetwork();
-            console.log('🔍 Debug - Network info:', {
-                chainId: network.chainId,
-                chainIdType: typeof network.chainId,
-                chainIdHex: '0x' + network.chainId.toString(16)
-            });
-            
             const isTestnet = this.isTestnetChain(network.chainId);
-            console.log('🔍 Debug - isTestnet result:', isTestnet);
             
             if (!isTestnet) {
-                throw new Error(`⚠️ Rete non supportata (Chain ID: ${network.chainId}). Usa solo testnet (Goerli, Sepolia, BSC Testnet, Polygon Amoy)`);
+                const switched = await this.switchToTestnet();
+                if (!switched) {
+                    throw new Error(`⚠️ Rete non supportata (Chain ID: ${network.chainId}). Usa solo testnet (Sepolia, BSC Testnet, Polygon Amoy)`);
+                }
+                return; // Dopo lo switch la pagina potrebbe ricaricarsi
             }
             
             // Ottieni il saldo
@@ -282,6 +277,41 @@ class ArbitrageBotApp {
             serverStatus.classList.remove('online');
             serverStatus.classList.add('offline');
         }
+    }
+
+    async switchToTestnet() {
+        // Try to switch to Sepolia (default)
+        try {
+            await window.ethereum.request({
+                method: 'wallet_switchEthereumChain',
+                params: [{ chainId: '0xaa36a7' }], // Sepolia
+            });
+            return true;
+        } catch (switchError) {
+            // Add chain if missing
+            if (switchError.code === 4902) {
+                try {
+                    await window.ethereum.request({
+                        method: 'wallet_addEthereumChain',
+                        params: [{
+                            chainId: '0xaa36a7',
+                            chainName: 'Sepolia Test Network',
+                            nativeCurrency: { name: 'Sepolia ETH', symbol: 'SEP', decimals: 18 },
+                            rpcUrls: ['https://rpc.sepolia.org'],
+                            blockExplorerUrls: ['https://sepolia.etherscan.io']
+                        }],
+                    });
+                    return true;
+                } catch (addError) {
+                    console.error(addError);
+                    this.showToast('Impossibile aggiungere la rete Sepolia', 'error');
+                }
+            } else {
+                console.error(switchError);
+                this.showToast('Impossibile cambiare rete: ' + switchError.message, 'error');
+            }
+        }
+        return false;
     }
 
     isTestnetChain(chainId) {

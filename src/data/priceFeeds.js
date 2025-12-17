@@ -11,7 +11,7 @@
 import { ethers } from 'ethers';
 import axios from 'axios';
 import WebSocket from 'ws';
-import { DEX_CONFIG, TOKENS, API_CONFIG, ARBITRAGE_CONFIG } from '../config/config.js';
+import { DEX_CONFIG, TOKENS, API_CONFIG, ARBITRAGE_CONFIG, SECURITY_CONFIG } from '../config/config.js';
 import blockchainConnection from '../blockchain/connection.js';
 import logger from '../utils/logger.js';
 
@@ -138,8 +138,39 @@ class PriceFeedManager {
     const prices = {};
     const dexes = DEX_CONFIG[networkName] || {};
     
+    // In modalità testnet, genera sempre prezzi simulati per garantire dati visibili
+    // Questo è necessario perché:
+    // 1. Polygon Amoy non ha DEX ufficiali
+    // 2. BSC Testnet ha liquidità limitata/assente
+    // 3. Sepolia ha pool con liquidità frammentata o assente
+    // 4. Vercel ha limitazioni di timeout per chiamate RPC multiple
+    if (SECURITY_CONFIG.networkMode === 'testnet') {
+      return this.generateMockPrices(networkName, tokenSymbol);
+    }
+    
+    // Token di riferimento per verificare liquidità
+    const referenceToken = TOKENS[networkName]?.USDC;
+    if (!referenceToken) {
+      logger.debug(`Token di riferimento non trovato per ${networkName}`);
+      return prices;
+    }
+    
     for (const [dexName, dexConfig] of Object.entries(dexes)) {
       try {
+        // Salta DEX disabilitati
+        if (dexConfig.enabled === false) {
+          logger.debug(`⏭️ DEX ${dexName} disabilitato, saltando...`);
+          continue;
+        }
+        
+        // Prima verifica se esiste liquidità nel pool
+        const hasLiquidity = await this.checkPoolLiquidity(networkName, dexName, tokenAddress, referenceToken);
+        
+        if (!hasLiquidity) {
+          logger.debug(`⚠️ Pool ${dexName} ${tokenSymbol}/USDC: nessuna liquidità`);
+          continue;
+        }
+        
         const price = await this.getTokenPriceFromDex(
           networkName, 
           dexName, 
@@ -151,7 +182,8 @@ class PriceFeedManager {
           prices[dexName] = {
             price,
             source: 'on-chain',
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            hasLiquidity: true
           };
         }
         
@@ -161,6 +193,51 @@ class PriceFeedManager {
     }
     
     return prices;
+  }
+  
+  /**
+   * Genera prezzi simulati per testnet
+   * Simula prezzi realistici basati su valori di mercato attuali
+   */
+  generateMockPrices(networkName, tokenSymbol) {
+    logger.info(`🎭 Generando prezzi simulati per ${tokenSymbol} su ${networkName}`);
+    
+    // Prezzi base simulati (in USD)
+    const basePrices = {
+      'WMATIC': 0.85,
+      'USDC': 1.00,
+      'USDT': 0.999,
+      'WETH': 2400.00,
+      'WBTC': 45000.00,
+      'DAI': 1.001,
+      'WBNB': 320.00,
+      'BUSD': 1.00
+    };
+    
+    const basePrice = basePrices[tokenSymbol] || 1.0;
+    
+    // Mappa dei DEX per network
+    const networkDexes = {
+      'ethereum': ['Uniswap', 'SushiSwap', 'Balancer'],
+      'bsc': ['PancakeSwap', 'BiSwap', 'Apeswap'],
+      'polygon': ['QuickSwap', 'SushiSwap', 'Uniswap']
+    };
+    
+    const dexList = networkDexes[networkName] || ['Uniswap', 'SushiSwap'];
+    const mockPrices = {};
+    
+    dexList.forEach(dexName => {
+        // Simula variazioni di prezzo tra DEX (spread del 0.1-0.5%)
+        mockPrices[dexName] = {
+            price: basePrice * (1 + (Math.random() - 0.5) * 0.005),
+            source: 'mock-testnet',
+            timestamp: Date.now(),
+            hasLiquidity: true,
+            note: `Prezzo simulato per ${networkName}`
+        };
+    });
+    
+    return mockPrices;
   }
   
   /**
@@ -180,10 +257,10 @@ class PriceFeedManager {
     
     try {
       if (dexName === 'uniswap' && dexConfig.quoter) {
-        // Uniswap V3
+        // Uniswap V3 - Usa callStatic per evitare errori di transazione
         const quoter = new ethers.Contract(dexConfig.quoter, this.uniswapV3QuoterAbi, provider);
         
-        const amountOut = await quoter.quoteExactInputSingle(
+        const amountOut = await quoter.quoteExactInputSingle.staticCall(
           tokenAddress,
           referenceToken,
           3000, // Fee tier 0.3%
@@ -193,9 +270,19 @@ class PriceFeedManager {
         
         return parseFloat(ethers.formatUnits(amountOut, 6)); // USDC ha 6 decimali
         
+      } else if (dexName === 'pancakeswap' && dexConfig.router) {
+        // PancakeSwap V3 su BSC
+        return await this.getPancakeSwapPrice(provider, tokenAddress, referenceToken, amountIn);
+        
+      } else if (dexName === 'sushiswap' && dexConfig.router) {
+        // SushiSwap su Ethereum
+        return await this.getSushiSwapPrice(provider, tokenAddress, referenceToken, amountIn);
+        
+      } else if (dexName === 'quickswap' && dexConfig.router) {
+        // QuickSwap su Polygon
+        return await this.getQuickSwapPrice(provider, tokenAddress, referenceToken, amountIn);
+        
       } else {
-        // Altri DEX - implementazione generica
-        // Qui si potrebbero aggiungere implementazioni specifiche per altri DEX
         logger.debug(`Implementazione prezzo per ${dexName} non ancora disponibile`);
         return 0;
       }
@@ -205,7 +292,114 @@ class PriceFeedManager {
       return 0;
     }
   }
-  
+
+  /**
+   * Ottiene prezzo da PancakeSwap V3 (BSC)
+   */
+  async getPancakeSwapPrice(provider, tokenIn, tokenOut, amountIn) {
+    try {
+      // ABI per PancakeSwap V3 Quoter
+      const pancakeQuoterAbi = [
+        'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)'
+      ];
+      
+      // PancakeSwap V3 Quoter su BSC Testnet
+      const quoterAddress = '0xbC203d7f83677c7ed3F7acEc959963E7F4ECC5C2';
+      const quoter = new ethers.Contract(quoterAddress, pancakeQuoterAbi, provider);
+      
+      const result = await quoter.quoteExactInputSingle.staticCall(
+        tokenIn,
+        tokenOut,
+        2500, // Fee tier 0.25%
+        amountIn,
+        0 // sqrtPriceLimitX96
+      );
+      
+      // Il risultato è un array con [amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate]
+      const amountOut = result[0];
+      
+      return parseFloat(ethers.formatUnits(amountOut, 6));
+      
+    } catch (error) {
+      logger.debug(`Errore PancakeSwap:`, error.message);
+      return 0;
+    }
+  }
+
+  /**
+   * Ottiene prezzo da SushiSwap V2 (Ethereum)
+   */
+  async getSushiSwapPrice(provider, tokenIn, tokenOut, amountIn) {
+    try {
+      // ABI per SushiSwap V2 Router
+      const sushiRouterAbi = [
+        'function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)'
+      ];
+      
+      // SushiSwap V2 Router su Ethereum Sepolia
+      const routerAddress = '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506';
+      const router = new ethers.Contract(routerAddress, sushiRouterAbi, provider);
+      
+      const path = [tokenIn, tokenOut];
+      const amounts = await router.getAmountsOut(amountIn, path);
+      
+      return parseFloat(ethers.formatUnits(amounts[1], 6));
+      
+    } catch (error) {
+      logger.debug(`Errore SushiSwap:`, error.message);
+      return 0;
+    }
+  }
+
+  /**
+   * Ottiene prezzo da QuickSwap V2 (Polygon)
+   */
+  async getQuickSwapPrice(provider, tokenIn, tokenOut, amountIn) {
+    try {
+      // ABI per QuickSwap V2 Router
+      const quickRouterAbi = [
+        'function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)'
+      ];
+      
+      // QuickSwap V2 Router su Polygon Amoy
+      const routerAddress = '0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff';
+      const router = new ethers.Contract(routerAddress, quickRouterAbi, provider);
+      
+      const path = [tokenIn, tokenOut];
+      const amounts = await router.getAmountsOut(amountIn, path);
+      
+      return parseFloat(ethers.formatUnits(amounts[1], 6));
+      
+    } catch (error) {
+      logger.debug(`Errore QuickSwap:`, error.message);
+      return 0;
+    }
+  }
+
+  /**
+   * Verifica liquidità pool per una coppia di token
+   * Semplificata per testnet - assume liquidità presente se il DEX è configurato
+   */
+  async checkPoolLiquidity(networkName, dexName, tokenA, tokenB) {
+    try {
+      const dexConfig = DEX_CONFIG[networkName]?.[dexName];
+      
+      if (!dexConfig) {
+        logger.debug(`DEX ${dexName} non configurato per ${networkName}`);
+        return false;
+      }
+      
+      // Per testnet, assumiamo liquidità presente se il DEX è configurato
+      // In produzione si dovrebbe verificare effettivamente la liquidità
+      logger.debug(`✅ Pool ${dexName} ${tokenA}/${tokenB}: assumendo liquidità presente (testnet)`);
+      return true;
+      
+    } catch (error) {
+      logger.debug(`Errore verifica liquidità ${dexName}:`, error.message);
+      return false;
+    }
+  }
+
   /**
    * Ottiene prezzi da API esterne
    */
@@ -413,8 +607,13 @@ class PriceFeedManager {
   getAllCurrentPrices() {
     const allPrices = {};
     
+    logger.debug(`📊 Cache prezzi - Elementi totali: ${this.priceCache.size}`);
+    logger.debug(`📊 Cache keys:`, Array.from(this.priceCache.keys()));
+    
     for (const [cacheKey, prices] of this.priceCache) {
       const [network, token] = cacheKey.split('-');
+      
+      logger.debug(`💰 Elaborando ${cacheKey}:`, prices);
       
       if (!allPrices[network]) {
         allPrices[network] = {};
@@ -426,6 +625,8 @@ class PriceFeedManager {
         lastUpdate: this.lastUpdate.get(cacheKey)
       };
     }
+    
+    logger.debug(`📊 Risultato getAllCurrentPrices:`, Object.keys(allPrices).length > 0 ? allPrices : 'Cache vuota');
     
     return allPrices;
   }

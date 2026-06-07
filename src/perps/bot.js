@@ -16,6 +16,9 @@ import client from './hyperliquidClient.js';
 import marketData from './marketData.js';
 import strategyEngine from './strategyEngine.js';
 import riskManager from './riskManager.js';
+import portfolio from './portfolio.js';
+import notifier from './notifier.js';
+import * as ind from './indicators.js';
 import db from '../db/database.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
@@ -170,6 +173,22 @@ export class PerpsBot {
       return;
     }
 
+    // Conferma multi-timeframe (gate): salta se il TF superiore non concorda
+    if (!(await this._mtfConfirm(side))) {
+      this.lastEval = { action: 'hold', reason: `Conferma ${this.config.mtfConfirm?.interval} non concorde`, ts: Date.now() };
+      return;
+    }
+
+    // Limiti di portafoglio (globali): posizioni concorrenti, esposizione, cooldown
+    const cl = db.getConsecutiveLosses(this.id);
+    const pf = portfolio.canOpen({ account, plannedNotional: plan.notionalUsd, botId: this.id, consecutiveLosses: cl });
+    if (!pf.ok) {
+      logger.warn(`Bot ${this.name}: apertura bloccata (portafoglio)`, pf.reason);
+      this.lastEval = { action: 'hold', reason: `Portafoglio: ${pf.reason}`, ts: Date.now() };
+      if (/cooldown/i.test(pf.reason)) notifier.notify(`⏸️ <b>${this.name}</b>: ${pf.reason}`);
+      return;
+    }
+
     await client.setLeverage(this.masterAddress, this.coin, leverage,
       this.config.marginMode || 'cross', this.network);
 
@@ -199,13 +218,44 @@ export class PerpsBot {
     await this._placeTpSl();
 
     logger.info(`🟢 Bot ${this.name}: aperta ${side} ${plan.size} ${this.coin} @ ${entryPx}`);
+    notifier.notify(`🟢 <b>${this.name}</b> ha aperto <b>${side.toUpperCase()}</b> ${plan.size} ${this.coin} @ ${entryPx}\nTP ${tpPx ? tpPx.toFixed(2) : '—'} · SL ${slPx ? slPx.toFixed(2) : '—'}`);
+  }
+
+  /** Conferma multi-timeframe: true se il TF superiore concorda col lato (o se disattivata). */
+  async _mtfConfirm(side) {
+    const mtf = this.config.mtfConfirm;
+    if (!mtf || !mtf.interval) return true;
+    try {
+      const candles = await marketData.getCandles(this.coin, mtf.interval);
+      const emaVal = ind.ema(candles, mtf.period || 50);
+      const price = candles?.length ? parseFloat(candles[candles.length - 1].c) : null;
+      if (emaVal == null || price == null) return true; // dati insufficienti → non bloccare
+      return side === 'long' ? price > emaVal : price < emaVal;
+    } catch {
+      return true;
+    }
   }
 
   async _placeTpSl() {
     if (!this.position) return;
     const closeIsBuy = this.position.side === 'short'; // chiudere short = buy; chiudere long = sell
     try {
-      if (this.position.tpPx) {
+      // Take profit: scala parziale se configurata, altrimenti TP singolo
+      const ladder = this.config.partialTp;
+      if (Array.isArray(ladder) && ladder.length) {
+        const steps = riskManager.computeTpLadder(this.position.entryPx, this.position.side, ladder);
+        const market = marketData.getMarkets().find(m => m.coin === this.coin);
+        const szDec = market?.szDecimals ?? 3;
+        for (const st of steps) {
+          const sz = riskManager.roundSize(this.position.size * st.portion, szDec);
+          if (sz > 0) {
+            await client.placeTriggerOrder({
+              masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
+              size: sz, triggerPx: st.px, tpsl: 'tp'
+            }, this.network);
+          }
+        }
+      } else if (this.position.tpPx) {
         await client.placeTriggerOrder({
           masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
           size: this.position.size, triggerPx: this.position.tpPx, tpsl: 'tp'
@@ -230,6 +280,8 @@ export class PerpsBot {
       await this._closeNow(decision.reason);
       return;
     }
+    // DCA: aggiunge alla posizione su movimento avverso (mediazione del prezzo)
+    await this._maybeDca(snapshot);
     // Trailing stop
     const newSl = riskManager.computeTrailing(this.position, snapshot.price, this.config);
     if (newSl != null) {
@@ -253,6 +305,37 @@ export class PerpsBot {
     }
   }
 
+  /** DCA basico: aggiunge alla posizione se il prezzo va contro di una soglia. */
+  async _maybeDca(snapshot) {
+    const dca = this.config.dca;
+    if (!dca || !dca.steps) return;
+    const done = this.position.dcaCount || 0;
+    if (done >= dca.steps) return;
+    const adverse = this.position.side === 'long'
+      ? (this.position.entryPx - snapshot.price) / this.position.entryPx
+      : (snapshot.price - this.position.entryPx) / this.position.entryPx;
+    // Soglia progressiva: step 1 a stepPercent, step 2 a 2×stepPercent, ...
+    if (adverse * 100 < dca.stepPercent * (done + 1)) return;
+    try {
+      const market = marketData.getMarkets().find(m => m.coin === this.coin);
+      const szDec = market?.szDecimals ?? 3;
+      const addSize = riskManager.roundSize(this.position.size * (dca.sizeMultiplier || 1), szDec);
+      if (addSize <= 0) return;
+      const order = await client.placeMarketOrder({
+        masterAddress: this.masterAddress, coin: this.coin,
+        isBuy: this.position.side === 'long', size: addSize, slippage: this.config.slippage ?? 0.02
+      }, this.network);
+      if (order.error) return;
+      this.position.dcaCount = done + 1;
+      this.position.size += addSize;
+      db.insertTrade({ botId: this.id, coin: this.coin, side: this.position.side, px: order.avgPx || snapshot.price, sz: addSize, hlOid: order.oid });
+      logger.info(`➕ Bot ${this.name}: DCA #${this.position.dcaCount} +${addSize} ${this.coin}`);
+      notifier.notify(`➕ <b>${this.name}</b>: DCA #${this.position.dcaCount} (+${addSize} ${this.coin})`);
+    } catch (error) {
+      logger.debug(`Bot ${this.name}: DCA fallito`, error.message);
+    }
+  }
+
   async _closeNow(reason) {
     try {
       await client.closePosition({ masterAddress: this.masterAddress, coin: this.coin }, this.network);
@@ -270,10 +353,13 @@ export class PerpsBot {
     }
     this.dailyPnl += pnl;
     this.position = null;
+    const emoji = pnl >= 0 ? '✅' : '🔻';
+    notifier.notify(`🔴 <b>${this.name}</b> ha chiuso (${reason}) — PnL ${emoji} ${pnl.toFixed(2)}$ · giornaliero ${this.dailyPnl.toFixed(2)}$`);
     // Stop automatico se superato il limite di perdita giornaliera
     const maxDailyLoss = this.config.risk?.maxDailyLossUsd ?? HYPERLIQUID_CONFIG.risk.maxDailyLossUsd;
     if (this.dailyPnl <= -Math.abs(maxDailyLoss)) {
       logger.warn(`Bot ${this.name}: limite perdita giornaliera raggiunto, arresto`);
+      notifier.notify(`🛑 <b>${this.name}</b>: limite perdita giornaliera raggiunto, bot fermato.`);
       this.stop();
     }
   }

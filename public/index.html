@@ -422,6 +422,54 @@
                         </div>
                     </div>
                 </section>
+
+                <!-- Rischio di portafoglio & Notifiche -->
+                <section class="card">
+                    <div class="card-header"><h2>🛡️ Rischio di Portafoglio & Notifiche</h2></div>
+                    <div class="card-content">
+                        <h4 class="sub-h">Limiti globali (validi per tutti i bot)</h4>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Max posizioni concorrenti</label>
+                                <input type="number" id="pfMaxPositions" class="form-input" min="1" value="3">
+                            </div>
+                            <div class="form-group">
+                                <label>Max esposizione totale (USD)</label>
+                                <input type="number" id="pfMaxExposure" class="form-input" min="0" value="10000">
+                            </div>
+                            <div class="form-group">
+                                <label>Max perdite consecutive</label>
+                                <input type="number" id="pfMaxLosses" class="form-input" min="1" value="3">
+                            </div>
+                            <div class="form-group">
+                                <label>Cooldown (minuti)</label>
+                                <input type="number" id="pfCooldown" class="form-input" min="1" value="60">
+                            </div>
+                        </div>
+                        <button class="btn btn-primary" onclick="perps.savePortfolio()">💾 Salva limiti</button>
+
+                        <h4 class="sub-h" style="margin-top:20px;">📲 Notifiche Telegram</h4>
+                        <p class="simple-hint">Crea un bot Telegram con @BotFather, poi inserisci token e chat id. Avvisi su entrate/uscite/errori/limiti.</p>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Bot token</label>
+                                <input type="text" id="tgToken" class="form-input" placeholder="123456:ABC-...">
+                            </div>
+                            <div class="form-group">
+                                <label>Chat ID</label>
+                                <input type="text" id="tgChatId" class="form-input" placeholder="es. 987654321">
+                            </div>
+                            <div class="form-group toggle-group">
+                                <label><input type="checkbox" id="tgEnabled"> Abilita</label>
+                                <span id="tgStatus" class="muted"></span>
+                            </div>
+                        </div>
+                        <div class="order-actions" style="gap:10px;">
+                            <button class="btn btn-primary" onclick="perps.saveNotifications()">💾 Salva</button>
+                            <button class="btn btn-outline" onclick="perps.testNotification()">✉️ Invia test</button>
+                        </div>
+                    </div>
+                </section>
             </div><!-- /view-perps -->
         </div>
     </main>
@@ -675,6 +723,40 @@
                         </div>
                     </div>
                 </div>
+
+                <div class="rules-section">
+                    <h4>🚀 Automazione avanzata</h4>
+                    <div class="form-row">
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botMtfEnabled"> Conferma multi-timeframe</label>
+                            <div style="display:flex; gap:6px;">
+                                <select id="botMtfInterval" class="form-select form-select-sm">
+                                    <option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option>
+                                </select>
+                                <input type="number" id="botMtfPeriod" class="form-input form-input-sm" value="50" title="periodo EMA" style="width:70px">
+                            </div>
+                            <small class="muted">Entra solo se il trend EMA del TF superiore concorda.</small>
+                        </div>
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botDcaEnabled"> DCA (mediazione)</label>
+                            <div style="display:flex; gap:6px;">
+                                <input type="number" id="botDcaSteps" class="form-input form-input-sm" value="2" title="step" style="width:55px">
+                                <input type="number" id="botDcaStep" class="form-input form-input-sm" value="2" title="% avverso per step" style="width:65px">
+                                <input type="number" id="botDcaMult" class="form-input form-input-sm" value="1" step="0.1" title="moltiplicatore size" style="width:65px">
+                            </div>
+                            <small class="muted">step · % avverso · moltiplicatore size</small>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botPtpEnabled"> Take profit parziale</label>
+                            <div style="display:flex; gap:6px; align-items:center;">
+                                <span class="muted">50% a +</span><input type="number" id="botPtp1" class="form-input form-input-sm" value="2" step="0.1" style="width:60px"><span class="muted">%</span>
+                                <span class="muted">· resto a +</span><input type="number" id="botPtp2" class="form-input form-input-sm" value="5" step="0.1" style="width:60px"><span class="muted">%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
                 </div><!-- /botAdvanced -->
 
                 <!-- Backtest -->
@@ -717,6 +799,6 @@
         }
     </script>
     <script src="app.js?v=1.0.5"></script>
-    <script src="perps.js?v=1.0.9"></script>
+    <script src="perps.js?v=1.1.0"></script>
 </body>
 </html>

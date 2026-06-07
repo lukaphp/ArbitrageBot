@@ -120,6 +120,8 @@ class PerpsApp {
     await this.loadMarkets();
     await this.refreshAccount();
     await this.loadBots();
+    await this.loadPortfolio();
+    await this.loadNotifications();
     if (!this.accountTimer) {
       this.accountTimer = setInterval(() => {
         if (!document.getElementById('view-perps').classList.contains('hidden')) {
@@ -457,6 +459,66 @@ class PerpsApp {
     } catch (e) { this.toast(e.message, 'error'); }
   }
 
+  // ---- Rischio portafoglio & notifiche ----
+  async loadPortfolio() {
+    try {
+      const l = await this.api('/api/perps/portfolio');
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+      set('pfMaxPositions', l.maxConcurrentPositions);
+      set('pfMaxExposure', l.maxTotalExposureUsd);
+      set('pfMaxLosses', l.maxConsecutiveLosses);
+      set('pfCooldown', l.cooldownMinutes);
+    } catch (e) { /* ignore */ }
+  }
+
+  async savePortfolio() {
+    try {
+      await this.api('/api/perps/portfolio', {
+        method: 'POST',
+        body: JSON.stringify({
+          maxConcurrentPositions: parseInt(document.getElementById('pfMaxPositions').value),
+          maxTotalExposureUsd: parseFloat(document.getElementById('pfMaxExposure').value),
+          maxConsecutiveLosses: parseInt(document.getElementById('pfMaxLosses').value),
+          cooldownMinutes: parseInt(document.getElementById('pfCooldown').value)
+        })
+      });
+      this.toast('Limiti di portafoglio salvati', 'success');
+    } catch (e) { this.toast(e.message, 'error'); }
+  }
+
+  async loadNotifications() {
+    try {
+      const s = await this.api('/api/perps/notifications');
+      const en = document.getElementById('tgEnabled');
+      const st = document.getElementById('tgStatus');
+      if (en) en.checked = !!s.enabled;
+      if (st) st.textContent = s.configured ? '(configurato)' : '(non configurato)';
+    } catch (e) { /* ignore */ }
+  }
+
+  async saveNotifications() {
+    try {
+      const d = await this.api('/api/perps/notifications', {
+        method: 'POST',
+        body: JSON.stringify({
+          token: document.getElementById('tgToken').value.trim(),
+          chatId: document.getElementById('tgChatId').value.trim(),
+          enabled: document.getElementById('tgEnabled').checked
+        })
+      });
+      this.toast('Notifiche salvate', 'success');
+      const st = document.getElementById('tgStatus');
+      if (st) st.textContent = d.configured ? '(configurato)' : '(non configurato)';
+    } catch (e) { this.toast(e.message, 'error'); }
+  }
+
+  async testNotification() {
+    try {
+      const r = await this.api('/api/perps/notifications/test', { method: 'POST' });
+      this.toast(r.sent ? '✅ Messaggio di test inviato' : 'Non inviato: controlla token/chat id e che sia abilitato', r.sent ? 'success' : 'warning');
+    } catch (e) { this.toast(e.message, 'error'); }
+  }
+
   // ---- Grafico posizione (Lightweight Charts) ----
   openChart(coin) {
     if (!window.LightweightCharts) return this.toast('Libreria grafici non caricata', 'error');
@@ -781,6 +843,17 @@ class PerpsApp {
     document.getElementById('botTrailValue').value = c.trailing?.value ?? 1;
     document.getElementById('botMaxDailyLoss').value = c.risk?.maxDailyLossUsd ?? 100;
     document.getElementById('botMaxPosition').value = c.risk?.maxPositionUsd ?? 1000;
+    // Automazione avanzata
+    document.getElementById('botMtfEnabled').checked = !!c.mtfConfirm;
+    document.getElementById('botMtfInterval').value = c.mtfConfirm?.interval || '1h';
+    document.getElementById('botMtfPeriod').value = c.mtfConfirm?.period ?? 50;
+    document.getElementById('botPtpEnabled').checked = !!(c.partialTp && c.partialTp.length);
+    document.getElementById('botPtp1').value = c.partialTp?.[0]?.atPercent ?? 2;
+    document.getElementById('botPtp2').value = c.partialTp?.[1]?.atPercent ?? 5;
+    document.getElementById('botDcaEnabled').checked = !!c.dca;
+    document.getElementById('botDcaSteps').value = c.dca?.steps ?? 2;
+    document.getElementById('botDcaStep').value = c.dca?.stepPercent ?? 2;
+    document.getElementById('botDcaMult').value = c.dca?.sizeMultiplier ?? 1;
 
     document.getElementById('entryRules').innerHTML = '';
     document.getElementById('exitRules').innerHTML = '';
@@ -989,8 +1062,36 @@ class PerpsApp {
       risk: {
         maxDailyLossUsd: parseFloat(document.getElementById('botMaxDailyLoss').value),
         maxPositionUsd: parseFloat(document.getElementById('botMaxPosition').value)
-      }
+      },
+      ...this._collectAdvancedAutomation()
     };
+  }
+
+  /** Raccoglie i campi di automazione avanzata (MTF, partial TP, DCA). */
+  _collectAdvancedAutomation() {
+    const out = {};
+    if (document.getElementById('botMtfEnabled')?.checked) {
+      out.mtfConfirm = {
+        interval: document.getElementById('botMtfInterval').value,
+        period: parseInt(document.getElementById('botMtfPeriod').value) || 50
+      };
+    }
+    if (document.getElementById('botPtpEnabled')?.checked) {
+      const a1 = parseFloat(document.getElementById('botPtp1').value);
+      const a2 = parseFloat(document.getElementById('botPtp2').value);
+      out.partialTp = [
+        { portion: 0.5, atPercent: a1 },
+        { portion: 0.5, atPercent: a2 }
+      ].filter(s => s.atPercent > 0);
+    }
+    if (document.getElementById('botDcaEnabled')?.checked) {
+      out.dca = {
+        steps: parseInt(document.getElementById('botDcaSteps').value) || 1,
+        stepPercent: parseFloat(document.getElementById('botDcaStep').value) || 2,
+        sizeMultiplier: parseFloat(document.getElementById('botDcaMult').value) || 1
+      };
+    }
+    return out;
   }
 
   // ---- Backtest ----

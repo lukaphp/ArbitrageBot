@@ -71,6 +71,21 @@ class RiskManager {
   }
 
   /**
+   * Calcola una scala di take profit parziali.
+   * @param ladder lista di { portion (0..1), atPercent }
+   * @returns [{ portion, px }]
+   */
+  computeTpLadder(entryPx, side, ladder) {
+    const isLong = side === 'long';
+    return (ladder || [])
+      .filter(s => s && s.portion > 0 && s.atPercent > 0)
+      .map(s => ({
+        portion: s.portion,
+        px: isLong ? entryPx * (1 + s.atPercent / 100) : entryPx * (1 - s.atPercent / 100)
+      }));
+  }
+
+  /**
    * Nuovo stop trailing se il prezzo si è mosso a favore. Ritorna null se invariato.
    * @param position { side, slPx }
    */

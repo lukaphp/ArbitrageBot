@@ -38,6 +38,8 @@ import agentWallet from './perps/agentWallet.js';
 import strategyEngine from './perps/strategyEngine.js';
 import riskManager from './perps/riskManager.js';
 import botManager from './perps/botManager.js';
+import portfolio from './perps/portfolio.js';
+import notifier from './perps/notifier.js';
 import { runBacktest } from './perps/backtester.js';
 
 // Setup paths
@@ -705,6 +707,38 @@ class ArbitrageBotServer {
         const result = await hyperliquid.closePosition({ masterAddress, coin }, hyperliquid.getNetwork());
         this.io.emit('perps:position', { coin, closed: true });
         res.json({ success: true, data: result });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    // --- Risk di portafoglio (limiti globali) ---
+    app.get('/api/perps/portfolio', (req, res) => {
+      res.json({ success: true, data: portfolio.getLimits() });
+    });
+    app.post('/api/perps/portfolio', (req, res) => {
+      try {
+        res.json({ success: true, data: portfolio.setLimits(req.body || {}) });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    // --- Notifiche Telegram ---
+    app.get('/api/perps/notifications', (req, res) => {
+      res.json({ success: true, data: notifier.status() });
+    });
+    app.post('/api/perps/notifications', (req, res) => {
+      try {
+        res.json({ success: true, data: notifier.setConfig(req.body || {}) });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+    app.post('/api/perps/notifications/test', async (req, res) => {
+      try {
+        const ok = await notifier.notify('✅ Test notifica da ArbitrageBot Perps');
+        res.json({ success: true, data: { sent: ok } });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });
       }

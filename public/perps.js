@@ -77,6 +77,7 @@ class PerpsApp {
       this.network = d.network;
       document.querySelectorAll('.net-pill').forEach(p =>
         p.classList.toggle('active', p.dataset.net === this.network));
+      this._updateFaucetVisibility();
     } catch (e) { /* ignore */ }
   }
 
@@ -144,12 +145,77 @@ class PerpsApp {
       document.getElementById('perpsMargin').textContent = this.fmtUsd(acc.totalMarginUsed);
       document.getElementById('perpsWithdrawable').textContent = this.fmtUsd(acc.withdrawable);
       document.getElementById('perpsPosCount').textContent = acc.positions.length;
+      this._updateFaucetBadge(acc.accountValue);
       this._renderPositions(acc.positions);
     } catch (e) {
       // Account inesistente su HL = equity 0 (non un errore bloccante)
+      this._updateFaucetBadge(0);
       this._renderPositions([]);
     }
     await this._refreshAgentStatus();
+  }
+
+  // ---- Faucet testnet ----
+  _updateFaucetVisibility() {
+    const card = document.getElementById('faucetCard');
+    if (card) card.classList.toggle('hidden', this.network !== 'testnet');
+  }
+
+  _updateFaucetBadge(equity) {
+    const b = document.getElementById('faucetEquityBadge');
+    if (!b) return;
+    b.textContent = 'Equity: ' + this.fmtUsd(equity);
+    b.classList.toggle('funded', equity > 0);
+  }
+
+  openFaucet(which) {
+    const urls = {
+      hyperliquid: 'https://app.hyperliquid-testnet.xyz/drip',
+      circle: 'https://faucet.circle.com',
+      gas: 'https://faucets.chain.link/arbitrum-sepolia',
+      deposit: 'https://app.hyperliquid-testnet.xyz/'
+    };
+    window.open(urls[which], '_blank', 'noopener');
+    // Per i faucet/deposit che alimentano Hyperliquid, avvia il rilevamento fondi
+    if (which === 'hyperliquid' || which === 'deposit') {
+      if (this.connected) this._watchEquity();
+      else this.toast('Connetti MetaMask per rilevare i fondi', 'warning');
+    }
+  }
+
+  async _watchEquity() {
+    if (this._watching) return;
+    this._watching = true;
+    const watch = document.getElementById('faucetWatch');
+    const text = document.getElementById('faucetWatchText');
+    watch?.classList.remove('hidden');
+    const baseline = this.account?.accountValue || 0;
+    let attempts = 0;
+    const maxAttempts = 36; // ~3 minuti a 5s
+    const tick = async () => {
+      attempts++;
+      try {
+        const acc = await this.api('/api/perps/account?address=' + this.address);
+        this.account = acc;
+        this._updateFaucetBadge(acc.accountValue);
+        if (acc.accountValue > baseline + 0.01) {
+          this.toast(`✅ Fondi ricevuti! Equity: ${this.fmtUsd(acc.accountValue)}`, 'success');
+          watch?.classList.add('hidden');
+          this._watching = false;
+          await this.refreshAccount();
+          return;
+        }
+      } catch (e) { /* l'account potrebbe non esistere ancora */ }
+      if (attempts >= maxAttempts) {
+        if (text) text.textContent = 'Nessun fondo rilevato. Quando completi il faucet, premi "Aggiorna".';
+        setTimeout(() => watch?.classList.add('hidden'), 6000);
+        this._watching = false;
+        return;
+      }
+      if (text) text.textContent = `In attesa dell'arrivo dei fondi… (${attempts}/${maxAttempts})`;
+      setTimeout(tick, 5000);
+    };
+    setTimeout(tick, 5000);
   }
 
   async _refreshAgentStatus() {
@@ -174,13 +240,37 @@ class PerpsApp {
     if (!this.connected) return this.toast('Connetti prima MetaMask', 'warning');
     try {
       this.toast('Generazione agent...', 'info');
+      // Firma sul chainId su cui MetaMask è attualmente connesso: MetaMask rifiuta
+      // di firmare un dominio EIP-712 con chainId diverso dalla rete attiva.
+      // Hyperliquid accetta qualsiasi signatureChainId (ricostruisce il dominio da esso).
+      const chainId = await window.ethereum.request({ method: 'eth_chainId' });
       const prep = await this.api('/api/perps/agent/prepare', {
         method: 'POST',
-        body: JSON.stringify({ address: this.address })
+        body: JSON.stringify({ address: this.address, signatureChainId: chainId })
       });
-      const { domain, types, message } = prep.typedData;
-      // Firma EIP-712 con MetaMask (ethers v5)
-      const signature = await app.signer._signTypedData(domain, types, message);
+      const { domain, types, message, primaryType } = prep.typedData;
+      // Firma EIP-712 direttamente con MetaMask (eth_signTypedData_v4).
+      // NON usiamo ethers _signTypedData perché impone che il chainId del dominio
+      // coincida con la rete attiva: Hyperliquid richiede invece chainId 421614/42161
+      // (solo dominio di firma, non una transazione), indipendente dalla rete connessa.
+      const fullTypedData = {
+        domain,
+        primaryType,
+        types: {
+          EIP712Domain: [
+            { name: 'name', type: 'string' },
+            { name: 'version', type: 'string' },
+            { name: 'chainId', type: 'uint256' },
+            { name: 'verifyingContract', type: 'address' }
+          ],
+          ...types
+        },
+        message
+      };
+      const signature = await window.ethereum.request({
+        method: 'eth_signTypedData_v4',
+        params: [this.address, JSON.stringify(fullTypedData)]
+      });
       this.toast('Invio approvazione a Hyperliquid...', 'info');
       await this.api('/api/perps/agent/submit', {
         method: 'POST',

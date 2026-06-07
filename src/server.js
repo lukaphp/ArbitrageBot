@@ -473,9 +473,9 @@ class ArbitrageBotServer {
     // Genera agent + azione approveAgent da firmare con MetaMask
     app.post('/api/perps/agent/prepare', (req, res) => {
       try {
-        const { address, agentName } = req.body;
+        const { address, agentName, signatureChainId } = req.body;
         const network = hyperliquid.getNetwork();
-        const result = agentWallet.prepareApproval(address, network, agentName || '');
+        const result = agentWallet.prepareApproval(address, network, agentName || '', signatureChainId);
         res.json({ success: true, data: result });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });

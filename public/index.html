@@ -269,6 +269,37 @@
                     </div>
                 </section>
 
+                <!-- Faucet Testnet (solo testnet) -->
+                <section class="card faucet-card" id="faucetCard">
+                    <div class="card-header">
+                        <h2>💧 Faucet Testnet</h2>
+                        <span id="faucetEquityBadge" class="faucet-badge">Equity: —</span>
+                    </div>
+                    <div class="card-content">
+                        <p class="faucet-intro">Per fare trading in testnet serve collaterale <strong>USDC mock</strong> su Hyperliquid. Ottienilo dai faucet qui sotto: l'app rileva <strong>automaticamente</strong> quando i fondi arrivano.</p>
+                        <div class="faucet-options">
+                            <div class="faucet-option">
+                                <div class="faucet-opt-head"><strong>1️⃣ Faucet Hyperliquid</strong><span class="faucet-tag">consigliato</span></div>
+                                <p>1.000 USDC mock direttamente sull'account Perps (ripetibile ogni 4h). Richiede che il wallet abbia avuto attività su mainnet.</p>
+                                <button class="btn btn-primary" onclick="perps.openFaucet('hyperliquid')">💧 Apri faucet & rileva fondi</button>
+                            </div>
+                            <div class="faucet-option">
+                                <div class="faucet-opt-head"><strong>2️⃣ Percorso bridge</strong><span class="faucet-tag">wallet senza storia mainnet</span></div>
+                                <p>Ottieni USDC su Arbitrum Sepolia, poi depositali su Hyperliquid dal loro sito (Deposit).</p>
+                                <div class="faucet-links">
+                                    <button class="btn btn-outline" onclick="perps.openFaucet('circle')">🪙 USDC (Circle)</button>
+                                    <button class="btn btn-outline" onclick="perps.openFaucet('gas')">⛽ Gas Arb. Sepolia</button>
+                                    <button class="btn btn-outline" onclick="perps.openFaucet('deposit')">🏦 Deposita su HL</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="faucetWatch" class="faucet-watch hidden">
+                            <span class="spinner-sm"></span>
+                            <span id="faucetWatchText">In attesa dell'arrivo dei fondi…</span>
+                        </div>
+                    </div>
+                </section>
+
                 <!-- Ordine Manuale -->
                 <section class="card">
                     <div class="card-header"><h2>⚡ Ordine Manuale</h2></div>
@@ -580,6 +611,6 @@
         }
     </script>
     <script src="app.js?v=1.0.5"></script>
-    <script src="perps.js?v=1.0.0"></script>
+    <script src="perps.js?v=1.0.3"></script>
 </body>
 </html>

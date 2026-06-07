@@ -70,12 +70,26 @@ class AgentWallet {
    * Genera una nuova coppia agent e costruisce l'azione approveAgent + typed data.
    * Salva la chiave (cifrata) come pending (approved_at=null) finché non confermata.
    */
-  prepareApproval(masterAddress, network = 'testnet', agentName = '') {
+  prepareApproval(masterAddress, network = 'testnet', agentName = '', signatureChainId = null) {
     if (!ethers.isAddress(masterAddress)) {
       throw new Error('masterAddress non valido');
     }
     const sign = SIGN_CHAINS[network];
     if (!sign) throw new Error(`Rete non valida: ${network}`);
+
+    // Chain di FIRMA: usa quella su cui è connesso il wallet (così MetaMask accetta
+    // di firmare il dominio EIP-712), altrimenti la canonica per la rete.
+    // Hyperliquid ricostruisce il dominio da action.signatureChainId: qualsiasi
+    // chainId è valido finché domain.chainId combacia (verificato empiricamente).
+    let chainHex = sign.hex;
+    let chainIdNum = sign.chainId;
+    if (signatureChainId) {
+      chainHex = String(signatureChainId).startsWith('0x')
+        ? String(signatureChainId)
+        : '0x' + Number(signatureChainId).toString(16);
+      chainIdNum = parseInt(chainHex, 16);
+      if (!chainIdNum || isNaN(chainIdNum)) throw new Error('signatureChainId non valido');
+    }
 
     const agent = ethers.Wallet.createRandom();
     const nonce = Date.now();
@@ -96,7 +110,7 @@ class AgentWallet {
     const action = {
       type: 'approveAgent',
       hyperliquidChain: sign.hyperliquidChain,
-      signatureChainId: sign.hex,
+      signatureChainId: chainHex,
       agentAddress: agent.address,
       agentName: agentName || '',
       nonce
@@ -106,7 +120,7 @@ class AgentWallet {
       domain: {
         name: 'HyperliquidSignTransaction',
         version: '1',
-        chainId: sign.chainId,
+        chainId: chainIdNum,
         verifyingContract: '0x0000000000000000000000000000000000000000'
       },
       types: {

@@ -200,10 +200,55 @@
 .spot-transfer-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .spot-transfer-controls .form-input { max-width: 180px; }
 
+/* --- Creazione bot: modalità semplificata/avanzata --- */
+.bot-mode-toggle { display: flex; gap: 8px; margin: 16px 0; }
+.bot-mode {
+  flex: 1; padding: 10px; border: 1px solid #cbd5e0; background: #fff; border-radius: 10px;
+  cursor: pointer; font-weight: 600; color: #718096; font-size: 0.92rem;
+}
+.bot-mode.active { background: #667eea; color: #fff; border-color: #667eea; }
+
+.simple-block { margin-bottom: 16px; }
+.simple-block h4 { margin: 0 0 4px; color: #2d3748; }
+.simple-hint { font-size: 0.82rem; color: #718096; margin: 0 0 10px; }
+
+.strategy-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.strategy-card {
+  border: 2px solid #e2e8f0; border-radius: 10px; padding: 12px; cursor: pointer;
+  background: #fff; transition: all 0.15s;
+}
+.strategy-card:hover { border-color: #a3bffa; }
+.strategy-card.selected { border-color: #667eea; background: #eef2ff; box-shadow: 0 0 0 1px #667eea; }
+.strategy-card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.strategy-emoji { font-size: 1.1rem; }
+.strategy-tag { margin-left: auto; font-size: 0.64rem; font-weight: 700; text-transform: uppercase;
+  background: #edf2f7; color: #718096; padding: 2px 7px; border-radius: 8px; }
+.strategy-desc { font-size: 0.8rem; color: #4a5568; margin: 0 0 6px; line-height: 1.4; }
+.strategy-when { font-size: 0.74rem; color: #805ad5; margin: 0; }
+
+.risk-profiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.risk-profile {
+  border: 2px solid #e2e8f0; border-radius: 10px; padding: 12px; cursor: pointer; background: #fff;
+}
+.risk-profile:hover { border-color: #a3bffa; }
+.risk-profile.selected { border-color: #667eea; background: #eef2ff; box-shadow: 0 0 0 1px #667eea; }
+.risk-profile-head { font-weight: 700; color: #2d3748; margin-bottom: 4px; }
+.risk-profile-params { font-size: 0.74rem; color: #4a5568; margin-bottom: 6px; }
+.risk-profile-desc { font-size: 0.74rem; color: #718096; margin: 0; line-height: 1.4; }
+
+.consultant-box {
+  border: 1px solid #9ae6b4; background: #f0fff4; border-radius: 10px; padding: 14px; margin-top: 8px;
+}
+.consultant-head { font-weight: 700; color: #276749; margin-bottom: 8px; }
+#consultantText { font-size: 0.86rem; color: #2d3748; line-height: 1.6; }
+.consultant-note { color: #805ad5; font-size: 0.8rem; }
+
 @media (max-width: 640px) {
   .perps-stats { grid-template-columns: repeat(2, 1fr); }
   .agent-row { flex-direction: column; align-items: stretch; }
   .faucet-options { grid-template-columns: 1fr; }
   .spot-transfer-controls { flex-direction: column; align-items: stretch; }
   .spot-transfer-controls .form-input { max-width: none; }
+  .strategy-cards { grid-template-columns: 1fr; }
+  .risk-profiles { grid-template-columns: 1fr; }
 }

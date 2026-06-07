@@ -516,6 +516,34 @@
                         <label>Mercato</label>
                         <select id="botMarket" class="form-select"></select>
                     </div>
+                </div>
+
+                <!-- Toggle modalità -->
+                <div class="bot-mode-toggle">
+                    <button type="button" class="bot-mode active" data-mode="simple" onclick="perps.setBotMode('simple')">🎯 Semplificata</button>
+                    <button type="button" class="bot-mode" data-mode="advanced" onclick="perps.setBotMode('advanced')">⚙️ Avanzata (pro)</button>
+                </div>
+
+                <!-- ===== MODALITÀ SEMPLIFICATA ===== -->
+                <div id="botSimple">
+                    <div class="simple-block">
+                        <h4>📈 1. Scegli una strategia</h4>
+                        <p class="simple-hint">Il consulente la trasforma automaticamente nelle regole tecniche giuste.</p>
+                        <div id="strategyCards" class="strategy-cards"></div>
+                    </div>
+                    <div class="simple-block">
+                        <h4>🛡️ 2. Scegli il profilo di rischio</h4>
+                        <div id="riskProfiles" class="risk-profiles"></div>
+                    </div>
+                    <div id="consultantBox" class="consultant-box hidden">
+                        <div class="consultant-head">👔 Il consulente suggerisce</div>
+                        <div id="consultantText"></div>
+                    </div>
+                </div>
+
+                <!-- ===== MODALITÀ AVANZATA ===== -->
+                <div id="botAdvanced" class="hidden">
+                <div class="form-row">
                     <div class="form-group">
                         <label>Direzione</label>
                         <select id="botDirection" class="form-select">
@@ -524,8 +552,6 @@
                             <option value="short">Solo Short</option>
                         </select>
                     </div>
-                </div>
-                <div class="form-row">
                     <div class="form-group">
                         <label>Leva</label>
                         <input type="number" id="botLeverage" class="form-input" value="3" min="1" max="50">
@@ -598,6 +624,7 @@
                         </div>
                     </div>
                 </div>
+                </div><!-- /botAdvanced -->
 
                 <div class="settings-actions">
                     <button class="btn btn-secondary" onclick="closeModal('botModal')">Annulla</button>
@@ -623,6 +650,6 @@
         }
     </script>
     <script src="app.js?v=1.0.5"></script>
-    <script src="perps.js?v=1.0.5"></script>
+    <script src="perps.js?v=1.0.6"></script>
 </body>
 </html>

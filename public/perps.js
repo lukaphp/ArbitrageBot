@@ -5,6 +5,72 @@
  * auto-pilot. Riusa la connessione MetaMask e i toast/modali di app.js.
  */
 
+// Strategie pronte per la modalità semplificata: il "consulente" le traduce
+// in regole tecniche (RSI/EMA/MACD/Bollinger).
+const BOT_STRATEGIES = {
+  rsi_reversal: {
+    name: 'Rimbalzo ipervenduto', emoji: '🔄', tag: 'Conservativa',
+    desc: 'Compra quando il mercato è ipervenduto (RSI sotto 30) e vende quando è ipercomprato (RSI sopra 70).',
+    when: 'Funziona meglio nei mercati laterali, senza trend forti.',
+    build: () => ({
+      direction: 'both', candleInterval: '15m', logic: 'any',
+      entryRules: [
+        { type: 'indicator', indicator: 'rsi', period: 14, op: '<', value: 30, signal: 'long' },
+        { type: 'indicator', indicator: 'rsi', period: 14, op: '>', value: 70, signal: 'short' }
+      ],
+      exitRules: []
+    })
+  },
+  ema_trend: {
+    name: 'Segui il trend', emoji: '📈', tag: 'Moderata',
+    desc: 'Va Long quando il prezzo è sopra la media mobile EMA50, Short quando è sotto.',
+    when: 'Ideale nei mercati direzionali, con trend chiari al rialzo o al ribasso.',
+    build: () => ({
+      direction: 'both', candleInterval: '1h', logic: 'any',
+      entryRules: [
+        { type: 'indicator', indicator: 'ema', period: 50, compareToPrice: true, op: '>', signal: 'long' },
+        { type: 'indicator', indicator: 'ema', period: 50, compareToPrice: true, op: '<', signal: 'short' }
+      ],
+      exitRules: []
+    })
+  },
+  macd_momentum: {
+    name: 'Momentum (MACD)', emoji: '⚡', tag: 'Moderata',
+    desc: 'Entra Long quando il MACD diventa positivo, Short quando diventa negativo.',
+    when: 'Buona per cavalcare movimenti decisi e veloci.',
+    build: () => ({
+      direction: 'both', candleInterval: '15m', logic: 'any',
+      entryRules: [
+        { type: 'indicator', indicator: 'macd', cond: 'bullish', signal: 'long' },
+        { type: 'indicator', indicator: 'macd', cond: 'bearish', signal: 'short' }
+      ],
+      exitRules: []
+    })
+  },
+  bollinger: {
+    name: 'Bande di Bollinger', emoji: '🎯', tag: 'Conservativa',
+    desc: 'Compra quando il prezzo tocca la banda inferiore, vende quando tocca la superiore.',
+    when: 'Reversione alla media: meglio nei mercati laterali e volatili.',
+    build: () => ({
+      direction: 'both', candleInterval: '15m', logic: 'any',
+      entryRules: [
+        { type: 'indicator', indicator: 'bollinger', cond: 'below_lower', signal: 'long' },
+        { type: 'indicator', indicator: 'bollinger', cond: 'above_upper', signal: 'short' }
+      ],
+      exitRules: []
+    })
+  }
+};
+
+const RISK_PROFILES = {
+  conservativo: { name: 'Conservativo', emoji: '🟢', leverage: 2, sizingPercent: 5, tp: 1.5, sl: 1, trailing: 0, maxDailyLoss: 50, maxPosition: 500,
+    desc: 'Leva bassa, posizioni piccole, stop stretti. Priorità alla protezione del capitale.' },
+  moderato: { name: 'Moderato', emoji: '🟡', leverage: 3, sizingPercent: 10, tp: 3, sl: 1.5, trailing: 1, maxDailyLoss: 100, maxPosition: 1000,
+    desc: 'Equilibrio tra rischio e rendimento, con trailing stop attivo.' },
+  aggressivo: { name: 'Aggressivo', emoji: '🔴', leverage: 5, sizingPercent: 20, tp: 6, sl: 3, trailing: 2, maxDailyLoss: 300, maxPosition: 3000,
+    desc: 'Leva e size elevate, obiettivi di profitto ampi. Rischio maggiore.' }
+};
+
 class PerpsApp {
   constructor() {
     this.markets = [];
@@ -15,6 +81,9 @@ class PerpsApp {
     this.socket = null;
     this.shown = false;
     this.accountTimer = null;
+    this.botMode = 'simple';
+    this.selStrategy = null;
+    this.selRisk = 'moderato';
   }
 
   // ---- Helpers ----
@@ -519,12 +588,101 @@ class PerpsApp {
       .forEach(r => this.addRule('entry', r));
     (c.exitRules || []).forEach(r => this.addRule('exit', r));
 
+    // Modalità semplificata: ripristina selezioni se il bot è stato creato così
+    this.selStrategy = c.preset?.strategy || null;
+    this.selRisk = c.preset?.risk || 'moderato';
+    this._renderStrategyCards();
+    this._renderRiskProfiles();
+    this._updateConsultant();
+    // Un bot con preset → semplificata; un bot avanzato (o nuovo) → default semplificata,
+    // ma se in modifica e senza preset apri direttamente l'avanzata.
+    this.setBotMode(bot && !c.preset ? 'advanced' : 'simple');
+
     app.showModal('botModal');
   }
 
   editBot(id) {
     const bot = this.bots.find(b => b.id === id);
     if (bot) this.openBotModal(bot);
+  }
+
+  // ---- Modalità bot (semplificata / avanzata) ----
+  setBotMode(mode) {
+    this.botMode = mode;
+    document.getElementById('botSimple')?.classList.toggle('hidden', mode !== 'simple');
+    document.getElementById('botAdvanced')?.classList.toggle('hidden', mode !== 'advanced');
+    document.querySelectorAll('.bot-mode').forEach(b =>
+      b.classList.toggle('active', b.dataset.mode === mode));
+  }
+
+  _renderStrategyCards() {
+    const box = document.getElementById('strategyCards');
+    if (!box) return;
+    box.innerHTML = Object.entries(BOT_STRATEGIES).map(([key, s]) => `
+      <div class="strategy-card ${this.selStrategy === key ? 'selected' : ''}" onclick="perps.selectStrategy('${key}')">
+        <div class="strategy-card-head"><span class="strategy-emoji">${s.emoji}</span><strong>${s.name}</strong><span class="strategy-tag">${s.tag}</span></div>
+        <p class="strategy-desc">${s.desc}</p>
+        <p class="strategy-when">💡 ${s.when}</p>
+      </div>`).join('');
+  }
+
+  _renderRiskProfiles() {
+    const box = document.getElementById('riskProfiles');
+    if (!box) return;
+    box.innerHTML = Object.entries(RISK_PROFILES).map(([key, r]) => `
+      <div class="risk-profile ${this.selRisk === key ? 'selected' : ''}" onclick="perps.selectRisk('${key}')">
+        <div class="risk-profile-head">${r.emoji} <strong>${r.name}</strong></div>
+        <div class="risk-profile-params">Leva ${r.leverage}x · ${r.sizingPercent}% equity · TP ${r.tp}% · SL ${r.sl}%</div>
+        <p class="risk-profile-desc">${r.desc}</p>
+      </div>`).join('');
+  }
+
+  selectStrategy(key) {
+    this.selStrategy = key;
+    this._renderStrategyCards();
+    this._updateConsultant();
+  }
+
+  selectRisk(key) {
+    this.selRisk = key;
+    this._renderRiskProfiles();
+    this._updateConsultant();
+  }
+
+  _updateConsultant() {
+    const box = document.getElementById('consultantBox');
+    const txt = document.getElementById('consultantText');
+    if (!box || !txt) return;
+    if (!this.selStrategy) { box.classList.add('hidden'); return; }
+    const s = BOT_STRATEGIES[this.selStrategy];
+    const r = RISK_PROFILES[this.selRisk];
+    const coin = document.getElementById('botMarket')?.value || 'il mercato scelto';
+    const cfg = s.build();
+    const dir = cfg.direction === 'both' ? 'Long e Short' : (cfg.direction === 'long' ? 'solo Long' : 'solo Short');
+    box.classList.remove('hidden');
+    txt.innerHTML = `
+      Per <strong>${coin}</strong> ti consiglio la strategia <strong>"${s.name}"</strong> (${s.tag.toLowerCase()}) con profilo <strong>${r.name}</strong>.<br>
+      Il bot opererà <strong>${dir}</strong> sul timeframe <strong>${cfg.candleInterval}</strong>: ${s.desc}<br>
+      Gestione: leva <strong>${r.leverage}x</strong>, <strong>${r.sizingPercent}%</strong> dell'equity per operazione,
+      take profit <strong>+${r.tp}%</strong>, stop loss <strong>-${r.sl}%</strong>${r.trailing ? `, trailing stop <strong>${r.trailing}%</strong>` : ''}.
+      Stop automatico a <strong>-${this.fmtUsd(r.maxDailyLoss)}</strong> di perdita giornaliera.
+      <br><span class="consultant-note">💡 ${s.when}</span>`;
+  }
+
+  _buildSimpleConfig() {
+    const s = BOT_STRATEGIES[this.selStrategy];
+    const r = RISK_PROFILES[this.selRisk];
+    const strat = s.build();
+    return {
+      ...strat,
+      leverage: r.leverage,
+      sizing: { mode: 'percent', value: r.sizingPercent },
+      tp: { enabled: true, mode: 'percent', value: r.tp },
+      sl: { enabled: true, mode: 'percent', value: r.sl },
+      trailing: { enabled: r.trailing > 0, mode: 'percent', value: r.trailing || 1 },
+      risk: { maxDailyLossUsd: r.maxDailyLoss, maxPositionUsd: r.maxPosition },
+      preset: { strategy: this.selStrategy, risk: this.selRisk }
+    };
   }
 
   addRule(kind, rule = {}) {
@@ -632,25 +790,31 @@ class PerpsApp {
     if (!name) return this.toast('Inserisci un nome', 'warning');
     if (!this.connected) return this.toast('Connetti MetaMask', 'warning');
 
-    const config = {
-      direction: document.getElementById('botDirection').value,
-      leverage: parseFloat(document.getElementById('botLeverage').value),
-      sizing: {
-        mode: document.getElementById('botSizingMode').value,
-        value: parseFloat(document.getElementById('botSizingValue').value)
-      },
-      candleInterval: document.getElementById('botInterval').value,
-      logic: document.getElementById('botLogic').value,
-      entryRules: this._collectRules('entry'),
-      exitRules: this._collectRules('exit'),
-      tp: { enabled: document.getElementById('botTpEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botTpValue').value) },
-      sl: { enabled: document.getElementById('botSlEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botSlValue').value) },
-      trailing: { enabled: document.getElementById('botTrailEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botTrailValue').value) },
-      risk: {
-        maxDailyLossUsd: parseFloat(document.getElementById('botMaxDailyLoss').value),
-        maxPositionUsd: parseFloat(document.getElementById('botMaxPosition').value)
-      }
-    };
+    let config;
+    if (this.botMode === 'simple') {
+      if (!this.selStrategy) return this.toast('Scegli una strategia', 'warning');
+      config = this._buildSimpleConfig();
+    } else {
+      config = {
+        direction: document.getElementById('botDirection').value,
+        leverage: parseFloat(document.getElementById('botLeverage').value),
+        sizing: {
+          mode: document.getElementById('botSizingMode').value,
+          value: parseFloat(document.getElementById('botSizingValue').value)
+        },
+        candleInterval: document.getElementById('botInterval').value,
+        logic: document.getElementById('botLogic').value,
+        entryRules: this._collectRules('entry'),
+        exitRules: this._collectRules('exit'),
+        tp: { enabled: document.getElementById('botTpEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botTpValue').value) },
+        sl: { enabled: document.getElementById('botSlEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botSlValue').value) },
+        trailing: { enabled: document.getElementById('botTrailEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botTrailValue').value) },
+        risk: {
+          maxDailyLossUsd: parseFloat(document.getElementById('botMaxDailyLoss').value),
+          maxPositionUsd: parseFloat(document.getElementById('botMaxPosition').value)
+        }
+      };
+    }
 
     try {
       if (id) {
@@ -672,4 +836,6 @@ window.perps = perps;
 document.addEventListener('DOMContentLoaded', () => {
   const sel = document.getElementById('orderMarket');
   if (sel) sel.addEventListener('change', () => perps._updateMid());
+  const botSel = document.getElementById('botMarket');
+  if (botSel) botSel.addEventListener('change', () => perps._updateConsultant());
 });

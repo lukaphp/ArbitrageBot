@@ -194,6 +194,23 @@ class HyperliquidClient {
     return sdk.info.getUserOpenOrders(masterAddress);
   }
 
+  /** Ordini aperti dettagliati (include trigger TP/SL con triggerPx). */
+  async getFrontendOpenOrders(masterAddress, network = this.network) {
+    const sdk = await this.getReadSdk(network);
+    const orders = await sdk.info.getFrontendOpenOrders(masterAddress);
+    return (orders || []).map(o => ({
+      coin: o.coin,
+      side: o.side === 'B' ? 'buy' : 'sell',
+      sz: parseFloat(o.sz),
+      limitPx: parseFloat(o.limitPx),
+      isTrigger: o.isTrigger,
+      triggerPx: o.triggerPx ? parseFloat(o.triggerPx) : null,
+      orderType: o.orderType,
+      isPositionTpsl: o.isPositionTpsl,
+      oid: o.oid
+    }));
+  }
+
   /** Storico delle operazioni eseguite (fill), manuali e dei bot. */
   async getUserFills(masterAddress, network = this.network) {
     const sdk = await this.getReadSdk(network);

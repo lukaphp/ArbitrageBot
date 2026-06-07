@@ -200,6 +200,20 @@
 .spot-transfer-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .spot-transfer-controls .form-input { max-width: 180px; }
 
+/* --- Grafico posizione --- */
+.chart-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 10px; }
+.chart-intervals { display: flex; gap: 6px; }
+.chart-int { padding: 5px 12px; border: 1px solid #cbd5e0; background: #fff; border-radius: 8px; cursor: pointer; font-size: 0.82rem; font-weight: 600; color: #718096; }
+.chart-int.active { background: #667eea; color: #fff; border-color: #667eea; }
+.chart-legend { display: flex; gap: 12px; font-size: 0.78rem; font-weight: 600; flex-wrap: wrap; }
+.chart-legend .lg-entry { color: #3182ce; }
+.chart-legend .lg-liq { color: #dd6b20; }
+.chart-legend .lg-tp { color: #38a169; }
+.chart-legend .lg-sl { color: #e53e3e; }
+.chart-legend .lg-ema { color: #805ad5; }
+.chart-container { width: 100%; height: 420px; }
+.pos-actions { display: flex; gap: 6px; }
+
 /* --- Backtest --- */
 .backtest-section { margin: 18px 0; padding: 14px; background: #f7fafc; border-radius: 10px; }
 .backtest-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }

@@ -448,6 +448,18 @@ class ArbitrageBotServer {
       }
     });
 
+    // Ordini aperti (trigger TP/SL inclusi) per i livelli sul grafico
+    app.get('/api/perps/orders', async (req, res) => {
+      try {
+        const { address } = req.query;
+        if (!address) return res.status(400).json({ success: false, error: 'address richiesto' });
+        const orders = await hyperliquid.getFrontendOpenOrders(address);
+        res.json({ success: true, data: orders });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // Storico operazioni eseguite (fill Hyperliquid: manuali + bot)
     app.get('/api/perps/fills', async (req, res) => {
       try {

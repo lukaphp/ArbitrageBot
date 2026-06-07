@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="styles_perps.css">
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
     <!-- Header -->
@@ -526,6 +527,28 @@
         </div>
     </div>
 
+    <!-- Modal grafico posizione -->
+    <div id="chartModal" class="modal hidden">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h3 id="chartTitle">📊 Grafico</h3>
+                <button class="modal-close" onclick="perps.closeChart()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="chart-toolbar">
+                    <div class="chart-intervals" id="chartIntervals">
+                        <button class="chart-int" data-int="5m">5m</button>
+                        <button class="chart-int active" data-int="15m">15m</button>
+                        <button class="chart-int" data-int="1h">1h</button>
+                        <button class="chart-int" data-int="4h">4h</button>
+                    </div>
+                    <div class="chart-legend" id="chartLegend"></div>
+                </div>
+                <div id="chartContainer" class="chart-container"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- Modal creazione/modifica Bot Perps -->
     <div id="botModal" class="modal hidden">
         <div class="modal-content modal-wide">
@@ -694,6 +717,6 @@
         }
     </script>
     <script src="app.js?v=1.0.5"></script>
-    <script src="perps.js?v=1.0.8"></script>
+    <script src="perps.js?v=1.0.9"></script>
 </body>
 </html>

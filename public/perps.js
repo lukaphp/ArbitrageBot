@@ -436,7 +436,10 @@ class PerpsApp {
         <td class="${pnlClass}">${this.fmtUsd(p.unrealizedPnl)}</td>
         <td>${p.leverage ? p.leverage + 'x' : '—'}</td>
         <td>${p.liquidationPx ? this.fmtUsd(p.liquidationPx) : '—'}</td>
-        <td><button class="btn btn-sm btn-danger" onclick="perps.closePosition('${coin}')">Chiudi</button></td>
+        <td class="pos-actions">
+          <button class="btn btn-sm btn-outline" onclick="perps.openChart('${coin}')">📊</button>
+          <button class="btn btn-sm btn-danger" onclick="perps.closePosition('${coin}')">Chiudi</button>
+        </td>
       </tr>`;
     }).join('');
   }
@@ -452,6 +455,133 @@ class PerpsApp {
       await this.refreshAccount();
       if (this.posTab === 'history') this.loadFills();
     } catch (e) { this.toast(e.message, 'error'); }
+  }
+
+  // ---- Grafico posizione (Lightweight Charts) ----
+  openChart(coin) {
+    if (!window.LightweightCharts) return this.toast('Libreria grafici non caricata', 'error');
+    this.chartCoin = coin;
+    this.chartInterval = this.chartInterval || '15m';
+    document.getElementById('chartTitle').textContent = `📊 ${coin}`;
+    document.querySelectorAll('.chart-int').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.int === this.chartInterval);
+      btn.onclick = () => { this.chartInterval = btn.dataset.int; this._destroyChart(); this._renderChart(); document.querySelectorAll('.chart-int').forEach(b => b.classList.toggle('active', b === btn)); };
+    });
+    app.showModal('chartModal');
+    setTimeout(() => this._renderChart(), 60); // attendi il layout del modal
+    if (this.chartTimer) clearInterval(this.chartTimer);
+    this.chartTimer = setInterval(() => this._renderChart(true), 6000);
+  }
+
+  closeChart() {
+    if (this.chartTimer) { clearInterval(this.chartTimer); this.chartTimer = null; }
+    this._destroyChart();
+    app.closeModal('chartModal');
+  }
+
+  _destroyChart() {
+    if (this.chart) { try { this.chart.remove(); } catch {} this.chart = null; this.candleSeries = null; this.emaSeries = null; }
+    this._priceLines = [];
+  }
+
+  _ema(values, period) {
+    if (values.length < period) return [];
+    const k = 2 / (period + 1);
+    const out = [];
+    let prev = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    for (let i = period - 1; i < values.length; i++) {
+      prev = i === period - 1 ? prev : values[i] * k + prev * (1 - k);
+      out.push({ i, value: prev });
+    }
+    return out;
+  }
+
+  async _renderChart(isUpdate = false) {
+    const coin = this.chartCoin;
+    const container = document.getElementById('chartContainer');
+    if (!container) return;
+    try {
+      const [candlesRaw, orders] = await Promise.all([
+        this.api(`/api/perps/candles?coin=${encodeURIComponent(coin)}&interval=${this.chartInterval}&lookback=${1000 * 60 * 60 * 24 * 5}`),
+        this.connected ? this.api('/api/perps/orders?address=' + this.address).catch(() => []) : Promise.resolve([])
+      ]);
+      const candles = (candlesRaw || []).map(k => ({
+        time: Math.floor(k.t / 1000), open: +k.o, high: +k.h, low: +k.l, close: +k.c
+      })).filter(c => !isNaN(c.close));
+      if (!candles.length) return;
+
+      if (!this.chart) {
+        this.chart = LightweightCharts.createChart(container, {
+          width: container.clientWidth, height: 420,
+          layout: { background: { color: '#fff' }, textColor: '#2d3748' },
+          grid: { vertLines: { color: '#edf2f7' }, horzLines: { color: '#edf2f7' } },
+          timeScale: { timeVisible: true, borderColor: '#e2e8f0' },
+          rightPriceScale: { borderColor: '#e2e8f0' },
+          crosshair: { mode: LightweightCharts.CrosshairMode.Normal }
+        });
+        this.candleSeries = this.chart.addCandlestickSeries({
+          upColor: '#38a169', downColor: '#e53e3e', borderVisible: false,
+          wickUpColor: '#38a169', wickDownColor: '#e53e3e'
+        });
+        this.emaSeries = this.chart.addLineSeries({ color: '#805ad5', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+        this._priceLines = [];
+        new ResizeObserver(() => { if (this.chart) this.chart.resize(container.clientWidth, 420); }).observe(container);
+      }
+
+      this.candleSeries.setData(candles);
+      // EMA 20 overlay
+      const closes = candles.map(c => c.close);
+      const ema = this._ema(closes, 20).map(e => ({ time: candles[e.i].time, value: +e.value.toFixed(4) }));
+      this.emaSeries.setData(ema);
+
+      // Rimuovi vecchie linee e ridisegna i livelli della posizione
+      (this._priceLines || []).forEach(pl => { try { this.candleSeries.removePriceLine(pl); } catch {} });
+      this._priceLines = [];
+      const addLine = (price, color, title) => {
+        if (!price || isNaN(price)) return;
+        this._priceLines.push(this.candleSeries.createPriceLine({
+          price, color, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true, title
+        }));
+      };
+      const pos = (this.account?.positions || []).find(p => p.coin === coin || `${p.coin}-PERP` === coin);
+      const legend = [];
+      if (pos) {
+        addLine(pos.entryPx, '#3182ce', 'Entry');
+        addLine(pos.liquidationPx, '#dd6b20', 'Liq.');
+        legend.push(`<span class="lg-entry">● Entry ${this.fmtUsd(pos.entryPx)}</span>`);
+        if (pos.liquidationPx) legend.push(`<span class="lg-liq">● Liq ${this.fmtUsd(pos.liquidationPx)}</span>`);
+      }
+      // TP/SL dai trigger order aperti su questo coin
+      (orders || []).filter(o => (o.coin === coin || `${o.coin}-PERP` === coin) && o.isTrigger && o.triggerPx)
+        .forEach(o => {
+          const isTp = /tp|take/i.test(o.orderType || '');
+          addLine(o.triggerPx, isTp ? '#38a169' : '#e53e3e', isTp ? 'TP' : 'SL');
+          legend.push(`<span class="${isTp ? 'lg-tp' : 'lg-sl'}">● ${isTp ? 'TP' : 'SL'} ${this.fmtUsd(o.triggerPx)}</span>`);
+        });
+
+      // Marker dei fill su questo mercato
+      const fills = this.connected ? await this.api('/api/perps/fills?address=' + this.address).catch(() => []) : [];
+      const markers = (fills || [])
+        .filter(f => f.coin === coin || `${f.coin}-PERP` === coin)
+        .map(f => {
+          const isBuy = f.side === 'buy' || /Long/i.test(f.dir);
+          return {
+            time: Math.floor(f.time / 1000),
+            position: isBuy ? 'belowBar' : 'aboveBar',
+            color: isBuy ? '#38a169' : '#e53e3e',
+            shape: isBuy ? 'arrowUp' : 'arrowDown',
+            text: f.dir || (isBuy ? 'Buy' : 'Sell')
+          };
+        }).sort((a, b) => a.time - b.time);
+      this.candleSeries.setMarkers(markers);
+
+      legend.push(`<span class="lg-ema">● EMA20</span>`);
+      document.getElementById('chartLegend').innerHTML = legend.join(' ');
+      if (!isUpdate) this.chart.timeScale().fitContent();
+    } catch (e) {
+      if (!isUpdate) this.toast('Errore caricamento grafico: ' + e.message, 'error');
+    }
   }
 
   // ---- Tab posizioni: Aperte / Storico ----

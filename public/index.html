@@ -585,10 +585,15 @@
             <div class="modal-body">
                 <div class="chart-toolbar">
                     <div class="chart-intervals" id="chartIntervals">
-                        <button class="chart-int" data-int="5m">5m</button>
-                        <button class="chart-int active" data-int="15m">15m</button>
-                        <button class="chart-int" data-int="1h">1h</button>
-                        <button class="chart-int" data-int="4h">4h</button>
+                        <button class="chart-int" data-int="5m" data-days="1">5m</button>
+                        <button class="chart-int active" data-int="15m" data-days="3">15m</button>
+                        <button class="chart-int" data-int="1h" data-days="10">1h</button>
+                        <button class="chart-int" data-int="4h" data-days="45">4h</button>
+                        <span class="chart-int-sep"></span>
+                        <button class="chart-int" data-int="1d" data-days="180" title="Giornaliera">1G</button>
+                        <button class="chart-int" data-int="1w" data-days="730" title="Settimanale">1S</button>
+                        <button class="chart-int" data-int="1M" data-days="1825" title="Mensile">1Me</button>
+                        <button class="chart-int" data-int="1d" data-days="365" title="Ultimo anno">1A</button>
                     </div>
                     <div class="chart-legend" id="chartLegend"></div>
                 </div>
@@ -799,6 +804,6 @@
         }
     </script>
     <script src="app.js?v=1.0.5"></script>
-    <script src="perps.js?v=1.1.0"></script>
+    <script src="perps.js?v=1.1.1"></script>
 </body>
 </html>

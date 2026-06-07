@@ -523,11 +523,20 @@ class PerpsApp {
   openChart(coin) {
     if (!window.LightweightCharts) return this.toast('Libreria grafici non caricata', 'error');
     this.chartCoin = coin;
-    this.chartInterval = this.chartInterval || '15m';
     document.getElementById('chartTitle').textContent = `📊 ${coin}`;
-    document.querySelectorAll('.chart-int').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.int === this.chartInterval);
-      btn.onclick = () => { this.chartInterval = btn.dataset.int; this._destroyChart(); this._renderChart(); document.querySelectorAll('.chart-int').forEach(b => b.classList.toggle('active', b === btn)); };
+    const buttons = [...document.querySelectorAll('.chart-int')];
+    // Vista attiva (default 15m); ogni pulsante porta intervallo + lookback in giorni
+    const activeBtn = buttons.find(b => b.classList.contains('active')) || buttons[1];
+    this.chartInterval = activeBtn.dataset.int;
+    this.chartLookbackDays = parseInt(activeBtn.dataset.days) || 3;
+    buttons.forEach(btn => {
+      btn.onclick = () => {
+        this.chartInterval = btn.dataset.int;
+        this.chartLookbackDays = parseInt(btn.dataset.days) || 3;
+        buttons.forEach(b => b.classList.toggle('active', b === btn));
+        this._destroyChart();
+        this._renderChart();
+      };
     });
     app.showModal('chartModal');
     setTimeout(() => this._renderChart(), 60); // attendi il layout del modal
@@ -563,8 +572,9 @@ class PerpsApp {
     const container = document.getElementById('chartContainer');
     if (!container) return;
     try {
+      const lookbackMs = (this.chartLookbackDays || 3) * 86400000;
       const [candlesRaw, orders] = await Promise.all([
-        this.api(`/api/perps/candles?coin=${encodeURIComponent(coin)}&interval=${this.chartInterval}&lookback=${1000 * 60 * 60 * 24 * 5}`),
+        this.api(`/api/perps/candles?coin=${encodeURIComponent(coin)}&interval=${this.chartInterval}&lookback=${lookbackMs}`),
         this.connected ? this.api('/api/perps/orders?address=' + this.address).catch(() => []) : Promise.resolve([])
       ]);
       const candles = (candlesRaw || []).map(k => ({

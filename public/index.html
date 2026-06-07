@@ -293,6 +293,17 @@
                                 </div>
                             </div>
                         </div>
+                        <div id="spotTransfer" class="spot-transfer hidden">
+                            <div class="spot-transfer-info">
+                                💼 Hai <strong id="spotBalance">—</strong> nel saldo <strong>Spot</strong>.
+                                Per fare trading di perpetual trasferiscilo al saldo <strong>Perps</strong>.
+                            </div>
+                            <div class="spot-transfer-controls">
+                                <input type="number" id="transferAmount" class="form-input" placeholder="Importo USDC" step="any">
+                                <button class="btn btn-outline btn-sm" onclick="perps.fillTransferMax()">Max</button>
+                                <button class="btn btn-primary" onclick="perps.transferToPerp()">↪️ Trasferisci a Perps</button>
+                            </div>
+                        </div>
                         <div id="faucetWatch" class="faucet-watch hidden">
                             <span class="spinner-sm"></span>
                             <span id="faucetWatchText">In attesa dell'arrivo dei fondi…</span>
@@ -611,6 +622,6 @@
         }
     </script>
     <script src="app.js?v=1.0.5"></script>
-    <script src="perps.js?v=1.0.3"></script>
+    <script src="perps.js?v=1.0.4"></script>
 </body>
 </html>

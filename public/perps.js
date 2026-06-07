@@ -146,13 +146,66 @@ class PerpsApp {
       document.getElementById('perpsWithdrawable').textContent = this.fmtUsd(acc.withdrawable);
       document.getElementById('perpsPosCount').textContent = acc.positions.length;
       this._updateFaucetBadge(acc.accountValue);
+      this._updateSpotTransfer(acc.spotUsdc || 0);
       this._renderPositions(acc.positions);
     } catch (e) {
       // Account inesistente su HL = equity 0 (non un errore bloccante)
       this._updateFaucetBadge(0);
+      this._updateSpotTransfer(0);
       this._renderPositions([]);
     }
     await this._refreshAgentStatus();
+  }
+
+  _updateSpotTransfer(spotUsdc) {
+    this._spotUsdc = spotUsdc;
+    const box = document.getElementById('spotTransfer');
+    const bal = document.getElementById('spotBalance');
+    if (bal) bal.textContent = this.fmtUsd(spotUsdc);
+    if (box) box.classList.toggle('hidden', !(spotUsdc > 0.01) || this.network !== 'testnet');
+  }
+
+  fillTransferMax() {
+    const inp = document.getElementById('transferAmount');
+    if (inp && this._spotUsdc) inp.value = Math.floor(this._spotUsdc * 100) / 100;
+  }
+
+  async transferToPerp() {
+    if (!this.connected) return this.toast('Connetti MetaMask', 'warning');
+    const amount = parseFloat(document.getElementById('transferAmount').value);
+    if (!amount || amount <= 0) return this.toast('Inserisci un importo valido', 'warning');
+    try {
+      this.toast('Preparazione trasferimento...', 'info');
+      const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+      const prep = await this.api('/api/perps/transfer/prepare', {
+        method: 'POST',
+        body: JSON.stringify({ address: this.address, amount, toPerp: true, signatureChainId: chainId })
+      });
+      const { domain, types, message, primaryType } = prep.typedData;
+      const fullTypedData = {
+        domain, primaryType,
+        types: {
+          EIP712Domain: [
+            { name: 'name', type: 'string' }, { name: 'version', type: 'string' },
+            { name: 'chainId', type: 'uint256' }, { name: 'verifyingContract', type: 'address' }
+          ],
+          ...types
+        },
+        message
+      };
+      const signature = await window.ethereum.request({
+        method: 'eth_signTypedData_v4',
+        params: [this.address, JSON.stringify(fullTypedData)]
+      });
+      await this.api('/api/perps/transfer/submit', {
+        method: 'POST',
+        body: JSON.stringify({ address: this.address, action: prep.action, signature })
+      });
+      this.toast(`✅ Trasferiti ${this.fmtUsd(amount)} a Perps!`, 'success');
+      await this.refreshAccount();
+    } catch (e) {
+      this.toast('Trasferimento fallito: ' + (e.message || e), 'error');
+    }
   }
 
   // ---- Faucet testnet ----

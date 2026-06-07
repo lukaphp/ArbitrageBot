@@ -147,6 +147,63 @@ class AgentWallet {
     return { action, typedData, agentAddress: agent.address };
   }
 
+  /** Risolve chainId di firma (override dalla rete attiva o canonico). */
+  _resolveSignChain(network, signatureChainId) {
+    const sign = SIGN_CHAINS[network];
+    if (!sign) throw new Error(`Rete non valida: ${network}`);
+    let chainHex = sign.hex;
+    let chainIdNum = sign.chainId;
+    if (signatureChainId) {
+      chainHex = String(signatureChainId).startsWith('0x')
+        ? String(signatureChainId)
+        : '0x' + Number(signatureChainId).toString(16);
+      chainIdNum = parseInt(chainHex, 16);
+      if (!chainIdNum || isNaN(chainIdNum)) throw new Error('signatureChainId non valido');
+    }
+    return { chainHex, chainIdNum, hyperliquidChain: sign.hyperliquidChain };
+  }
+
+  /**
+   * Costruisce l'azione usdClassTransfer (trasferimento Spot↔Perp) + typed data
+   * da far firmare a MetaMask. toPerp=true sposta USDC da Spot a Perp.
+   */
+  prepareUsdClassTransfer(masterAddress, network, amount, toPerp = true, signatureChainId = null) {
+    if (!ethers.isAddress(masterAddress)) throw new Error('masterAddress non valido');
+    const amt = Number(amount);
+    if (!amt || amt <= 0 || isNaN(amt)) throw new Error('Importo non valido');
+    const { chainHex, chainIdNum, hyperliquidChain } = this._resolveSignChain(network, signatureChainId);
+    const nonce = Date.now();
+    const amountStr = String(amt);
+
+    const action = {
+      type: 'usdClassTransfer',
+      hyperliquidChain,
+      signatureChainId: chainHex,
+      amount: amountStr,
+      toPerp: !!toPerp,
+      nonce
+    };
+    const typedData = {
+      domain: {
+        name: 'HyperliquidSignTransaction',
+        version: '1',
+        chainId: chainIdNum,
+        verifyingContract: '0x0000000000000000000000000000000000000000'
+      },
+      types: {
+        'HyperliquidTransaction:UsdClassTransfer': [
+          { name: 'hyperliquidChain', type: 'string' },
+          { name: 'amount', type: 'string' },
+          { name: 'toPerp', type: 'bool' },
+          { name: 'nonce', type: 'uint64' }
+        ]
+      },
+      primaryType: 'HyperliquidTransaction:UsdClassTransfer',
+      message: { hyperliquidChain, amount: amountStr, toPerp: !!toPerp, nonce }
+    };
+    return { action, typedData };
+  }
+
   /**
    * Marca l'agent come approvato dopo l'invio riuscito a Hyperliquid.
    */

@@ -489,13 +489,40 @@ class ArbitrageBotServer {
         const network = hyperliquid.getNetwork();
         // MetaMask restituisce una firma esadecimale singola: splittala in {r,s,v}
         const sig = ethers.Signature.from(signature);
-        const result = await hyperliquid.submitApproveAgent(action, { r: sig.r, s: sig.s, v: sig.v }, network);
+        const result = await hyperliquid.submitSignedAction(action, { r: sig.r, s: sig.s, v: sig.v }, network);
         agentWallet.markApproved(address, network, action.agentAddress);
         hyperliquid.resetSignSdk(address, network);
         this.io.emit('perps:agentStatus', agentWallet.getStatus(address, network));
         res.json({ success: true, data: result });
       } catch (error) {
         logger.error('Errore approveAgent:', error.message);
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    // --- Trasferimento Spot <-> Perp (usdClassTransfer, firmato da MetaMask) ---
+    app.post('/api/perps/transfer/prepare', (req, res) => {
+      try {
+        const { address, amount, toPerp, signatureChainId } = req.body;
+        const network = hyperliquid.getNetwork();
+        const result = agentWallet.prepareUsdClassTransfer(
+          address, network, amount, toPerp !== false, signatureChainId
+        );
+        res.json({ success: true, data: result });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    app.post('/api/perps/transfer/submit', async (req, res) => {
+      try {
+        const { action, signature } = req.body;
+        const network = hyperliquid.getNetwork();
+        const sig = ethers.Signature.from(signature);
+        const result = await hyperliquid.submitSignedAction(action, { r: sig.r, s: sig.s, v: sig.v }, network);
+        res.json({ success: true, data: result });
+      } catch (error) {
+        logger.error('Errore trasferimento Spot/Perp:', error.message);
         res.status(400).json({ success: false, error: error.message });
       }
     });

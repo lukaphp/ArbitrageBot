@@ -150,10 +150,13 @@ class HyperliquidClient {
     return sdk.info.perpetuals.getPredictedFundings();
   }
 
-  /** Stato account normalizzato: equity, margine, posizioni aperte. */
+  /** Stato account normalizzato: equity, margine, posizioni aperte, saldo Spot. */
   async getAccount(masterAddress, network = this.network) {
     const sdk = await this.getReadSdk(network);
-    const state = await sdk.info.perpetuals.getClearinghouseState(masterAddress);
+    const [state, spotUsdc] = await Promise.all([
+      sdk.info.perpetuals.getClearinghouseState(masterAddress),
+      this.getSpotUsdc(masterAddress, network).catch(() => 0)
+    ]);
     const ms = state.marginSummary || {};
     const positions = (state.assetPositions || [])
       .map(ap => ap.position)
@@ -177,6 +180,7 @@ class HyperliquidClient {
       totalMarginUsed: parseFloat(ms.totalMarginUsed || '0'),
       totalNtlPos: parseFloat(ms.totalNtlPos || '0'),
       withdrawable: parseFloat(state.withdrawable || '0'),
+      spotUsdc,
       positions
     };
   }
@@ -186,10 +190,13 @@ class HyperliquidClient {
     return sdk.info.getUserOpenOrders(masterAddress);
   }
 
-  // ---- approveAgent (firmato da MetaMask) ----
+  // ---- Azioni user-signed (firmate da MetaMask) ----
 
-  /** Invia a /exchange l'azione approveAgent già firmata dal master (MetaMask). */
-  async submitApproveAgent(action, signature, network = this.network) {
+  /**
+   * Invia a /exchange un'azione già firmata dal master wallet (MetaMask):
+   * usata per approveAgent e usdClassTransfer (Spot↔Perp).
+   */
+  async submitSignedAction(action, signature, network = this.network) {
     const url = `${this.endpoints(network).api}/exchange`;
     const body = { action, nonce: action.nonce, signature };
     const { data } = await axios.post(url, body, {
@@ -200,6 +207,16 @@ class HyperliquidClient {
       throw new Error(typeof data.response === 'string' ? data.response : JSON.stringify(data.response));
     }
     return data;
+  }
+
+  /** Saldo USDC nel wallet Spot (HyperCore) del master. */
+  async getSpotUsdc(masterAddress, network = this.network) {
+    const url = `${this.endpoints(network).api}/info`;
+    const { data } = await axios.post(url, { type: 'spotClearinghouseState', user: masterAddress }, {
+      headers: { 'Content-Type': 'application/json' }, timeout: 10000
+    });
+    const usdc = (data?.balances || []).find(b => b.coin === 'USDC');
+    return usdc ? parseFloat(usdc.total) : 0;
   }
 
   // ---- Esecuzione ordini (firmati dall'agent) ----

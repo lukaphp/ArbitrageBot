@@ -353,27 +353,55 @@
                     </div>
                 </section>
 
-                <!-- Posizioni Aperte -->
+                <!-- Posizioni & Storico -->
                 <section class="card">
                     <div class="card-header">
-                        <h2>📈 Posizioni Aperte</h2>
-                        <button class="btn btn-outline" onclick="perps.refreshAccount()">🔄 Aggiorna</button>
+                        <h2>📈 Posizioni</h2>
+                        <button class="btn btn-outline" onclick="perps.refreshPositionsTab()">🔄 Aggiorna</button>
                     </div>
                     <div class="card-content">
-                        <div class="table-container">
-                            <table class="history-table perps-positions-table">
-                                <thead>
-                                    <tr>
-                                        <th>Mercato</th><th>Lato</th><th>Size</th><th>Entry</th>
-                                        <th>PnL</th><th>Leva</th><th>Liq.</th><th>Azioni</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="positionsList"></tbody>
-                            </table>
+                        <div class="pos-tabs">
+                            <button class="pos-tab active" data-tab="open" onclick="perps.switchPosTab('open')">📈 Aperte</button>
+                            <button class="pos-tab" data-tab="history" onclick="perps.switchPosTab('history')">📜 Storico operazioni</button>
                         </div>
-                        <div id="noPositions" class="no-data">
-                            <div class="no-data-icon">📈</div>
-                            <div class="no-data-text">Nessuna posizione aperta</div>
+
+                        <!-- Tab: posizioni aperte -->
+                        <div id="posOpen">
+                            <div class="table-container">
+                                <table class="history-table perps-positions-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Mercato</th><th>Lato</th><th>Size</th><th>Entry</th>
+                                            <th>PnL</th><th>Leva</th><th>Liq.</th><th>Azioni</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="positionsList"></tbody>
+                                </table>
+                            </div>
+                            <div id="noPositions" class="no-data">
+                                <div class="no-data-icon">📈</div>
+                                <div class="no-data-text">Nessuna posizione aperta</div>
+                            </div>
+                        </div>
+
+                        <!-- Tab: storico operazioni -->
+                        <div id="posHistory" class="hidden">
+                            <div class="table-container">
+                                <table class="history-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Data</th><th>Mercato</th><th>Operazione</th><th>Size</th>
+                                            <th>Prezzo</th><th>PnL</th><th>Fee</th><th>Tx</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="fillsList"></tbody>
+                                </table>
+                            </div>
+                            <div id="noFills" class="no-data">
+                                <div class="no-data-icon">📜</div>
+                                <div class="no-data-text">Nessuna operazione eseguita</div>
+                                <div class="no-data-subtitle">Le tue operazioni (manuali e dei bot) appariranno qui</div>
+                            </div>
                         </div>
                     </div>
                 </section>
@@ -650,6 +678,6 @@
         }
     </script>
     <script src="app.js?v=1.0.5"></script>
-    <script src="perps.js?v=1.0.6"></script>
+    <script src="perps.js?v=1.0.7"></script>
 </body>
 </html>

@@ -194,6 +194,27 @@ class HyperliquidClient {
     return sdk.info.getUserOpenOrders(masterAddress);
   }
 
+  /** Storico delle operazioni eseguite (fill), manuali e dei bot. */
+  async getUserFills(masterAddress, network = this.network) {
+    const sdk = await this.getReadSdk(network);
+    const fills = await sdk.info.getUserFills(masterAddress);
+    return (fills || [])
+      .sort((a, b) => b.time - a.time)
+      .slice(0, 200)
+      .map(f => ({
+        coin: f.coin,
+        dir: f.dir,                              // es. 'Open Long', 'Close Short'
+        side: f.side === 'B' ? 'buy' : 'sell',
+        px: parseFloat(f.px),
+        sz: parseFloat(f.sz),
+        fee: parseFloat(f.fee),
+        closedPnl: parseFloat(f.closedPnl),
+        time: f.time,
+        hash: f.hash,
+        oid: f.oid
+      }));
+  }
+
   // ---- Azioni user-signed (firmate da MetaMask) ----
 
   /**

@@ -84,6 +84,7 @@ class PerpsApp {
     this.botMode = 'simple';
     this.selStrategy = null;
     this.selRisk = 'moderato';
+    this.posTab = 'open';
   }
 
   // ---- Helpers ----
@@ -135,8 +136,8 @@ class PerpsApp {
     this.socket.on('perps:price', (d) => { this.mids = d.mids || {}; this._updateMid(); });
     this.socket.on('perps:botUpdate', (state) => this._updateBotCard(state));
     this.socket.on('perps:agentStatus', () => this.refreshAccount());
-    this.socket.on('perps:position', () => this.refreshAccount());
-    this.socket.on('perps:fill', () => this.refreshAccount());
+    this.socket.on('perps:position', () => { this.refreshAccount(); if (this.posTab === 'history') this.loadFills(); });
+    this.socket.on('perps:fill', () => { this.refreshAccount(); if (this.posTab === 'history') this.loadFills(); });
   }
 
   // ---- Network ----
@@ -449,7 +450,67 @@ class PerpsApp {
       });
       this.toast('Posizione chiusa', 'success');
       await this.refreshAccount();
+      if (this.posTab === 'history') this.loadFills();
     } catch (e) { this.toast(e.message, 'error'); }
+  }
+
+  // ---- Tab posizioni: Aperte / Storico ----
+  switchPosTab(tab) {
+    this.posTab = tab;
+    document.getElementById('posOpen')?.classList.toggle('hidden', tab !== 'open');
+    document.getElementById('posHistory')?.classList.toggle('hidden', tab !== 'history');
+    document.querySelectorAll('.pos-tab').forEach(t =>
+      t.classList.toggle('active', t.dataset.tab === tab));
+    if (tab === 'history') this.loadFills();
+  }
+
+  refreshPositionsTab() {
+    if (this.posTab === 'history') this.loadFills();
+    else this.refreshAccount();
+  }
+
+  async loadFills() {
+    if (!this.connected) return;
+    try {
+      const fills = await this.api('/api/perps/fills?address=' + this.address);
+      this._renderFills(fills);
+    } catch (e) { this._renderFills([]); }
+  }
+
+  _explorerTxUrl(hash) {
+    const host = this.network === 'mainnet' ? 'app.hyperliquid.xyz' : 'app.hyperliquid-testnet.xyz';
+    return `https://${host}/explorer/tx/${hash}`;
+  }
+
+  _renderFills(fills) {
+    const tbody = document.getElementById('fillsList');
+    const empty = document.getElementById('noFills');
+    if (!tbody) return;
+    if (!fills || !fills.length) {
+      tbody.innerHTML = '';
+      empty?.classList.remove('hidden');
+      return;
+    }
+    empty?.classList.add('hidden');
+    tbody.innerHTML = fills.map(f => {
+      const date = new Date(f.time).toLocaleString('it-IT');
+      const isLong = /Long/i.test(f.dir);
+      const dirClass = isLong ? 'side-badge long' : 'side-badge short';
+      const pnl = f.closedPnl;
+      const pnlCell = pnl ? `<span class="${pnl >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(pnl)}</span>` : '—';
+      const txLink = f.hash && f.hash !== '0x0000000000000000000000000000000000000000000000000000000000000000'
+        ? `<a href="${this._explorerTxUrl(f.hash)}" target="_blank" rel="noopener">🔗</a>` : '—';
+      return `<tr>
+        <td>${date}</td>
+        <td>${f.coin}</td>
+        <td><span class="${dirClass}">${f.dir || (f.side === 'buy' ? 'Buy' : 'Sell')}</span></td>
+        <td>${this.fmtNum(f.sz)}</td>
+        <td>${this.fmtUsd(f.px)}</td>
+        <td>${pnlCell}</td>
+        <td class="muted">${this.fmtUsd(f.fee)}</td>
+        <td>${txLink}</td>
+      </tr>`;
+    }).join('');
   }
 
   // ---- Manual order ----
@@ -470,6 +531,7 @@ class PerpsApp {
       const r = await this.api('/api/perps/order', { method: 'POST', body: JSON.stringify(body) });
       this.toast(`✅ Ordine ${side.toUpperCase()} ${coin} eseguito @ ${this.fmtUsd(r.entryPx)}`, 'success');
       await this.refreshAccount();
+      if (this.posTab === 'history') this.loadFills();
     } catch (e) { this.toast('Ordine fallito: ' + e.message, 'error'); }
   }
 

@@ -447,6 +447,18 @@ class ArbitrageBotServer {
       }
     });
 
+    // Storico operazioni eseguite (fill Hyperliquid: manuali + bot)
+    app.get('/api/perps/fills', async (req, res) => {
+      try {
+        const { address } = req.query;
+        if (!address) return res.status(400).json({ success: false, error: 'address richiesto' });
+        const fills = await hyperliquid.getUserFills(address);
+        res.json({ success: true, data: fills });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // Stato account (equity, margine, posizioni)
     app.get('/api/perps/account', async (req, res) => {
       try {

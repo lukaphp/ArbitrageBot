@@ -141,7 +141,8 @@ class PerpsApp {
     try {
       const acc = await this.api('/api/perps/account?address=' + this.address);
       this.account = acc;
-      document.getElementById('perpsEquity').textContent = this.fmtUsd(acc.accountValue);
+      // Mostra l'equity utilizzabile (Perp + Spot, account unificati)
+      document.getElementById('perpsEquity').textContent = this.fmtUsd(acc.equity ?? acc.accountValue);
       document.getElementById('perpsMargin').textContent = this.fmtUsd(acc.totalMarginUsed);
       document.getElementById('perpsWithdrawable').textContent = this.fmtUsd(acc.withdrawable);
       document.getElementById('perpsPosCount').textContent = acc.positions.length;
@@ -204,7 +205,15 @@ class PerpsApp {
       this.toast(`✅ Trasferiti ${this.fmtUsd(amount)} a Perps!`, 'success');
       await this.refreshAccount();
     } catch (e) {
-      this.toast('Trasferimento fallito: ' + (e.message || e), 'error');
+      const msg = e.message || String(e);
+      if (/unified account/i.test(msg)) {
+        // Account unificato: lo Spot è già collaterale, nessun trasferimento necessario
+        this.toast('ℹ️ Account unificato: i tuoi USDC Spot sono già utilizzabili come collaterale. Puoi fare trading direttamente.', 'info');
+        document.getElementById('spotTransfer')?.classList.add('hidden');
+        await this.refreshAccount();
+      } else {
+        this.toast('Trasferimento fallito: ' + msg, 'error');
+      }
     }
   }
 

@@ -98,7 +98,8 @@ class RiskManager {
     if ((plan.leverage || 0) > maxLev) {
       return { ok: false, reason: `Leva ${plan.leverage}x oltre il massimo (${maxLev}x)` };
     }
-    if (account.accountValue <= 0) {
+    const equity = account.equity ?? account.accountValue;
+    if (equity <= 0) {
       return { ok: false, reason: 'Equity nullo o insufficiente' };
     }
     const maxPos = Math.min(

@@ -155,7 +155,8 @@ export class PerpsBot {
     const szDecimals = market?.szDecimals ?? 3;
     const leverage = this.config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage;
 
-    const plan = riskManager.sizePosition(this.config, account.accountValue, snapshot.price, szDecimals);
+    const equity = account.equity ?? account.accountValue;
+    const plan = riskManager.sizePosition(this.config, equity, snapshot.price, szDecimals);
     plan.leverage = leverage;
 
     const check = riskManager.checkLimits(this.config, account, plan, this.dailyPnl);

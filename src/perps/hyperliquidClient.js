@@ -175,8 +175,12 @@ class HyperliquidClient {
           marginUsed: parseFloat(p.marginUsed)
         };
       });
+    const accountValue = parseFloat(ms.accountValue || '0');
     return {
-      accountValue: parseFloat(ms.accountValue || '0'),
+      accountValue,
+      // Equity utilizzabile per il trading: con gli account unificati Hyperliquid
+      // il saldo Spot fa già da collaterale per i perpetual, quindi va incluso.
+      equity: accountValue + spotUsdc,
       totalMarginUsed: parseFloat(ms.totalMarginUsed || '0'),
       totalNtlPos: parseFloat(ms.totalNtlPos || '0'),
       withdrawable: parseFloat(state.withdrawable || '0'),

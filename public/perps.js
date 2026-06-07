@@ -563,6 +563,13 @@ class PerpsApp {
       : '<span class="muted">flat</span>';
     const evalTxt = b.lastEval ? `${b.lastEval.action} · ${b.lastEval.reason || ''}` : '—';
     const pnlClass = (b.dailyPnl || 0) >= 0 ? 'profit-positive' : 'profit-negative';
+    let statsLine = '';
+    if (b.stats && b.stats.trades > 0) {
+      const pf = isFinite(b.stats.profitFactor) ? b.stats.profitFactor.toFixed(2) : '∞';
+      const wrClass = b.stats.winRate >= 0.5 ? 'profit-positive' : '';
+      statsLine = `<div class="bot-meta"><span class="label">Storico reale</span>
+        <span class="bot-stats"><span class="${wrClass}">${(b.stats.winRate * 100).toFixed(0)}% win</span> · ${b.stats.trades} trade · PF ${pf} · <span class="${b.stats.totalPnl >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(b.stats.totalPnl)}</span></span></div>`;
+    }
     return `<div class="bot-card ${running ? 'running' : ''}" id="bot-${b.id}">
       <div class="bot-card-head">
         <div>
@@ -574,6 +581,7 @@ class PerpsApp {
       <div class="bot-card-body">
         <div class="bot-meta"><span class="label">Posizione</span> ${pos}</div>
         <div class="bot-meta"><span class="label">Ultima valutazione</span> <span class="eval">${evalTxt}</span></div>
+        ${statsLine}
         ${b.lastError ? `<div class="bot-error">⚠️ ${b.lastError}</div>` : ''}
       </div>
       <div class="bot-card-actions">
@@ -660,6 +668,9 @@ class PerpsApp {
     // ma se in modifica e senza preset apri direttamente l'avanzata.
     this.setBotMode(bot && !c.preset ? 'advanced' : 'simple');
 
+    const btBox = document.getElementById('backtestResult');
+    if (btBox) btBox.innerHTML = '';
+
     app.showModal('botModal');
   }
 
@@ -711,7 +722,7 @@ class PerpsApp {
     this._updateConsultant();
   }
 
-  _updateConsultant() {
+  _updateConsultant(backtestStats = null) {
     const box = document.getElementById('consultantBox');
     const txt = document.getElementById('consultantText');
     if (!box || !txt) return;
@@ -721,6 +732,12 @@ class PerpsApp {
     const coin = document.getElementById('botMarket')?.value || 'il mercato scelto';
     const cfg = s.build();
     const dir = cfg.direction === 'both' ? 'Long e Short' : (cfg.direction === 'long' ? 'solo Long' : 'solo Short');
+    let bt = '';
+    if (backtestStats) {
+      const pf = isFinite(backtestStats.profitFactor) ? backtestStats.profitFactor.toFixed(2) : '∞';
+      const edge = backtestStats.expectancy > 0 ? 'un edge positivo ✅' : 'un edge negativo ⚠️ — valuta di cambiare strategia o parametri';
+      bt = `<br><span class="consultant-bt">📊 Backtest: win rate ${(backtestStats.winRate * 100).toFixed(0)}%, profit factor ${pf} → ${edge}</span>`;
+    }
     box.classList.remove('hidden');
     txt.innerHTML = `
       Per <strong>${coin}</strong> ti consiglio la strategia <strong>"${s.name}"</strong> (${s.tag.toLowerCase()}) con profilo <strong>${r.name}</strong>.<br>
@@ -728,7 +745,7 @@ class PerpsApp {
       Gestione: leva <strong>${r.leverage}x</strong>, <strong>${r.sizingPercent}%</strong> dell'equity per operazione,
       take profit <strong>+${r.tp}%</strong>, stop loss <strong>-${r.sl}%</strong>${r.trailing ? `, trailing stop <strong>${r.trailing}%</strong>` : ''}.
       Stop automatico a <strong>-${this.fmtUsd(r.maxDailyLoss)}</strong> di perdita giornaliera.
-      <br><span class="consultant-note">💡 ${s.when}</span>`;
+      <br><span class="consultant-note">💡 ${s.when}</span>${bt}`;
   }
 
   _buildSimpleConfig() {
@@ -819,6 +836,96 @@ class PerpsApp {
     }
   }
 
+  /** Costruisce la config del bot dalla modalità attiva (simple/advanced). */
+  _buildBotConfig() {
+    if (this.botMode === 'simple') {
+      if (!this.selStrategy) { this.toast('Scegli una strategia', 'warning'); return null; }
+      return this._buildSimpleConfig();
+    }
+    return {
+      direction: document.getElementById('botDirection').value,
+      leverage: parseFloat(document.getElementById('botLeverage').value),
+      sizing: {
+        mode: document.getElementById('botSizingMode').value,
+        value: parseFloat(document.getElementById('botSizingValue').value)
+      },
+      candleInterval: document.getElementById('botInterval').value,
+      logic: document.getElementById('botLogic').value,
+      entryRules: this._collectRules('entry'),
+      exitRules: this._collectRules('exit'),
+      tp: { enabled: document.getElementById('botTpEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botTpValue').value) },
+      sl: { enabled: document.getElementById('botSlEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botSlValue').value) },
+      trailing: { enabled: document.getElementById('botTrailEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botTrailValue').value) },
+      risk: {
+        maxDailyLossUsd: parseFloat(document.getElementById('botMaxDailyLoss').value),
+        maxPositionUsd: parseFloat(document.getElementById('botMaxPosition').value)
+      }
+    };
+  }
+
+  // ---- Backtest ----
+  async runBacktest() {
+    const coin = document.getElementById('botMarket').value;
+    const config = this._buildBotConfig();
+    if (!config) return;
+    const lookbackDays = parseInt(document.getElementById('backtestDays').value) || 30;
+    const box = document.getElementById('backtestResult');
+    box.innerHTML = '<div class="backtest-loading"><span class="spinner-sm"></span> Backtest in corso…</div>';
+    try {
+      const r = await this.api('/api/perps/backtest', {
+        method: 'POST',
+        body: JSON.stringify({ coin, config, interval: config.candleInterval, lookbackDays })
+      });
+      if (r.error) { box.innerHTML = `<div class="backtest-empty">⚠️ ${r.error}</div>`; return; }
+      box.innerHTML = this._backtestHtml(r);
+      // aggiorna anche il box consulente in modalità semplice
+      if (this.botMode === 'simple') this._updateConsultant(r.stats);
+    } catch (e) {
+      box.innerHTML = `<div class="backtest-empty">Errore backtest: ${e.message}</div>`;
+    }
+  }
+
+  _backtestHtml(r) {
+    const s = r.stats;
+    const pf = s.profitFactor === null || s.profitFactor === Infinity || !isFinite(s.profitFactor) ? '∞' : s.profitFactor.toFixed(2);
+    const edge = s.expectancy > 0 ? 'positivo' : 'negativo';
+    const edgeClass = s.expectancy > 0 ? 'profit-positive' : 'profit-negative';
+    const wrClass = s.winRate >= 0.5 ? 'profit-positive' : '';
+    return `
+      <div class="backtest-grid">
+        <div class="bt-metric"><span class="bt-label">Win rate</span><span class="bt-value ${wrClass}">${(s.winRate * 100).toFixed(1)}%</span></div>
+        <div class="bt-metric"><span class="bt-label">Profit factor</span><span class="bt-value">${pf}</span></div>
+        <div class="bt-metric"><span class="bt-label">Expectancy</span><span class="bt-value ${edgeClass}">${this.fmtUsd(s.expectancy)}/trade</span></div>
+        <div class="bt-metric"><span class="bt-label">Operazioni</span><span class="bt-value">${s.trades}</span></div>
+        <div class="bt-metric"><span class="bt-label">Return</span><span class="bt-value ${s.totalReturnPct >= 0 ? 'profit-positive' : 'profit-negative'}">${s.totalReturnPct.toFixed(1)}%</span></div>
+        <div class="bt-metric"><span class="bt-label">Max drawdown</span><span class="bt-value profit-negative">-${s.maxDrawdownPct.toFixed(1)}%</span></div>
+      </div>
+      ${this._equitySparkline(r.equityCurve)}
+      <div class="backtest-verdict ${edgeClass}">Edge ${edge} su ${r.period.days} giorni (${r.period.candles} candele, ${r.period.interval}).</div>
+      <div class="backtest-disclaimer">⚠️ Risultati storici su un notional di ${this.fmtUsd(r.notionalUsd)}: NON garantiscono rendimenti futuri.</div>`;
+  }
+
+  /** Sparkline SVG della equity curve (nessuna dipendenza). */
+  _equitySparkline(curve) {
+    if (!curve || curve.length < 2) return '';
+    const vals = curve.map(p => p.equity);
+    const min = Math.min(...vals), max = Math.max(...vals);
+    const range = (max - min) || 1;
+    const W = 600, H = 80;
+    const pts = curve.map((p, i) => {
+      const x = (i / (curve.length - 1)) * W;
+      const y = H - ((p.equity - min) / range) * H;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    const last = vals[vals.length - 1];
+    const stroke = last >= 0 ? '#38a169' : '#e53e3e';
+    const zeroY = H - ((0 - min) / range) * H;
+    return `<svg class="equity-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      ${(min < 0 && max > 0) ? `<line x1="0" y1="${zeroY.toFixed(1)}" x2="${W}" y2="${zeroY.toFixed(1)}" stroke="#cbd5e0" stroke-dasharray="4" />` : ''}
+      <polyline points="${pts}" fill="none" stroke="${stroke}" stroke-width="2" />
+    </svg>`;
+  }
+
   _collectRules(kind) {
     const rows = document.querySelectorAll(`#${kind}Rules .rule-row`);
     const rules = [];
@@ -852,31 +959,8 @@ class PerpsApp {
     if (!name) return this.toast('Inserisci un nome', 'warning');
     if (!this.connected) return this.toast('Connetti MetaMask', 'warning');
 
-    let config;
-    if (this.botMode === 'simple') {
-      if (!this.selStrategy) return this.toast('Scegli una strategia', 'warning');
-      config = this._buildSimpleConfig();
-    } else {
-      config = {
-        direction: document.getElementById('botDirection').value,
-        leverage: parseFloat(document.getElementById('botLeverage').value),
-        sizing: {
-          mode: document.getElementById('botSizingMode').value,
-          value: parseFloat(document.getElementById('botSizingValue').value)
-        },
-        candleInterval: document.getElementById('botInterval').value,
-        logic: document.getElementById('botLogic').value,
-        entryRules: this._collectRules('entry'),
-        exitRules: this._collectRules('exit'),
-        tp: { enabled: document.getElementById('botTpEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botTpValue').value) },
-        sl: { enabled: document.getElementById('botSlEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botSlValue').value) },
-        trailing: { enabled: document.getElementById('botTrailEnabled').checked, mode: 'percent', value: parseFloat(document.getElementById('botTrailValue').value) },
-        risk: {
-          maxDailyLossUsd: parseFloat(document.getElementById('botMaxDailyLoss').value),
-          maxPositionUsd: parseFloat(document.getElementById('botMaxPosition').value)
-        }
-      };
-    }
+    const config = this._buildBotConfig();
+    if (!config) return;
 
     try {
       if (id) {

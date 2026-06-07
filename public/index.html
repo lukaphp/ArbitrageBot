@@ -654,6 +654,22 @@
                 </div>
                 </div><!-- /botAdvanced -->
 
+                <!-- Backtest -->
+                <div class="backtest-section">
+                    <div class="backtest-head">
+                        <h4>📊 Backtest della strategia</h4>
+                        <div class="backtest-controls">
+                            <select id="backtestDays" class="form-select form-select-sm">
+                                <option value="7">7 giorni</option>
+                                <option value="30" selected>30 giorni</option>
+                                <option value="90">90 giorni</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline" onclick="perps.runBacktest()">▶️ Esegui backtest</button>
+                        </div>
+                    </div>
+                    <div id="backtestResult"></div>
+                </div>
+
                 <div class="settings-actions">
                     <button class="btn btn-secondary" onclick="closeModal('botModal')">Annulla</button>
                     <button class="btn btn-primary" onclick="perps.saveBot()">💾 Salva Bot</button>
@@ -678,6 +694,6 @@
         }
     </script>
     <script src="app.js?v=1.0.5"></script>
-    <script src="perps.js?v=1.0.7"></script>
+    <script src="perps.js?v=1.0.8"></script>
 </body>
 </html>

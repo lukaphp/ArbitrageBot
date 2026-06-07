@@ -200,6 +200,23 @@
 .spot-transfer-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .spot-transfer-controls .form-input { max-width: 180px; }
 
+/* --- Backtest --- */
+.backtest-section { margin: 18px 0; padding: 14px; background: #f7fafc; border-radius: 10px; }
+.backtest-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+.backtest-head h4 { margin: 0; color: #2d3748; }
+.backtest-controls { display: flex; gap: 8px; align-items: center; }
+.backtest-loading { display: flex; align-items: center; gap: 8px; color: #4a5568; padding: 10px 0; font-size: 0.88rem; }
+.backtest-empty { padding: 10px 0; color: #718096; font-size: 0.88rem; }
+.backtest-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+.bt-metric { display: flex; flex-direction: column; padding: 10px; background: #fff; border-radius: 8px; }
+.bt-label { font-size: 0.72rem; color: #718096; }
+.bt-value { font-size: 1.05rem; font-weight: 700; color: #2d3748; }
+.equity-spark { width: 100%; height: 70px; margin: 12px 0 6px; display: block; }
+.backtest-verdict { font-weight: 700; font-size: 0.9rem; }
+.backtest-disclaimer { font-size: 0.74rem; color: #a0aec0; margin-top: 6px; }
+.consultant-bt { display: block; margin-top: 6px; font-weight: 600; color: #2c5282; }
+.bot-stats { font-size: 0.78rem; }
+
 /* --- Tab posizioni: Aperte / Storico --- */
 .pos-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
 .pos-tab {

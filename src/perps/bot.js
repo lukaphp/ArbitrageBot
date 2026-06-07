@@ -279,11 +279,14 @@ export class PerpsBot {
   }
 
   getState() {
+    let stats = null;
+    try { stats = db.getBotStats(this.id); } catch { /* noop */ }
     return {
       id: this.id, name: this.name, coin: this.coin, network: this.network,
       status: this.status, inPosition: !!this.position,
       position: this.position, dailyPnl: this.dailyPnl,
-      lastEval: this.lastEval, lastError: this.lastError, config: this.config
+      lastEval: this.lastEval, lastError: this.lastError, config: this.config,
+      stats
     };
   }
 

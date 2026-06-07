@@ -38,6 +38,7 @@ import agentWallet from './perps/agentWallet.js';
 import strategyEngine from './perps/strategyEngine.js';
 import riskManager from './perps/riskManager.js';
 import botManager from './perps/botManager.js';
+import { runBacktest } from './perps/backtester.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -539,9 +540,44 @@ class ArbitrageBotServer {
       }
     });
 
+    // Backtest di una strategia sui dati storici
+    app.post('/api/perps/backtest', async (req, res) => {
+      try {
+        const { coin, config: botConfig, interval, lookbackDays } = req.body;
+        if (!coin || !botConfig) return res.status(400).json({ success: false, error: 'coin e config richiesti' });
+        const result = await runBacktest(botConfig, coin, { interval, lookbackDays });
+        res.json({ success: true, data: result });
+      } catch (error) {
+        logger.error('Errore backtest:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Candele storiche (per grafici e backtest UI)
+    app.get('/api/perps/candles', async (req, res) => {
+      try {
+        const { coin, interval = '15m', lookback } = req.query;
+        if (!coin) return res.status(400).json({ success: false, error: 'coin richiesto' });
+        const lookbackMs = lookback ? parseInt(lookback) : 1000 * 60 * 60 * 24 * 3;
+        const candles = await hyperliquid.getCandles(coin, interval, lookbackMs);
+        res.json({ success: true, data: candles });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // --- Bot ---
     app.get('/api/perps/bots', (req, res) => {
       res.json({ success: true, data: botManager.listStates() });
+    });
+
+    // Statistiche reali di un bot (trade chiusi)
+    app.get('/api/perps/bots/:id/stats', (req, res) => {
+      try {
+        res.json({ success: true, data: db.getBotStats(req.params.id) });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
     });
 
     app.post('/api/perps/bots', (req, res) => {

@@ -250,6 +250,41 @@ class PerpsDatabase {
     return this.db.prepare(`SELECT * FROM positions ORDER BY opened_at DESC LIMIT ?`).all(limit);
   }
 
+  /** Statistiche reali di un bot dai trade chiusi (posizioni status='closed'). */
+  getBotStats(botId) {
+    this.ensure();
+    const rows = this.db.prepare(
+      `SELECT pnl FROM positions WHERE bot_id = ? AND status = 'closed'`
+    ).all(botId);
+    const n = rows.length;
+    const wins = rows.filter(r => (r.pnl || 0) > 0);
+    const grossWin = wins.reduce((s, r) => s + r.pnl, 0);
+    const grossLoss = Math.abs(rows.filter(r => (r.pnl || 0) < 0).reduce((s, r) => s + r.pnl, 0));
+    const totalPnl = rows.reduce((s, r) => s + (r.pnl || 0), 0);
+    return {
+      trades: n,
+      wins: wins.length,
+      winRate: n ? wins.length / n : 0,
+      profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : 0),
+      totalPnl,
+      avgPnl: n ? totalPnl / n : 0
+    };
+  }
+
+  /** Conta le perdite consecutive più recenti di un bot. */
+  getConsecutiveLosses(botId) {
+    this.ensure();
+    const rows = this.db.prepare(
+      `SELECT pnl FROM positions WHERE bot_id = ? AND status = 'closed' ORDER BY closed_at DESC LIMIT 20`
+    ).all(botId);
+    let count = 0;
+    for (const r of rows) {
+      if ((r.pnl || 0) < 0) count++;
+      else break;
+    }
+    return count;
+  }
+
   // ---- Trades ----
 
   insertTrade(trade) {

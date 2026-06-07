@@ -1,0 +1,169 @@
+/* ============================================================
+   PERPS TRADING UI — stili complementari (tema chiaro esistente)
+   ============================================================ */
+
+/* --- Tab di navigazione vista --- */
+.view-tabs {
+  display: flex;
+  gap: 10px;
+  margin: 20px 0;
+}
+.view-tab {
+  flex: 1;
+  padding: 14px 20px;
+  font-size: 1.05rem;
+  font-weight: 600;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.6);
+  color: #4a5568;
+  transition: all 0.2s ease;
+}
+.view-tab:hover { background: rgba(255, 255, 255, 0.85); }
+.view-tab.active {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(102, 126, 234, 0.4);
+}
+
+/* --- Toggle rete testnet/mainnet --- */
+.perps-network-toggle { display: flex; gap: 6px; }
+.net-pill {
+  padding: 6px 16px;
+  border: 1px solid #cbd5e0;
+  background: #fff;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #718096;
+}
+.net-pill.active { background: #667eea; color: #fff; border-color: #667eea; }
+.net-pill[data-net="mainnet"].active { background: #e53e3e; border-color: #e53e3e; }
+
+/* --- Account Perps --- */
+.perps-hint {
+  padding: 18px;
+  text-align: center;
+  color: #718096;
+  background: #f7fafc;
+  border-radius: 10px;
+}
+.perps-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.perps-stat {
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  background: #f7fafc;
+  border-radius: 10px;
+}
+.perps-stat .label { font-size: 0.78rem; color: #718096; margin-bottom: 4px; }
+.perps-stat .value { font-size: 1.3rem; font-weight: 700; color: #2d3748; }
+
+.agent-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+  background: #edf2f7;
+  border-radius: 10px;
+}
+.agent-status { display: flex; align-items: center; gap: 8px; font-weight: 600; color: #2d3748; }
+.agent-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.agent-dot.online { background: #48bb78; box-shadow: 0 0 8px #48bb78; }
+.agent-dot.offline { background: #cbd5e0; }
+.agent-note { font-size: 0.82rem; color: #718096; margin-top: 10px; line-height: 1.5; }
+
+/* --- Form ordini / bot --- */
+.form-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+.form-group { display: flex; flex-direction: column; flex: 1; min-width: 130px; }
+.form-group label { font-size: 0.82rem; color: #4a5568; margin-bottom: 6px; font-weight: 600; }
+.form-input-sm, .form-select-sm { padding: 6px 8px !important; font-size: 0.85rem !important; }
+.order-mid .value { font-size: 1.2rem; font-weight: 700; color: #2d3748; }
+.toggle-group label { display: flex; align-items: center; gap: 6px; }
+
+.order-actions { display: flex; gap: 14px; margin-top: 8px; }
+.btn-long {
+  flex: 1; background: linear-gradient(135deg, #38a169, #2f855a); color: #fff;
+  font-size: 1.05rem; padding: 12px;
+}
+.btn-long:hover { filter: brightness(1.08); }
+.btn-short {
+  flex: 1; background: linear-gradient(135deg, #e53e3e, #c53030); color: #fff;
+  font-size: 1.05rem; padding: 12px;
+}
+.btn-short:hover { filter: brightness(1.08); }
+
+/* --- Badge lato / PnL --- */
+.side-badge {
+  padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 700; color: #fff;
+}
+.side-badge.long { background: #38a169; }
+.side-badge.short { background: #e53e3e; }
+.profit-positive { color: #2f855a; font-weight: 700; }
+.profit-negative { color: #c53030; font-weight: 700; }
+.muted { color: #a0aec0; }
+
+/* --- Bot cards --- */
+.bots-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+.bot-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+  background: #fff;
+  transition: box-shadow 0.2s;
+}
+.bot-card.running { border-color: #48bb78; box-shadow: 0 0 0 2px rgba(72, 187, 120, 0.18); }
+.bot-card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.bot-status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.bot-status-dot.online { background: #48bb78; box-shadow: 0 0 6px #48bb78; }
+.bot-status-dot.offline { background: #cbd5e0; }
+.bot-pnl { font-size: 0.95rem; }
+.bot-card-body { font-size: 0.85rem; color: #4a5568; margin-bottom: 12px; }
+.bot-meta { display: flex; justify-content: space-between; padding: 3px 0; gap: 10px; }
+.bot-meta .label { color: #718096; }
+.bot-meta .eval { text-align: right; font-size: 0.78rem; color: #4a5568; }
+.bot-error { color: #c53030; font-size: 0.78rem; margin-top: 6px; }
+.bot-card-actions { display: flex; gap: 8px; }
+
+/* --- Modal largo + rule builder --- */
+.modal-wide { max-width: 760px; width: 92%; }
+.rules-section {
+  margin: 18px 0;
+  padding: 14px;
+  background: #f7fafc;
+  border-radius: 10px;
+}
+.rules-section h4 { margin: 0 0 10px; color: #2d3748; font-size: 0.95rem; }
+.rules-header { display: flex; justify-content: space-between; align-items: center; }
+.logic-toggle { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: #4a5568; }
+.rules-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.rule-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.rule-row .rule-fields { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; flex: 1; }
+.rule-row .rf-params { display: flex; gap: 6px; align-items: center; }
+.rule-remove { padding: 2px 9px !important; line-height: 1; }
+
+@media (max-width: 640px) {
+  .perps-stats { grid-template-columns: repeat(2, 1fr); }
+  .agent-row { flex-direction: column; align-items: stretch; }
+}

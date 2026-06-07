@@ -6,6 +6,7 @@
     <title>🤖 Arbitrage Bot - Testnet Only</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles_perps.css">
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
 </head>
@@ -19,6 +20,7 @@
                     <span class="testnet-badge">TESTNET ONLY</span>
                 </div>
                 <div class="connection-status">
+                    <button id="openSettings" class="btn btn-sm btn-outline" style="margin-right: 15px;">⚙️ Impostazioni</button>
                     <div id="serverStatus" class="status-indicator offline">
                         <span class="dot"></span>
                         <span class="text">Server</span>
@@ -70,6 +72,14 @@
                 </div>
             </section>
 
+            <!-- Navigazione viste: Arbitraggio | Perps -->
+            <nav class="view-tabs">
+                <button class="view-tab active" data-view="arbitrage" onclick="switchView('arbitrage')">🔍 Arbitraggio</button>
+                <button class="view-tab" data-view="perps" onclick="switchView('perps')">📈 Perps Trading</button>
+            </nav>
+
+            <!-- ====================== VISTA ARBITRAGGIO ====================== -->
+            <div id="view-arbitrage">
             <!-- Dashboard -->
             <section class="dashboard">
                 <div class="stats-grid">
@@ -220,6 +230,127 @@
                     </div>
                 </div>
             </section>
+            </div><!-- /view-arbitrage -->
+
+            <!-- ====================== VISTA PERPS ====================== -->
+            <div id="view-perps" class="hidden">
+
+                <!-- Account & Agent -->
+                <section class="card perps-account-card">
+                    <div class="card-header">
+                        <h2>🦊 Account Perps · Hyperliquid</h2>
+                        <div class="perps-network-toggle">
+                            <button class="net-pill active" data-net="testnet" onclick="perps.setNetwork('testnet')">Testnet</button>
+                            <button class="net-pill" data-net="mainnet" onclick="perps.setNetwork('mainnet')">Mainnet</button>
+                        </div>
+                    </div>
+                    <div class="card-content">
+                        <div id="perpsNotConnected" class="perps-hint">
+                            🔌 Connetti MetaMask (in alto) per usare il trading Perps.
+                        </div>
+                        <div id="perpsAccountBody" class="hidden">
+                            <div class="perps-stats">
+                                <div class="perps-stat"><span class="label">Equity</span><span class="value" id="perpsEquity">—</span></div>
+                                <div class="perps-stat"><span class="label">Margine usato</span><span class="value" id="perpsMargin">—</span></div>
+                                <div class="perps-stat"><span class="label">Posizioni</span><span class="value" id="perpsPosCount">0</span></div>
+                                <div class="perps-stat"><span class="label">Disponibile</span><span class="value" id="perpsWithdrawable">—</span></div>
+                            </div>
+                            <div class="agent-row">
+                                <div class="agent-status" id="agentStatus">
+                                    <span class="agent-dot offline"></span>
+                                    <span id="agentStatusText">Auto-trading non abilitato</span>
+                                </div>
+                                <button id="enableAgentBtn" class="btn btn-primary" onclick="perps.enableAgent()">
+                                    🔑 Abilita auto-trading
+                                </button>
+                            </div>
+                            <p class="agent-note">L'agent wallet permette ai bot di operare in autonomia. Firmi <strong>una sola volta</strong> con MetaMask; l'agent può fare trading ma <strong>non può prelevare</strong> i tuoi fondi.</p>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Ordine Manuale -->
+                <section class="card">
+                    <div class="card-header"><h2>⚡ Ordine Manuale</h2></div>
+                    <div class="card-content">
+                        <div class="order-form">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Mercato</label>
+                                    <select id="orderMarket" class="form-select"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Leva</label>
+                                    <input type="number" id="orderLeverage" class="form-input" value="3" min="1" max="50">
+                                </div>
+                                <div class="form-group">
+                                    <label>Size (USD notional)</label>
+                                    <input type="number" id="orderSizeUsd" class="form-input" value="50" min="1">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Take Profit %</label>
+                                    <input type="number" id="orderTp" class="form-input" placeholder="es. 2" step="0.1">
+                                </div>
+                                <div class="form-group">
+                                    <label>Stop Loss %</label>
+                                    <input type="number" id="orderSl" class="form-input" placeholder="es. 1" step="0.1">
+                                </div>
+                                <div class="form-group order-mid">
+                                    <label>Prezzo corrente</label>
+                                    <span id="orderMid" class="value">—</span>
+                                </div>
+                            </div>
+                            <div class="order-actions">
+                                <button class="btn btn-long" onclick="perps.submitOrder('long')">🟢 LONG</button>
+                                <button class="btn btn-short" onclick="perps.submitOrder('short')">🔴 SHORT</button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Posizioni Aperte -->
+                <section class="card">
+                    <div class="card-header">
+                        <h2>📈 Posizioni Aperte</h2>
+                        <button class="btn btn-outline" onclick="perps.refreshAccount()">🔄 Aggiorna</button>
+                    </div>
+                    <div class="card-content">
+                        <div class="table-container">
+                            <table class="history-table perps-positions-table">
+                                <thead>
+                                    <tr>
+                                        <th>Mercato</th><th>Lato</th><th>Size</th><th>Entry</th>
+                                        <th>PnL</th><th>Leva</th><th>Liq.</th><th>Azioni</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="positionsList"></tbody>
+                            </table>
+                        </div>
+                        <div id="noPositions" class="no-data">
+                            <div class="no-data-icon">📈</div>
+                            <div class="no-data-text">Nessuna posizione aperta</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Bot Auto-Pilot -->
+                <section class="card">
+                    <div class="card-header">
+                        <h2>🤖 Bot Auto-Pilot</h2>
+                        <button class="btn btn-primary" onclick="perps.openBotModal()">➕ Nuovo Bot</button>
+                    </div>
+                    <div class="card-content">
+                        <div id="botsList" class="bots-list"></div>
+                        <div id="noBots" class="no-data">
+                            <div class="no-data-icon">🤖</div>
+                            <div class="no-data-text">Nessun bot configurato</div>
+                            <div class="no-data-subtitle">Crea un bot per fare trading automatico secondo le tue regole</div>
+                        </div>
+                    </div>
+                </section>
+            </div><!-- /view-perps -->
         </div>
     </main>
 
@@ -256,6 +387,46 @@
         </div>
     </div>
 
+    <div id="settingsModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>⚙️ Impostazioni Avanzate</h3>
+                <button class="modal-close" onclick="closeModal('settingsModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-section">
+                    <h4>Modalità Esecuzione</h4>
+                    <p class="settings-desc">Scegli come il bot deve operare. La modalità Testnet richiede un wallet configurato lato server.</p>
+                    
+                    <div class="mode-selector">
+                        <div class="mode-option selected" id="modeSim" onclick="app.setExecutionMode('simulation')">
+                            <div class="mode-icon">🧪</div>
+                            <div class="mode-info">
+                                <span class="mode-title">Simulazione</span>
+                                <span class="mode-desc">Dati simulati, nessuna interazione reale con la blockchain. Sicuro per test.</span>
+                            </div>
+                            <div class="mode-check">✓</div>
+                        </div>
+                        
+                        <div class="mode-option" id="modeTestnet" onclick="app.setExecutionMode('testnet')">
+                            <div class="mode-icon">🌐</div>
+                            <div class="mode-info">
+                                <span class="mode-title">Testnet Reale</span>
+                                <span class="mode-desc">Prezzi reali, transazioni reali su Goerli/Sepolia. Richiede Gas.</span>
+                            </div>
+                            <div class="mode-check">✓</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-actions">
+                    <button class="btn btn-secondary" onclick="closeModal('settingsModal')">Annulla</button>
+                    <button class="btn btn-primary" onclick="app.saveSettings()">Salva Modifiche</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="securityModal" class="modal hidden">
         <div class="modal-content">
             <div class="modal-header">
@@ -284,10 +455,131 @@
         </div>
     </div>
 
+    <!-- Modal creazione/modifica Bot Perps -->
+    <div id="botModal" class="modal hidden">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h3 id="botModalTitle">🤖 Nuovo Bot</h3>
+                <button class="modal-close" onclick="closeModal('botModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="botEditId">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Nome bot</label>
+                        <input type="text" id="botName" class="form-input" placeholder="es. BTC RSI Long">
+                    </div>
+                    <div class="form-group">
+                        <label>Mercato</label>
+                        <select id="botMarket" class="form-select"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Direzione</label>
+                        <select id="botDirection" class="form-select">
+                            <option value="both">Long & Short</option>
+                            <option value="long">Solo Long</option>
+                            <option value="short">Solo Short</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Leva</label>
+                        <input type="number" id="botLeverage" class="form-input" value="3" min="1" max="50">
+                    </div>
+                    <div class="form-group">
+                        <label>Sizing</label>
+                        <select id="botSizingMode" class="form-select">
+                            <option value="percent">% dell'equity</option>
+                            <option value="fixed">Margine fisso (USD)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Valore sizing</label>
+                        <input type="number" id="botSizingValue" class="form-input" value="10" min="0.1" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label>Intervallo candele</label>
+                        <select id="botInterval" class="form-select">
+                            <option value="1m">1m</option><option value="5m">5m</option>
+                            <option value="15m" selected>15m</option><option value="1h">1h</option><option value="4h">4h</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="rules-section">
+                    <div class="rules-header">
+                        <h4>📥 Regole di Ingresso</h4>
+                        <div class="logic-toggle">
+                            <label>Combinazione:</label>
+                            <select id="botLogic" class="form-select form-select-sm">
+                                <option value="any">Una qualsiasi (OR)</option>
+                                <option value="all">Tutte (AND)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="entryRules" class="rules-list"></div>
+                    <button class="btn btn-sm btn-outline" onclick="perps.addRule('entry')">+ Aggiungi regola</button>
+                </div>
+
+                <div class="rules-section">
+                    <h4>📤 Regole di Uscita (opzionali, oltre a TP/SL)</h4>
+                    <div id="exitRules" class="rules-list"></div>
+                    <button class="btn btn-sm btn-outline" onclick="perps.addRule('exit')">+ Aggiungi regola</button>
+                </div>
+
+                <div class="rules-section">
+                    <h4>🛡️ Gestione del Rischio</h4>
+                    <div class="form-row">
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botTpEnabled" checked> Take Profit %</label>
+                            <input type="number" id="botTpValue" class="form-input" value="2" step="0.1">
+                        </div>
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botSlEnabled" checked> Stop Loss %</label>
+                            <input type="number" id="botSlValue" class="form-input" value="1" step="0.1">
+                        </div>
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botTrailEnabled"> Trailing stop %</label>
+                            <input type="number" id="botTrailValue" class="form-input" value="1" step="0.1">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Max perdita giornaliera (USD)</label>
+                            <input type="number" id="botMaxDailyLoss" class="form-input" value="100" min="0">
+                        </div>
+                        <div class="form-group">
+                            <label>Max posizione (USD notional)</label>
+                            <input type="number" id="botMaxPosition" class="form-input" value="1000" min="0">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-actions">
+                    <button class="btn btn-secondary" onclick="closeModal('botModal')">Annulla</button>
+                    <button class="btn btn-primary" onclick="perps.saveBot()">💾 Salva Bot</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notifications -->
     <div id="toastContainer" class="toast-container"></div>
 
     <!-- Scripts -->
-    <script src="app.js?v=1.0.4"></script>
+    <script>
+        // Switch tra vista Arbitraggio e Perps
+        function switchView(view) {
+            document.getElementById('view-arbitrage').classList.toggle('hidden', view !== 'arbitrage');
+            document.getElementById('view-perps').classList.toggle('hidden', view !== 'perps');
+            document.querySelectorAll('.view-tab').forEach(t => {
+                t.classList.toggle('active', t.dataset.view === view);
+            });
+            if (view === 'perps' && window.perps) window.perps.onShow();
+        }
+    </script>
+    <script src="app.js?v=1.0.5"></script>
+    <script src="perps.js?v=1.0.0"></script>
 </body>
 </html>

@@ -22,6 +22,23 @@ class BlockchainConnection {
     
     // Inizializza provider per tutte le reti testnet
     this.initializeProviders();
+    
+    // Inizializza Wallet da Private Key (solo Node.js)
+    this.initializeWallet();
+  }
+  
+  /**
+   * Inizializza Wallet server-side da env
+   */
+  initializeWallet() {
+    if (!this.isBrowser && process.env.PRIVATE_KEY) {
+      try {
+        this.wallet = new ethers.Wallet(process.env.PRIVATE_KEY);
+        logger.info('🔑 Wallet server-side inizializzato');
+      } catch (error) {
+        logger.warn('⚠️ Errore inizializzazione wallet server-side:', error.message);
+      }
+    }
   }
   
   /**
@@ -249,13 +266,22 @@ class BlockchainConnection {
   }
   
   /**
-   * Ottiene signer (solo se MetaMask connesso)
+   * Ottiene signer
+   * Browser: restituisce signer MetaMask
+   * Node.js: restituisce Wallet inizializzato da Private Key
    */
   getSigner() {
-    if (!this.signer) {
-      throw new Error('MetaMask non connesso. Chiamare connectMetaMask() prima.');
+    if (this.isBrowser) {
+        if (!this.signer) {
+          throw new Error('MetaMask non connesso. Chiamare connectMetaMask() prima.');
+        }
+        return this.signer;
+    } else {
+        if (!this.wallet) {
+            throw new Error('Wallet server-side non inizializzato. Verifica PRIVATE_KEY nel .env');
+        }
+        return this.wallet;
     }
-    return this.signer;
   }
   
   /**

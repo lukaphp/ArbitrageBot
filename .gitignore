@@ -69,3 +69,5 @@ build/
 # Temporary files
 tmp/
 temp/
+# Perps SQLite database
+data/

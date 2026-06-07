@@ -26,13 +26,16 @@
   "dependencies": {
     "@playwright/test": "^1.54.2",
     "axios": "^1.5.0",
+    "better-sqlite3": "^12.10.0",
     "chalk": "^5.3.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "ethers": "^6.8.0",
     "express": "^4.18.2",
+    "hyperliquid": "^1.7.7",
     "node-cron": "^3.0.2",
     "socket.io": "^4.7.2",
+    "technicalindicators": "^3.1.0",
     "ws": "^8.14.2"
   },
   "devDependencies": {

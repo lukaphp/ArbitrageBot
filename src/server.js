@@ -20,6 +20,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { ethers } from 'ethers';
 
 // Importa moduli bot
 import config from './config/config.js';
@@ -28,6 +29,15 @@ import blockchainConnection from './blockchain/connection.js';
 import priceFeedManager from './data/priceFeeds.js';
 import arbitrageAnalyzer from './analysis/arbitrageAnalyzer.js';
 import transactionExecutor from './execution/transactionExecutor.js';
+
+// Moduli Perps (Hyperliquid)
+import db from './db/database.js';
+import hyperliquid from './perps/hyperliquidClient.js';
+import marketData from './perps/marketData.js';
+import agentWallet from './perps/agentWallet.js';
+import strategyEngine from './perps/strategyEngine.js';
+import riskManager from './perps/riskManager.js';
+import botManager from './perps/botManager.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -98,12 +108,14 @@ class ArbitrageBotServer {
             running: this.isRunning,
             uptime: process.uptime(),
             mode: config.SECURITY_CONFIG.networkMode,
+            executionMode: transactionExecutor.executionMode, // Aggiunto executionMode
             version: '1.0.0'
           },
           blockchain: blockchainConnection.getConnectionStatus(),
           priceFeeds: priceFeedManager.getStatus(),
-          analyzer: arbitrageAnalyzer.getStatus(),
-          executor: transactionExecutor.getStatus()
+          analyzer: arbitrageAnalyzer.getStats(),
+          executor: transactionExecutor.getExecutionStats(),
+          perps: { network: hyperliquid.getNetwork(), ...marketData.getStatus(), bots: botManager.listStates().length }
         };
         
         res.json({ success: true, data: status });
@@ -338,7 +350,7 @@ class ArbitrageBotServer {
       }
     });
     
-    // API Storico
+    // API History
     this.app.get('/api/history', async (req, res) => {
       try {
         const { limit = 100 } = req.query;
@@ -351,14 +363,279 @@ class ArbitrageBotServer {
         res.status(500).json({ success: false, error: error.message });
       }
     });
+
+    // API Settings - Cambio modalità esecuzione
+    this.app.post('/api/settings', async (req, res) => {
+      try {
+        const { executionMode } = req.body;
+        
+        if (executionMode !== 'simulation' && executionMode !== 'testnet') {
+           return res.status(400).json({ success: false, error: 'Modalità non valida' });
+        }
+        
+        // Aggiorna modalità esecutore
+        transactionExecutor.setExecutionMode(executionMode);
+        
+        // Aggiorna modalità prezzi (Simulazione = Mock, Testnet = Reali)
+        const isSimulation = executionMode === 'simulation';
+        priceFeedManager.setSimulationMode(isSimulation);
+        
+        logger.info(`⚙️ Impostazioni aggiornate: Mode=${executionMode}`);
+        
+        res.json({ 
+            success: true, 
+            mode: executionMode,
+            message: `Modalità cambiata in ${executionMode.toUpperCase()}`
+        });
+      } catch (error) {
+        logger.error('Errore API settings:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
     
+    // Serve index.html per tutte le altre route (SPA)
+
     // Health check
     this.app.get('/health', (req, res) => {
-      res.json({ 
-        status: 'healthy', 
+      res.json({
+        status: 'healthy',
         timestamp: new Date().toISOString(),
         uptime: process.uptime()
       });
+    });
+
+    // Route del sottosistema Perps (Hyperliquid)
+    this.setupPerpsRoutes();
+  }
+
+  /**
+   * Route API per il trading Perps su Hyperliquid.
+   * Tutte sotto /api/perps/*. Indipendenti dal modulo arbitraggio.
+   */
+  setupPerpsRoutes() {
+    const app = this.app;
+
+    // Stato rete + switch testnet/mainnet
+    app.get('/api/perps/network', (req, res) => {
+      res.json({ success: true, network: hyperliquid.getNetwork() });
+    });
+
+    app.post('/api/perps/network', async (req, res) => {
+      try {
+        const { network, confirm } = req.body;
+        if (network === 'mainnet' && !confirm) {
+          return res.status(400).json({ success: false, error: 'Conferma richiesta per passare a MAINNET (fondi reali)' });
+        }
+        hyperliquid.setNetwork(network);
+        await marketData.refreshMarkets().catch(() => {});
+        this.io.emit('perps:network', { network });
+        res.json({ success: true, network });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    // Lista mercati con leva max e mid
+    app.get('/api/perps/markets', async (req, res) => {
+      try {
+        const markets = marketData.getMarkets().length
+          ? marketData.getMarkets()
+          : await marketData.refreshMarkets();
+        res.json({ success: true, data: markets });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Stato account (equity, margine, posizioni)
+    app.get('/api/perps/account', async (req, res) => {
+      try {
+        const { address } = req.query;
+        if (!address) return res.status(400).json({ success: false, error: 'address richiesto' });
+        const account = await hyperliquid.getAccount(address);
+        res.json({ success: true, data: account });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // --- Agent wallet ---
+    app.get('/api/perps/agent/status', (req, res) => {
+      try {
+        const { address } = req.query;
+        if (!address) return res.status(400).json({ success: false, error: 'address richiesto' });
+        res.json({ success: true, data: agentWallet.getStatus(address, hyperliquid.getNetwork()) });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Genera agent + azione approveAgent da firmare con MetaMask
+    app.post('/api/perps/agent/prepare', (req, res) => {
+      try {
+        const { address, agentName } = req.body;
+        const network = hyperliquid.getNetwork();
+        const result = agentWallet.prepareApproval(address, network, agentName || '');
+        res.json({ success: true, data: result });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    // Invia l'azione approveAgent firmata a Hyperliquid e marca approvato
+    app.post('/api/perps/agent/submit', async (req, res) => {
+      try {
+        const { address, action, signature } = req.body;
+        const network = hyperliquid.getNetwork();
+        // MetaMask restituisce una firma esadecimale singola: splittala in {r,s,v}
+        const sig = ethers.Signature.from(signature);
+        const result = await hyperliquid.submitApproveAgent(action, { r: sig.r, s: sig.s, v: sig.v }, network);
+        agentWallet.markApproved(address, network, action.agentAddress);
+        hyperliquid.resetSignSdk(address, network);
+        this.io.emit('perps:agentStatus', agentWallet.getStatus(address, network));
+        res.json({ success: true, data: result });
+      } catch (error) {
+        logger.error('Errore approveAgent:', error.message);
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    // --- Bot ---
+    app.get('/api/perps/bots', (req, res) => {
+      res.json({ success: true, data: botManager.listStates() });
+    });
+
+    app.post('/api/perps/bots', (req, res) => {
+      try {
+        const { name, coin, masterAddress, config: botConfig } = req.body;
+        const state = botManager.createBot({
+          name, coin, masterAddress, network: hyperliquid.getNetwork(), config: botConfig
+        });
+        res.json({ success: true, data: state });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    app.patch('/api/perps/bots/:id', (req, res) => {
+      try {
+        const state = botManager.updateBot(req.params.id, req.body);
+        res.json({ success: true, data: state });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    app.delete('/api/perps/bots/:id', (req, res) => {
+      try {
+        botManager.deleteBot(req.params.id);
+        res.json({ success: true });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    app.post('/api/perps/bots/:id/start', (req, res) => {
+      try {
+        res.json({ success: true, data: botManager.startBot(req.params.id) });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    app.post('/api/perps/bots/:id/stop', (req, res) => {
+      try {
+        res.json({ success: true, data: botManager.stopBot(req.params.id) });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    // --- Ordine manuale ---
+    app.post('/api/perps/order', async (req, res) => {
+      try {
+        const { masterAddress, coin, side, sizeUsd, size, leverage, tp, sl, slippage } = req.body;
+        if (!masterAddress || !coin || !side) {
+          return res.status(400).json({ success: false, error: 'masterAddress, coin e side richiesti' });
+        }
+        const network = hyperliquid.getNetwork();
+        const lev = leverage || config.HYPERLIQUID_CONFIG.risk.defaultLeverage;
+        const mid = await hyperliquid.getMid(coin, network);
+        if (!mid) throw new Error(`Prezzo non disponibile per ${coin}`);
+
+        const market = marketData.getMarkets().find(m => m.coin === coin);
+        const szDecimals = market?.szDecimals ?? 3;
+
+        // size esplicita oppure derivata dal notional USD
+        let orderSize = size;
+        if (!orderSize) {
+          const notional = (sizeUsd || 0) * 1; // sizeUsd = notional desiderato
+          orderSize = riskManager.roundSize(notional / mid, szDecimals);
+        }
+        if (!orderSize || orderSize <= 0) throw new Error('Size non valida');
+
+        // Limiti di rischio
+        const account = await hyperliquid.getAccount(masterAddress, network);
+        const plan = { notionalUsd: orderSize * mid, leverage: lev };
+        const check = riskManager.checkLimits({ leverage: lev }, account, plan, 0);
+        if (!check.ok) return res.status(400).json({ success: false, error: check.reason });
+
+        await hyperliquid.setLeverage(masterAddress, coin, lev, 'cross', network);
+        const isBuy = side === 'long';
+        const order = await hyperliquid.placeMarketOrder({
+          masterAddress, coin, isBuy, size: orderSize, slippage: slippage ?? 0.02
+        }, network);
+        if (order.error) throw new Error(order.error);
+
+        // TP/SL opzionali
+        const entryPx = order.avgPx || mid;
+        const tpsl = riskManager.computeTpSl(entryPx, side, {
+          tp: tp ? { enabled: true, mode: tp.mode || 'percent', value: tp.value } : { enabled: false },
+          sl: sl ? { enabled: true, mode: sl.mode || 'percent', value: sl.value } : { enabled: false }
+        });
+        const closeIsBuy = side === 'short';
+        if (tpsl.tpPx) {
+          await hyperliquid.placeTriggerOrder({ masterAddress, coin, isBuy: closeIsBuy, size: orderSize, triggerPx: tpsl.tpPx, tpsl: 'tp' }, network).catch(e => logger.warn('TP fallito', e.message));
+        }
+        if (tpsl.slPx) {
+          await hyperliquid.placeTriggerOrder({ masterAddress, coin, isBuy: closeIsBuy, size: orderSize, triggerPx: tpsl.slPx, tpsl: 'sl' }, network).catch(e => logger.warn('SL fallito', e.message));
+        }
+
+        db.insertTrade({ coin, side, px: entryPx, sz: orderSize, hlOid: order.oid });
+        this.io.emit('perps:fill', { coin, side, size: orderSize, px: entryPx });
+        res.json({ success: true, data: { order, entryPx, size: orderSize, ...tpsl } });
+      } catch (error) {
+        logger.error('Errore ordine Perps:', error.message);
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    // Chiusura manuale di una posizione
+    app.post('/api/perps/positions/:coin/close', async (req, res) => {
+      try {
+        const { masterAddress } = req.body;
+        const coin = decodeURIComponent(req.params.coin);
+        const result = await hyperliquid.closePosition({ masterAddress, coin }, hyperliquid.getNetwork());
+        this.io.emit('perps:position', { coin, closed: true });
+        res.json({ success: true, data: result });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    // Webhook segnali esterni (TradingView-style)
+    app.post('/api/perps/webhook', (req, res) => {
+      try {
+        const { coin, signal, secret } = req.body;
+        if (process.env.PERPS_WEBHOOK_SECRET && secret !== process.env.PERPS_WEBHOOK_SECRET) {
+          return res.status(401).json({ success: false, error: 'Secret non valido' });
+        }
+        if (!coin || !signal) return res.status(400).json({ success: false, error: 'coin e signal richiesti' });
+        strategyEngine.pushExternalSignal(coin, signal);
+        res.json({ success: true });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
     });
   }
   
@@ -456,7 +733,21 @@ class ArbitrageBotServer {
       await arbitrageAnalyzer.start();
       
       logger.info('⚡ Executor pronto...');
-      
+
+      // Inizializzazione sottosistema Perps (Hyperliquid)
+      try {
+        logger.info('🗄️  Inizializzazione database Perps...');
+        db.init();
+        hyperliquid.init();
+        logger.info('📈 Avvio market data Perps...');
+        await marketData.start(this.io);
+        botManager.setIo(this.io);
+        botManager.loadFromDb();
+        logger.info('🤖 Sottosistema Perps pronto');
+      } catch (perpsError) {
+        logger.error('⚠️ Errore inizializzazione Perps (arbitraggio resta attivo):', perpsError.message);
+      }
+
       // Setup eventi per WebSocket
       this.setupBotEvents();
       
@@ -540,6 +831,14 @@ class ArbitrageBotServer {
     // Arresta moduli bot
     await priceFeedManager.stop();
     await arbitrageAnalyzer.stop();
+
+    // Arresta sottosistema Perps
+    try {
+      botManager.stopAll();
+      marketData.stop();
+    } catch (error) {
+      logger.error('Errore arresto Perps:', error.message);
+    }
     
     // Chiudi connessioni WebSocket
     this.io.close();

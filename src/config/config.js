@@ -120,6 +120,45 @@ export const ARBITRAGE_CONFIG = {
 };
 
 /**
+ * Configurazione Perps Trading (Hyperliquid)
+ * =========================================
+ * Endpoint testnet/mainnet, limiti di rischio e parametri auto-pilot.
+ * Lo switch tra testnet e mainnet è gestito a runtime (vedi src/perps/hyperliquidClient.js).
+ */
+export const HYPERLIQUID_CONFIG = {
+  // Endpoint REST/WS ufficiali
+  endpoints: {
+    testnet: {
+      api: 'https://api.hyperliquid-testnet.xyz',
+      ws: 'wss://api.hyperliquid-testnet.xyz/ws',
+      explorer: 'https://app.hyperliquid-testnet.xyz',
+      hyperliquidChain: 'Testnet'
+    },
+    mainnet: {
+      api: 'https://api.hyperliquid.xyz',
+      ws: 'wss://api.hyperliquid.xyz/ws',
+      explorer: 'https://app.hyperliquid.xyz',
+      hyperliquidChain: 'Mainnet'
+    }
+  },
+  // Rete attiva di default (testnet per sicurezza). Sovrascrivibile via ENV o API.
+  defaultNetwork: process.env.HYPERLIQUID_NETWORK || 'testnet',
+  // signatureChainId usato nel dominio EIP-712 per le user-signed action (approveAgent).
+  // Arbitrum One (0xa4b1) è il valore canonico accettato da Hyperliquid per la firma,
+  // indipendentemente dalla rete HL effettiva (differenziata da hyperliquidChain).
+  signatureChainId: '0xa4b1',
+  // Limiti di rischio di default applicati lato server prima di ogni ordine
+  risk: {
+    maxLeverage: parseInt(process.env.PERPS_MAX_LEVERAGE) || 20,
+    maxPositionUsd: parseFloat(process.env.PERPS_MAX_POSITION_USD) || 5000,
+    defaultLeverage: parseInt(process.env.PERPS_DEFAULT_LEVERAGE) || 3,
+    maxDailyLossUsd: parseFloat(process.env.PERPS_MAX_DAILY_LOSS_USD) || 1000
+  },
+  // Intervallo (ms) del loop di valutazione di ogni bot auto-pilot
+  botLoopInterval: parseInt(process.env.PERPS_BOT_INTERVAL) || 10000
+};
+
+/**
  * Configurazione sicurezza
  */
 export const SECURITY_CONFIG = {
@@ -207,6 +246,7 @@ export default {
   DEX_CONFIG,
   TOKENS,
   ARBITRAGE_CONFIG,
+  HYPERLIQUID_CONFIG,
   SECURITY_CONFIG,
   LOGGING_CONFIG,
   API_CONFIG,

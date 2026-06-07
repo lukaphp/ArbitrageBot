@@ -9,6 +9,7 @@ class ArbitrageBotApp {
         this.autoRefresh = true;
         this.refreshInterval = null;
         this.fullHistory = []; // Cache per storico completo
+        this.currentMode = 'simulation'; // 'simulation' | 'testnet'
         
         this.init();
     }
@@ -91,6 +92,11 @@ class ArbitrageBotApp {
             this.disconnectWallet();
         });
         
+        // Settings Modal
+        document.getElementById('openSettings').addEventListener('click', () => {
+            this.openSettingsModal();
+        });
+        
         // Opportunities
         document.getElementById('refreshOpportunities').addEventListener('click', () => {
             this.refreshOpportunities();
@@ -149,6 +155,77 @@ class ArbitrageBotApp {
             }
         });
     }
+
+    // --- Settings Management ---
+
+    openSettingsModal() {
+        this.showModal('settingsModal');
+        
+        // Imposta UI sulla modalità corrente
+        this.updateSettingsUI(this.currentMode);
+    }
+    
+    setExecutionMode(mode) {
+        this.updateSettingsUI(mode);
+        // Nota: non salviamo ancora, lo facciamo su "Salva Modifiche"
+        // Ma teniamo traccia temporanea della selezione visiva
+        document.getElementById('settingsModal').dataset.selectedMode = mode;
+    }
+    
+    updateSettingsUI(mode) {
+        document.querySelectorAll('.mode-option').forEach(el => el.classList.remove('selected'));
+        
+        if (mode === 'simulation') {
+            document.getElementById('modeSim').classList.add('selected');
+        } else {
+            document.getElementById('modeTestnet').classList.add('selected');
+        }
+    }
+    
+    async saveSettings() {
+        const modal = document.getElementById('settingsModal');
+        const selectedMode = modal.dataset.selectedMode || this.currentMode;
+        
+        try {
+            const response = await fetch('/api/settings', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ executionMode: selectedMode })
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                this.currentMode = selectedMode;
+                this.showToast(`Modalità impostata su: ${selectedMode.toUpperCase()}`, 'success');
+                this.closeModal('settingsModal');
+                
+                // Aggiorna UI badge
+                const headerBadge = document.querySelector('.testnet-badge');
+                if (headerBadge) {
+                    if (selectedMode === 'testnet') {
+                        headerBadge.textContent = 'TESTNET LIVE';
+                        headerBadge.style.background = '#e53e3e';
+                    } else {
+                        headerBadge.textContent = 'SIMULATION';
+                        headerBadge.style.background = '#38a169';
+                    }
+                }
+                
+                // Ricarica dati
+                await this.loadInitialData();
+            } else {
+                this.showToast(`Errore: ${data.error}`, 'error');
+            }
+        } catch (error) {
+            console.error('Errore salvataggio impostazioni:', error);
+            this.showToast('Errore durante il salvataggio', 'error');
+        }
+    }
+
+    // --- Wallet Management ---
 
     async checkMetaMaskAvailability(retries = 3) {
         console.log(`🔍 Debug - Checking MetaMask availability (attempt ${4-retries}/3)...`);
@@ -387,6 +464,33 @@ class ArbitrageBotApp {
 
     async loadInitialData() {
         try {
+            // Verifica status e modalità
+            const statusResponse = await fetch('/api/status');
+            if (statusResponse.ok) {
+                const responseData = await statusResponse.json();
+                
+                if (responseData.success && responseData.data && responseData.data.bot) {
+                    const botStatus = responseData.data.bot;
+                    
+                    // Sincronizza modalità esecuzione
+                    if (botStatus.executionMode) {
+                        this.currentMode = botStatus.executionMode;
+                        
+                        // Aggiorna UI Badge
+                        const headerBadge = document.querySelector('.testnet-badge');
+                        if (headerBadge) {
+                            if (this.currentMode === 'testnet') {
+                                headerBadge.textContent = 'TESTNET LIVE';
+                                headerBadge.style.background = '#e53e3e';
+                            } else {
+                                headerBadge.textContent = 'SIMULATION';
+                                headerBadge.style.background = '#38a169';
+                            }
+                        }
+                    }
+                }
+            }
+
             // Carica statistiche
             const statsResponse = await fetch('/api/stats');
             if (statsResponse.ok) {

@@ -18,6 +18,7 @@ import strategyEngine from './strategyEngine.js';
 import riskManager from './riskManager.js';
 import portfolio from './portfolio.js';
 import notifier from './notifier.js';
+import predictor from './predictor.js';
 import * as ind from './indicators.js';
 import db from '../db/database.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
@@ -179,6 +180,12 @@ export class PerpsBot {
       return;
     }
 
+    // Gate ML (opzionale): apre solo se il modello concorda con la direzione
+    if (!(await this._mlConfirm(side))) {
+      this.lastEval = { action: 'hold', reason: 'Gate ML: probabilità non favorevole alla direzione', ts: Date.now() };
+      return;
+    }
+
     // Limiti di portafoglio (globali): posizioni concorrenti, esposizione, cooldown
     const cl = db.getConsecutiveLosses(this.id);
     const pf = portfolio.canOpen({ account, plannedNotional: plan.notionalUsd, botId: this.id, consecutiveLosses: cl });
@@ -231,6 +238,23 @@ export class PerpsBot {
       const price = candles?.length ? parseFloat(candles[candles.length - 1].c) : null;
       if (emaVal == null || price == null) return true; // dati insufficienti → non bloccare
       return side === 'long' ? price > emaVal : price < emaVal;
+    } catch {
+      return true;
+    }
+  }
+
+  /** Gate ML: true se il modello concorda col lato (o se disattivato/senza edge). */
+  async _mlConfirm(side) {
+    const gate = this.config.mlGate;
+    if (!gate || !gate.enabled) return true;
+    try {
+      const interval = gate.interval || this.config.candleInterval || '15m';
+      const minProb = gate.minProb ?? 0.55;
+      const res = await predictor.predict(this.coin, interval);
+      if (res.error || res.probUp == null) return true; // modello assente/errore → non bloccare
+      // Se il modello non ha edge sopra la baseline, non filtrare (onestà)
+      if (res.hasEdge === false) return true;
+      return side === 'long' ? res.probUp >= minProb : res.probUp <= (1 - minProb);
     } catch {
       return true;
     }

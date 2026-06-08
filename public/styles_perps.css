@@ -295,3 +295,32 @@
   .strategy-cards { grid-template-columns: 1fr; }
   .risk-profiles { grid-template-columns: 1fr; }
 }
+
+/* ===== Stima ML (FreqAI-lite) ===== */
+.ml-estimate { margin-top: 10px; padding: 8px 10px; border-radius: 8px; background: rgba(99,102,241,0.08);
+  font-size: 13px; line-height: 1.5; }
+.ml-estimate:empty { display: none; }
+.ml-warn { color: #b7791f; font-weight: 600; }
+
+/* ===== Optimizer (Hyperopt) ===== */
+.optimizer-section { margin-top: 16px; }
+.opt-best { background: var(--card-bg, #fff); border: 1px solid var(--border, #e2e8f0); border-radius: 10px; padding: 12px; margin-top: 8px; }
+.opt-best-head { font-weight: 700; margin-bottom: 8px; }
+.opt-params { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.opt-param { background: rgba(99,102,241,0.10); border-radius: 6px; padding: 3px 8px; font-size: 12px; }
+.opt-cmp { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
+.opt-cmp th, .opt-cmp td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border, #edf2f7); }
+.opt-cmp th { color: #718096; font-weight: 600; }
+.opt-leaderboard { margin-top: 10px; }
+.opt-leaderboard summary { cursor: pointer; font-weight: 600; font-size: 13px; padding: 4px 0; }
+.opt-table-wrap { overflow-x: auto; }
+.opt-lb { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.opt-lb th, .opt-lb td { padding: 4px 8px; border-bottom: 1px solid var(--border, #edf2f7); white-space: nowrap; text-align: center; }
+.opt-lb th { color: #718096; }
+.opt-best-row { background: rgba(56,161,105,0.08); font-weight: 600; }
+
+/* ===== Comandi Telegram ===== */
+.tg-commands { margin-top: 16px; padding: 12px; border-radius: 10px; background: rgba(0,136,204,0.06); border: 1px solid rgba(0,136,204,0.15); }
+.tg-commands-head { font-weight: 700; margin-bottom: 4px; }
+.tg-cmd-list { margin: 6px 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
+.tg-cmd-list code { background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 4px; }

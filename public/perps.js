@@ -493,7 +493,17 @@ class PerpsApp {
       const st = document.getElementById('tgStatus');
       if (en) en.checked = !!s.enabled;
       if (st) st.textContent = s.configured ? '(configurato)' : '(non configurato)';
+      this._refreshTgControlStatus();
     } catch (e) { /* ignore */ }
+  }
+
+  async _refreshTgControlStatus() {
+    const el = document.getElementById('tgControlStatus');
+    if (!el) return;
+    try {
+      const s = await this.api('/api/perps/telegram/status');
+      el.textContent = s.running ? '🟢 attivo' : (s.configured ? '⏸️ in pausa' : '⚪ non configurato');
+    } catch { /* ignore */ }
   }
 
   async saveNotifications() {
@@ -509,6 +519,7 @@ class PerpsApp {
       this.toast('Notifiche salvate', 'success');
       const st = document.getElementById('tgStatus');
       if (st) st.textContent = d.configured ? '(configurato)' : '(non configurato)';
+      this._refreshTgControlStatus();
     } catch (e) { this.toast(e.message, 'error'); }
   }
 
@@ -864,6 +875,9 @@ class PerpsApp {
     document.getElementById('botDcaSteps').value = c.dca?.steps ?? 2;
     document.getElementById('botDcaStep').value = c.dca?.stepPercent ?? 2;
     document.getElementById('botDcaMult').value = c.dca?.sizeMultiplier ?? 1;
+    document.getElementById('botMlEnabled').checked = !!c.mlGate?.enabled;
+    document.getElementById('botMlInterval').value = c.mlGate?.interval || '1h';
+    document.getElementById('botMlMinProb').value = c.mlGate?.minProb ? Math.round(c.mlGate.minProb * 100) : 55;
 
     document.getElementById('entryRules').innerHTML = '';
     document.getElementById('exitRules').innerHTML = '';
@@ -883,6 +897,9 @@ class PerpsApp {
 
     const btBox = document.getElementById('backtestResult');
     if (btBox) btBox.innerHTML = '';
+    const optBox = document.getElementById('optimizeResult');
+    if (optBox) optBox.innerHTML = '';
+    this._lastOpt = null;
 
     app.showModal('botModal');
   }
@@ -959,6 +976,8 @@ class PerpsApp {
       take profit <strong>+${r.tp}%</strong>, stop loss <strong>-${r.sl}%</strong>${r.trailing ? `, trailing stop <strong>${r.trailing}%</strong>` : ''}.
       Stop automatico a <strong>-${this.fmtUsd(r.maxDailyLoss)}</strong> di perdita giornaliera.
       <br><span class="consultant-note">💡 ${s.when}</span>${bt}`;
+    // Stima ML per il mercato/timeframe della strategia (asincrona)
+    this.loadMlEstimate(cfg.candleInterval);
   }
 
   _buildSimpleConfig() {
@@ -1101,6 +1120,13 @@ class PerpsApp {
         sizeMultiplier: parseFloat(document.getElementById('botDcaMult').value) || 1
       };
     }
+    if (document.getElementById('botMlEnabled')?.checked) {
+      out.mlGate = {
+        enabled: true,
+        interval: document.getElementById('botMlInterval').value,
+        minProb: (parseFloat(document.getElementById('botMlMinProb').value) || 55) / 100
+      };
+    }
     return out;
   }
 
@@ -1165,6 +1191,130 @@ class PerpsApp {
       ${(min < 0 && max > 0) ? `<line x1="0" y1="${zeroY.toFixed(1)}" x2="${W}" y2="${zeroY.toFixed(1)}" stroke="#cbd5e0" stroke-dasharray="4" />` : ''}
       <polyline points="${pts}" fill="none" stroke="${stroke}" stroke-width="2" />
     </svg>`;
+  }
+
+  // ---- Optimizer (Hyperopt + walk-forward) ----
+  async runOptimize() {
+    const coin = document.getElementById('botMarket').value;
+    const config = this._buildBotConfig();
+    if (!config) return;
+    const method = document.getElementById('optMethod').value;
+    const objective = document.getElementById('optObjective').value;
+    const lookbackDays = parseInt(document.getElementById('optDays').value) || 60;
+    const box = document.getElementById('optimizeResult');
+    box.innerHTML = '<div class="backtest-loading"><span class="spinner-sm"></span> Ottimizzazione in corso… (può richiedere qualche secondo)</div>';
+    try {
+      const r = await this.api('/api/perps/optimize', {
+        method: 'POST',
+        body: JSON.stringify({ coin, config, interval: config.candleInterval, lookbackDays, method, objective })
+      });
+      if (r.error) { box.innerHTML = `<div class="backtest-empty">⚠️ ${r.error}</div>`; return; }
+      this._lastOpt = r;
+      box.innerHTML = this._optimizeHtml(r);
+    } catch (e) {
+      box.innerHTML = `<div class="backtest-empty">Errore ottimizzazione: ${e.message}</div>`;
+    }
+  }
+
+  _fmtPf(pf) {
+    return (pf === null || pf === Infinity || !isFinite(pf)) ? '∞' : pf.toFixed(2);
+  }
+
+  _optimizeHtml(r) {
+    const b = r.best;
+    const verdictMap = {
+      robust: { cls: 'profit-positive', txt: '✅ L\'edge regge anche fuori campione: parametri più affidabili.' },
+      weaker: { cls: '', txt: '⚠️ Fuori campione l\'edge si indebolisce: usa con cautela.' },
+      overfit: { cls: 'profit-negative', txt: '⛔ Fuori campione l\'edge crolla: parametri sovra-ottimizzati, NON usare.' },
+      unknown: { cls: '', txt: 'ℹ️ Validazione fuori campione non disponibile.' }
+    };
+    const v = verdictMap[b.verdict] || verdictMap.unknown;
+
+    const cmpRow = (label, inS, outS, fmt) => `
+      <tr><td>${label}</td><td>${fmt(inS)}</td><td>${outS != null ? fmt(outS) : '—'}</td></tr>`;
+    const fmtPct = x => `${x.toFixed(1)}%`;
+    const fmtWr = x => `${(x * 100).toFixed(0)}%`;
+    const oos = b.outOfSample;
+    const inS = b.inSample;
+
+    const paramsTxt = Object.values(b.params).map(p => `<span class="opt-param">${p.label}: <b>${p.value}</b></span>`).join(' ');
+
+    const lbHead = `<tr><th>#</th>${r.dims.map(d => `<th>${d.label}</th>`).join('')}<th>Win</th><th>PF</th><th>Exp</th><th>Trade</th></tr>`;
+    const lbRows = r.leaderboard.map((e, i) => `
+      <tr class="${i === 0 ? 'opt-best-row' : ''}">
+        <td>${i + 1}</td>
+        ${r.dims.map(d => `<td>${e.params[d.key]}</td>`).join('')}
+        <td>${fmtWr(e.winRate)}</td><td>${this._fmtPf(e.profitFactor)}</td>
+        <td class="${e.expectancy >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(e.expectancy)}</td>
+        <td>${e.trades}</td>
+      </tr>`).join('');
+
+    return `
+      <div class="opt-best">
+        <div class="opt-best-head">🏆 Migliore combinazione <span class="muted">(obiettivo: ${r.objective}, ${r.evals} valutazioni, ${r.method})</span></div>
+        <div class="opt-params">${paramsTxt}</div>
+        <table class="opt-cmp">
+          <thead><tr><th>Metrica</th><th>In-sample</th><th>Out-of-sample</th></tr></thead>
+          <tbody>
+            ${cmpRow('Win rate', inS.winRate, oos?.winRate, fmtWr)}
+            ${cmpRow('Profit factor', inS.profitFactor, oos?.profitFactor, x => this._fmtPf(x))}
+            ${cmpRow('Expectancy', inS.expectancy, oos?.expectancy, x => this.fmtUsd(x))}
+            ${cmpRow('Return', inS.totalReturnPct, oos?.totalReturnPct, fmtPct)}
+            ${cmpRow('Operazioni', inS.trades, oos?.trades, x => x)}
+          </tbody>
+        </table>
+        <div class="backtest-verdict ${v.cls}">${v.txt}</div>
+        <button class="btn btn-sm btn-primary" onclick="perps.applyOptimized()">✨ Applica migliori parametri</button>
+      </div>
+      <details class="opt-leaderboard"><summary>📋 Classifica (top ${r.leaderboard.length})</summary>
+        <div class="opt-table-wrap"><table class="opt-lb"><thead>${lbHead}</thead><tbody>${lbRows}</tbody></table></div>
+      </details>
+      <div class="backtest-disclaimer">⚠️ Periodo: ${r.period.days}g (${r.period.inSampleCandles} in-sample + ${r.period.outSampleCandles} out-of-sample, ${r.period.interval}). Parametri ottimizzati sui dati storici: performance passata ≠ futura.</div>`;
+  }
+
+  /** Applica al form (modalità avanzata) la configurazione migliore trovata. */
+  applyOptimized() {
+    const c = this._lastOpt?.best?.config;
+    if (!c) return;
+    this.setBotMode('advanced');
+    document.getElementById('botDirection').value = c.direction || 'both';
+    document.getElementById('botLeverage').value = c.leverage || 3;
+    document.getElementById('botSizingMode').value = c.sizing?.mode || 'percent';
+    document.getElementById('botSizingValue').value = c.sizing?.value ?? 10;
+    document.getElementById('botInterval').value = c.candleInterval || '15m';
+    document.getElementById('botLogic').value = c.logic || 'any';
+    document.getElementById('botTpEnabled').checked = c.tp?.enabled ?? true;
+    document.getElementById('botTpValue').value = c.tp?.value ?? 2;
+    document.getElementById('botSlEnabled').checked = c.sl?.enabled ?? true;
+    document.getElementById('botSlValue').value = c.sl?.value ?? 1;
+    document.getElementById('botTrailEnabled').checked = c.trailing?.enabled ?? false;
+    document.getElementById('botTrailValue').value = c.trailing?.value ?? 1;
+    document.getElementById('entryRules').innerHTML = '';
+    document.getElementById('exitRules').innerHTML = '';
+    (c.entryRules || []).forEach(r => this.addRule('entry', r));
+    (c.exitRules || []).forEach(r => this.addRule('exit', r));
+    this.toast('Parametri ottimizzati applicati (modalità avanzata)', 'success');
+  }
+
+  // ---- Stima ML (FreqAI-lite) ----
+  async loadMlEstimate(intervalArg) {
+    const coin = document.getElementById('botMarket')?.value;
+    const interval = intervalArg || document.getElementById('botInterval')?.value || '15m';
+    const box = document.getElementById('mlEstimate');
+    if (!coin || !box) return;
+    box.innerHTML = '<span class="spinner-sm"></span> calcolo stima…';
+    try {
+      const r = await this.api(`/api/perps/predict?coin=${encodeURIComponent(coin)}&interval=${interval}`);
+      if (r.error) { box.innerHTML = `<span class="muted">ML non disponibile: ${r.error}</span>`; return; }
+      const prob = (r.probUp * 100).toFixed(0);
+      const acc = (r.model.accuracy * 100).toFixed(0);
+      const base = (r.model.baseline * 100).toFixed(0);
+      const dir = r.probUp >= 0.55 ? '📈 rialzo' : r.probUp <= 0.45 ? '📉 ribasso' : '➖ neutro';
+      const edgeWarn = r.hasEdge ? '' : ` <span class="ml-warn">⚠️ accuratezza ≈ baseline: il modello non ha edge, non usarlo da solo.</span>`;
+      box.innerHTML = `🧠 <b>Stima ML:</b> prob. rialzo <b>${prob}%</b> (${dir}) · accuratezza ${acc}% vs baseline ${base}% (n=${r.model.samples})${edgeWarn}`;
+    } catch (e) {
+      box.innerHTML = `<span class="muted">ML non disponibile: ${e.message}</span>`;
+    }
   }
 
   _collectRules(kind) {

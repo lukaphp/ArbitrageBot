@@ -40,6 +40,9 @@ import riskManager from './perps/riskManager.js';
 import botManager from './perps/botManager.js';
 import portfolio from './perps/portfolio.js';
 import notifier from './perps/notifier.js';
+import optimizer from './perps/optimizer.js';
+import predictor from './perps/predictor.js';
+import telegramControl from './perps/telegramControl.js';
 import { runBacktest } from './perps/backtester.js';
 
 // Setup paths
@@ -567,6 +570,49 @@ class ArbitrageBotServer {
       }
     });
 
+    // Ottimizzazione parametri (Hyperopt + walk-forward)
+    app.post('/api/perps/optimize', async (req, res) => {
+      try {
+        const { coin, config: botConfig, interval, lookbackDays, method, maxEvals, objective, oosFraction } = req.body;
+        if (!coin || !botConfig) return res.status(400).json({ success: false, error: 'coin e config richiesti' });
+        const result = await optimizer.optimize(botConfig, coin, { interval, lookbackDays, method, maxEvals, objective, oosFraction });
+        res.json({ success: true, data: result });
+      } catch (error) {
+        logger.error('Errore optimize:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Stima ML (FreqAI-lite): probabilità di rialzo per la candela corrente
+    app.get('/api/perps/predict', async (req, res) => {
+      try {
+        const { coin, interval = '15m' } = req.query;
+        if (!coin) return res.status(400).json({ success: false, error: 'coin richiesto' });
+        const result = await predictor.predict(coin, interval);
+        res.json({ success: true, data: result });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // (Ri)addestramento esplicito del modello ML
+    app.post('/api/perps/predict/train', async (req, res) => {
+      try {
+        const { coin, interval = '15m', lookbackDays } = req.body;
+        if (!coin) return res.status(400).json({ success: false, error: 'coin richiesto' });
+        const result = await predictor.train(coin, interval, { lookbackDays });
+        res.json({ success: true, data: result });
+      } catch (error) {
+        logger.error('Errore train ML:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Stato del controllo comandi Telegram
+    app.get('/api/perps/telegram/status', (req, res) => {
+      res.json({ success: true, data: telegramControl.status() });
+    });
+
     // Candele storiche (per grafici e backtest UI)
     app.get('/api/perps/candles', async (req, res) => {
       try {
@@ -730,7 +776,10 @@ class ArbitrageBotServer {
     });
     app.post('/api/perps/notifications', (req, res) => {
       try {
-        res.json({ success: true, data: notifier.setConfig(req.body || {}) });
+        const data = notifier.setConfig(req.body || {});
+        // (Ri)avvia o ferma il polling dei comandi Telegram in base alla nuova config
+        telegramControl.refresh();
+        res.json({ success: true, data });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });
       }
@@ -864,6 +913,8 @@ class ArbitrageBotServer {
         await marketData.start(this.io);
         botManager.setIo(this.io);
         botManager.loadFromDb();
+        // Avvia il controllo comandi Telegram se configurato
+        telegramControl.refresh();
         logger.info('🤖 Sottosistema Perps pronto');
       } catch (perpsError) {
         logger.error('⚠️ Errore inizializzazione Perps (arbitraggio resta attivo):', perpsError.message);

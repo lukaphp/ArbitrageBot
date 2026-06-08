@@ -155,7 +155,22 @@ export const HYPERLIQUID_CONFIG = {
     maxDailyLossUsd: parseFloat(process.env.PERPS_MAX_DAILY_LOSS_USD) || 1000
   },
   // Intervallo (ms) del loop di valutazione di ogni bot auto-pilot
-  botLoopInterval: parseInt(process.env.PERPS_BOT_INTERVAL) || 10000
+  botLoopInterval: parseInt(process.env.PERPS_BOT_INTERVAL) || 10000,
+  // Optimizer (Hyperopt): default conservativi per restare reattivo (il backtester
+  // è O(N²) per valutazione, quindi limitiamo evals e candele).
+  optimizer: {
+    maxEvals: parseInt(process.env.PERPS_OPT_MAX_EVALS) || 50,
+    minTrades: parseInt(process.env.PERPS_OPT_MIN_TRADES) || 10,
+    oosFraction: parseFloat(process.env.PERPS_OPT_OOS_FRACTION) || 0.3,
+    candleCap: parseInt(process.env.PERPS_OPT_CANDLE_CAP) || 1500
+  },
+  // Predittore ML (FreqAI-lite): orizzonte di previsione e soglia di rialzo.
+  predictor: {
+    lookbackDays: parseInt(process.env.PERPS_ML_LOOKBACK_DAYS) || 90,
+    lookforward: parseInt(process.env.PERPS_ML_LOOKFORWARD) || 5,
+    threshold: parseFloat(process.env.PERPS_ML_THRESHOLD) || 0.003,
+    candleCap: parseInt(process.env.PERPS_ML_CANDLE_CAP) || 2000
+  }
 };
 
 /**

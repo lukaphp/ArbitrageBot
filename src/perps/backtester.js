@@ -22,6 +22,14 @@ import client from './hyperliquidClient.js';
 
 const DAY_MS = 86400000;
 
+/** Scarica e normalizza le candele Hyperliquid in formato { t, o, h, l, c }. */
+export async function fetchCandles(coin, interval, lookbackDays) {
+  const raw = await client.getCandles(coin, interval, lookbackDays * DAY_MS) || [];
+  return raw
+    .map(k => ({ t: k.t, o: +k.o, h: +k.h, l: +k.l, c: +k.c }))
+    .filter(k => !isNaN(k.c));
+}
+
 /** Warm-up minimo (numero candele) prima di iniziare a valutare i segnali. */
 function computeWarmup(config) {
   let maxPeriod = 20;
@@ -58,10 +66,18 @@ export async function runBacktest(config, coin, opts = {}) {
   const lookbackDays = opts.lookbackDays || 30;
   const notionalUsd = opts.notionalUsd || 1000;
 
-  const raw = await client.getCandles(coin, interval, lookbackDays * DAY_MS) || [];
-  const C = raw
-    .map(k => ({ t: k.t, o: +k.o, h: +k.h, l: +k.l, c: +k.c }))
-    .filter(k => !isNaN(k.c));
+  // Se le candele sono già fornite (es. dall'optimizer che le scarica una volta
+  // sola e le riusa su molte valutazioni / split in-out-of-sample), si saltano
+  // il download e il parsing.
+  let C;
+  if (Array.isArray(opts.candles)) {
+    C = opts.candles;
+  } else {
+    const raw = await client.getCandles(coin, interval, lookbackDays * DAY_MS) || [];
+    C = raw
+      .map(k => ({ t: k.t, o: +k.o, h: +k.h, l: +k.l, c: +k.c }))
+      .filter(k => !isNaN(k.c));
+  }
 
   if (C.length < 60) {
     return { error: 'Dati storici insufficienti per il backtest', candles: C.length };
@@ -162,4 +178,4 @@ function computeStats(trades, notionalUsd, maxDD) {
   };
 }
 
-export default { runBacktest };
+export default { runBacktest, fetchCandles };

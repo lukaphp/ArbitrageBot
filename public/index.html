@@ -521,12 +521,55 @@
                     <div class="card-header">
                         <h2>🧠 Agente AI (advisory)</h2>
                         <div style="display:flex;gap:8px;align-items:center;">
-                            <span id="agentStatus" class="muted"></span>
-                            <button class="btn btn-sm btn-outline" onclick="perps.runAnalyst()">▶️ Analizza ora</button>
+                            <span id="aiAgentStatus" class="muted"></span>
+                            <button class="btn btn-sm btn-outline" onclick="perps.toggleAnalysisParams()">⚙️ Parametri</button>
+                            <button class="btn btn-sm btn-primary" onclick="perps.runAnalyst()">▶️ Analizza ora</button>
                         </div>
                     </div>
                     <div class="card-body">
-                        <p class="simple-hint">L'AI <strong>propone</strong> azioni analizzando dati e statistiche. Non esegue nulla da sola: ogni proposta passa dalla tua approvazione e dal gate di rischio deterministico.</p>
+                        <p class="simple-hint">L'AI <strong>esplora più mercati e stili</strong> e propone strategie supportate da backtest. Non esegue nulla da sola: ogni proposta passa dalla tua approvazione e dal gate di rischio.</p>
+
+                        <div id="analysisParams" class="analysis-params hidden">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Modello</label>
+                                    <select id="anModel" class="form-select form-select-sm">
+                                        <option value="">Default (Sonnet)</option>
+                                        <option value="claude-sonnet-4-6">Sonnet (bilanciato)</option>
+                                        <option value="claude-opus-4-8">Opus (approfondito, costa di più)</option>
+                                        <option value="claude-haiku-4-5">Haiku (economico)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Rischio</label>
+                                    <select id="anRisk" class="form-select form-select-sm">
+                                        <option value="balanced">Bilanciato</option>
+                                        <option value="conservative">Conservativo</option>
+                                        <option value="aggressive">Aggressivo</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Max idee</label>
+                                    <input type="number" id="anMax" class="form-input form-input-sm" value="5" min="1" max="8" style="width:70px">
+                                </div>
+                                <div class="form-group toggle-group">
+                                    <label><input type="checkbox" id="anExplore" checked> Idee esplorative</label>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group" style="flex:1">
+                                    <label>Mercati su cui concentrarsi <span class="muted">(vuoto = sceglie l'AI)</span></label>
+                                    <input type="text" id="anFocus" class="form-input" placeholder="es. ETH-PERP, BTC-PERP, SOL-PERP">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group" style="flex:1">
+                                    <label>Note di contesto <span class="muted">(opzionale)</span></label>
+                                    <textarea id="anNotes" class="form-input" rows="2" placeholder="es. evita le alt a bassa liquidità; preferisco operazioni di qualche giorno"></textarea>
+                                </div>
+                            </div>
+                        </div>
+
                         <div id="agentProposals" class="agent-proposals"></div>
 
                         <h4 class="sub-h" style="margin-top:18px;">📜 Storico strategie</h4>
@@ -924,6 +967,6 @@
         }
     </script>
     <script src="app.js?v=1.1.0"></script>
-    <script src="perps.js?v=1.7.0"></script>
+    <script src="perps.js?v=1.9.0"></script>
 </body>
 </html>

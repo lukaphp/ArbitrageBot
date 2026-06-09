@@ -150,6 +150,36 @@ class HyperliquidClient {
     return sdk.info.perpetuals.getPredictedFundings();
   }
 
+  /**
+   * Statistiche di mercato per scansione/ranking: variazione 24h, volume,
+   * funding, open interest. Una sola richiesta (metaAndAssetCtxs).
+   */
+  async getMarketStats(network = this.network) {
+    const sdk = await this.getReadSdk(network);
+    const res = await sdk.info.perpetuals.getMetaAndAssetCtxs();
+    const meta = Array.isArray(res) ? res[0] : res?.meta;
+    const ctxs = Array.isArray(res) ? res[1] : res?.assetCtxs;
+    if (!meta?.universe || !ctxs) return [];
+    return meta.universe
+      .map((u, i) => ({ u, c: ctxs[i] || {} }))
+      .filter(x => !x.u.isDelisted)
+      .map(({ u, c }) => {
+        const coin = u.name.endsWith('-PERP') ? u.name : `${u.name}-PERP`;
+        const mark = parseFloat(c.markPx || c.midPx || '0');
+        const prev = parseFloat(c.prevDayPx || '0');
+        return {
+          coin,
+          name: coin.replace('-PERP', ''),
+          mark,
+          change24hPct: prev ? ((mark - prev) / prev) * 100 : null,
+          volume24h: parseFloat(c.dayNtlVlm || '0'),
+          funding: c.funding != null ? parseFloat(c.funding) : null,
+          openInterest: parseFloat(c.openInterest || '0'),
+          maxLeverage: u.maxLeverage
+        };
+      });
+  }
+
   /** Stato account normalizzato: equity, margine, posizioni aperte, saldo Spot. */
   async getAccount(masterAddress, network = this.network) {
     const sdk = await this.getReadSdk(network);

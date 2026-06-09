@@ -141,9 +141,12 @@ class PerpsDatabase {
   /** Migrazioni leggere per schemi già esistenti (aggiunta colonne). */
   _migrate() {
     const cols = this.db.prepare(`PRAGMA table_info(proposals)`).all().map(c => c.name);
-    if (!cols.includes('linked_bot_id')) {
-      this.db.exec(`ALTER TABLE proposals ADD COLUMN linked_bot_id TEXT`);
-    }
+    const add = (name, type) => { if (!cols.includes(name)) this.db.exec(`ALTER TABLE proposals ADD COLUMN ${name} ${type}`); };
+    add('linked_bot_id', 'TEXT');
+    add('model', 'TEXT');          // modello Claude che ha generato la proposta
+    add('cost_usd', 'REAL');       // costo stimato dell'elaborazione (quota della run)
+    add('tokens_in', 'INTEGER');
+    add('tokens_out', 'INTEGER');
   }
 
   /** Garantisce che la connessione sia aperta (auto-init lazy). */
@@ -363,8 +366,8 @@ class PerpsDatabase {
   insertProposal(p) {
     this.ensure();
     this.db.prepare(`
-      INSERT INTO proposals (id, type, coin, payload_json, rationale, confidence, backtest_json, source, status, created_at, expires_at)
-      VALUES (@id, @type, @coin, @payloadJson, @rationale, @confidence, @backtestJson, @source, 'pending', @createdAt, @expiresAt)
+      INSERT INTO proposals (id, type, coin, payload_json, rationale, confidence, backtest_json, source, status, created_at, expires_at, model, cost_usd, tokens_in, tokens_out)
+      VALUES (@id, @type, @coin, @payloadJson, @rationale, @confidence, @backtestJson, @source, 'pending', @createdAt, @expiresAt, @model, @costUsd, @tokensIn, @tokensOut)
     `).run({
       id: p.id,
       type: p.type,
@@ -375,9 +378,20 @@ class PerpsDatabase {
       backtestJson: p.backtest ? JSON.stringify(p.backtest) : null,
       source: p.source || 'analyst',
       createdAt: Date.now(),
-      expiresAt: p.expiresAt || null
+      expiresAt: p.expiresAt || null,
+      model: p.model || null,
+      costUsd: p.costUsd ?? null,
+      tokensIn: p.tokensIn ?? null,
+      tokensOut: p.tokensOut ?? null
     });
     return this.getProposal(p.id);
+  }
+
+  /** Costo totale stimato delle proposte AI (somma di cost_usd). */
+  getAnalystCostTotal() {
+    this.ensure();
+    const row = this.db.prepare(`SELECT COALESCE(SUM(cost_usd), 0) AS total, COUNT(*) AS runs FROM proposals WHERE cost_usd IS NOT NULL`).get();
+    return { total: row.total || 0, proposals: row.runs || 0 };
   }
 
   getProposal(id) {

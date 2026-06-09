@@ -179,7 +179,15 @@ export const HYPERLIQUID_CONFIG = {
     maxCallsPerHour: parseInt(process.env.AGENT_MAX_CALLS_PER_HOUR) || 8, // cap costi/latenza
     proposalTtlMin: parseInt(process.env.AGENT_PROPOSAL_TTL_MIN) || 30,   // scadenza proposte
     // Whitelist mercati per le azioni di apertura (vuota = tutti). Es: "ETH,BTC,SOL"
-    marketWhitelist: (process.env.AGENT_MARKET_WHITELIST || '').split(',').map(s => s.trim()).filter(Boolean)
+    marketWhitelist: (process.env.AGENT_MARKET_WHITELIST || '').split(',').map(s => s.trim()).filter(Boolean),
+    // Prezzi STIMATI dei modelli Claude in USD per 1M di token (input/output).
+    // Configurabili: aggiorna se i listini cambiano. La scelta del tier avviene
+    // per sottostringa del nome modello (opus/sonnet/haiku).
+    pricing: {
+      opus: { in: parseFloat(process.env.PRICE_OPUS_IN) || 15, out: parseFloat(process.env.PRICE_OPUS_OUT) || 75 },
+      sonnet: { in: parseFloat(process.env.PRICE_SONNET_IN) || 3, out: parseFloat(process.env.PRICE_SONNET_OUT) || 15 },
+      haiku: { in: parseFloat(process.env.PRICE_HAIKU_IN) || 1, out: parseFloat(process.env.PRICE_HAIKU_OUT) || 5 }
+    }
   }
 };
 

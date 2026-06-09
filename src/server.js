@@ -990,10 +990,16 @@ class ArbitrageBotServer {
       res.json({ success: true, data: proposals.history() });
     });
 
-    // Esegue subito un ciclo dell'Analyst (on-demand)
+    // Esegue subito un ciclo dell'Analyst (on-demand), con parametri opzionali
     app.post('/api/agents/analyst/run', async (req, res) => {
       try {
-        const r = await analyst.run();
+        const { model, riskAppetite, focusMarkets, maxProposals, exploration, notes } = req.body || {};
+        const opts = {
+          model, riskAppetite, maxProposals, exploration, notes,
+          focusMarkets: Array.isArray(focusMarkets) ? focusMarkets
+            : (typeof focusMarkets === 'string' && focusMarkets.trim() ? focusMarkets.split(',').map(s => s.trim()).filter(Boolean) : undefined)
+        };
+        const r = await analyst.run(opts);
         res.json({ success: !r?.error, data: r, error: r?.error });
       } catch (error) {
         res.status(500).json({ success: false, error: error.message });

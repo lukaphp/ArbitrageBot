@@ -33,8 +33,46 @@ export const TOOL_DEFS = [
   { name: 'ml_predict', description: 'Stima ML (FreqAI-lite) della probabilità di rialzo per un mercato, con accuratezza e baseline del modello.', input_schema: { type: 'object', properties: { coin: { type: 'string' }, interval: { type: 'string' } }, required: ['coin'] } },
   { name: 'run_backtest', description: 'Backtest di una strategia a regole su dati storici. config: { entryRules:[{type:"indicator",indicator:"rsi",period:14,op:"<",value:30,signal:"long"}], tp:{enabled:true,value:3}, sl:{enabled:true,value:1.5} }. Ritorna win rate, profit factor, expectancy.', input_schema: { type: 'object', properties: { coin: { type: 'string' }, interval: { type: 'string' }, lookbackDays: { type: 'number' }, config: { type: 'object' } }, required: ['coin', 'config'] } },
   { name: 'get_portfolio_limits', description: 'Limiti di rischio di portafoglio attivi (max posizioni concorrenti, esposizione, perdite consecutive, cooldown).', input_schema: { type: 'object', properties: {} } },
-  { name: 'get_recent_fills', description: 'Ultimi fill/ordini eseguiti sull\'account.', input_schema: { type: 'object', properties: { limit: { type: 'number' } } } }
+  { name: 'get_recent_fills', description: 'Ultimi fill/ordini eseguiti sull\'account.', input_schema: { type: 'object', properties: { limit: { type: 'number' } } } },
+  { name: 'scan_markets', description: 'Classifica i mercati per trovare candidati: variazione 24h, volume, |funding|, volatilità (|variazione|). Usalo per cercare opportunità su PIÙ mercati prima di proporre.', input_schema: { type: 'object', properties: { sortBy: { type: 'string', description: 'volume | change | volatility | funding (default volume)' }, limit: { type: 'number', description: 'quanti mercati (default 12)' } } } },
+  { name: 'backtest_templates', description: 'Esegue il backtest di un set di strategie standard (RSI reversal, EMA trend, MACD momentum, Bollinger) su un mercato e ritorna quale ha edge, con la configurazione pronta. Usalo per SCOPRIRE rapidamente una strategia valida su un mercato candidato.', input_schema: { type: 'object', properties: { coin: { type: 'string' }, interval: { type: 'string', description: 'default 1h' }, lookbackDays: { type: 'number', description: 'default 45' } }, required: ['coin'] } }
 ];
+
+/** Libreria di strategie standard che l'AI può scoprire e proporre. */
+export const STRATEGY_TEMPLATES = {
+  rsi_reversal: {
+    label: 'Rimbalzo ipervenduto (RSI)',
+    config: { direction: 'both', logic: 'any',
+      entryRules: [
+        { type: 'indicator', indicator: 'rsi', period: 14, op: '<', value: 30, signal: 'long' },
+        { type: 'indicator', indicator: 'rsi', period: 14, op: '>', value: 70, signal: 'short' }
+      ], exitRules: [], tp: { enabled: true, mode: 'percent', value: 3 }, sl: { enabled: true, mode: 'percent', value: 1.5 } }
+  },
+  ema_trend: {
+    label: 'Segui il trend (EMA50)',
+    config: { direction: 'both', logic: 'any',
+      entryRules: [
+        { type: 'indicator', indicator: 'ema', period: 50, compareToPrice: true, op: '>', signal: 'long' },
+        { type: 'indicator', indicator: 'ema', period: 50, compareToPrice: true, op: '<', signal: 'short' }
+      ], exitRules: [], tp: { enabled: true, mode: 'percent', value: 5 }, sl: { enabled: true, mode: 'percent', value: 2.5 } }
+  },
+  macd_momentum: {
+    label: 'Momentum (MACD)',
+    config: { direction: 'both', logic: 'any',
+      entryRules: [
+        { type: 'indicator', indicator: 'macd', cond: 'bullish', signal: 'long' },
+        { type: 'indicator', indicator: 'macd', cond: 'bearish', signal: 'short' }
+      ], exitRules: [], tp: { enabled: true, mode: 'percent', value: 4 }, sl: { enabled: true, mode: 'percent', value: 2 } }
+  },
+  bollinger: {
+    label: 'Bande di Bollinger',
+    config: { direction: 'both', logic: 'any',
+      entryRules: [
+        { type: 'indicator', indicator: 'bollinger', cond: 'below_lower', signal: 'long' },
+        { type: 'indicator', indicator: 'bollinger', cond: 'above_upper', signal: 'short' }
+      ], exitRules: [], tp: { enabled: true, mode: 'percent', value: 3 }, sl: { enabled: true, mode: 'percent', value: 2 } }
+  }
+};
 
 /** Esegue uno strumento read-only. */
 export async function runTool(name, input = {}) {
@@ -94,6 +132,42 @@ export async function runTool(name, input = {}) {
       if (!masterAddress) return { error: 'Nessun wallet collegato' };
       const fills = await client.getUserFills(masterAddress, network).catch(() => []);
       return (fills || []).slice(0, input.limit || 20);
+    }
+    case 'scan_markets': {
+      const stats = await client.getMarketStats().catch(() => []);
+      const usable = stats.filter(s => s.mark > 0);
+      const sortBy = input.sortBy || 'volume';
+      const sorter = {
+        volume: (a, b) => b.volume24h - a.volume24h,
+        change: (a, b) => (b.change24hPct || 0) - (a.change24hPct || 0),
+        volatility: (a, b) => Math.abs(b.change24hPct || 0) - Math.abs(a.change24hPct || 0),
+        funding: (a, b) => Math.abs(b.funding || 0) - Math.abs(a.funding || 0)
+      }[sortBy] || ((a, b) => b.volume24h - a.volume24h);
+      return usable.sort(sorter).slice(0, input.limit || 12).map(s => ({
+        coin: s.coin, price: round(s.mark), change24hPct: round(s.change24hPct),
+        volume24h: Math.round(s.volume24h), funding: s.funding, maxLeverage: s.maxLeverage
+      }));
+    }
+    case 'backtest_templates': {
+      const interval = input.interval || '1h';
+      const days = input.lookbackDays || 45;
+      const results = [];
+      for (const [key, tpl] of Object.entries(STRATEGY_TEMPLATES)) {
+        try {
+          const r = await runBacktest({ ...tpl.config, candleInterval: interval }, input.coin, { interval, lookbackDays: days });
+          if (r.error) { results.push({ template: key, label: tpl.label, error: r.error }); continue; }
+          const s = r.stats;
+          results.push({
+            template: key, label: tpl.label,
+            trades: s.trades, winRate: round(s.winRate), profitFactor: round(s.profitFactor),
+            expectancy: round(s.expectancy), totalReturnPct: round(s.totalReturnPct),
+            config: tpl.config // pronto per una proposta new_strategy_candidate
+          });
+        } catch (e) { results.push({ template: key, label: tpl.label, error: e.message }); }
+      }
+      // Ordina per expectancy (i migliori prima)
+      results.sort((a, b) => (b.expectancy || -Infinity) - (a.expectancy || -Infinity));
+      return { coin: input.coin, interval, lookbackDays: days, results };
     }
     default:
       return { error: `Strumento sconosciuto: ${name}` };

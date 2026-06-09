@@ -22,11 +22,12 @@ import logger from '../utils/logger.js';
 
 class Proposals {
   /** Crea e accoda una proposta. */
-  create({ type, coin, payload, rationale, confidence, backtest, source = 'analyst' }) {
+  create({ type, coin, payload, rationale, confidence, backtest, source = 'analyst', model, costUsd, tokensIn, tokensOut }) {
     const ttlMin = HYPERLIQUID_CONFIG.agents?.proposalTtlMin || 30;
     const id = crypto.randomUUID();
     const row = db.insertProposal({
       id, type, coin, payload, rationale, confidence, backtest, source,
+      model, costUsd, tokensIn, tokensOut,
       expiresAt: Date.now() + ttlMin * 60 * 1000
     });
     db.insertAudit('analyst', 'proposal.created', { id, type, coin });
@@ -55,7 +56,9 @@ class Proposals {
     return {
       ...p,
       payload: safeParse(p.payload_json),
-      backtest: safeParse(p.backtest_json)
+      backtest: safeParse(p.backtest_json),
+      model: p.model,
+      costUsd: p.cost_usd
     };
   }
 
@@ -158,7 +161,8 @@ class Proposals {
       const out = {
         id: p.id, coin: p.coin, status: p.status, rationale: p.rationale,
         confidence: p.confidence, createdAt: p.created_at, decidedAt: p.decided_at,
-        linkedBotId: p.linked_bot_id, payload: safeParse(p.payload_json)
+        linkedBotId: p.linked_bot_id, payload: safeParse(p.payload_json),
+        model: p.model, costUsd: p.cost_usd, tokensIn: p.tokens_in, tokensOut: p.tokens_out
       };
       if (p.linked_bot_id) {
         const bot = db.getBot(p.linked_bot_id);

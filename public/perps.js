@@ -112,6 +112,13 @@ class PerpsApp {
     if (n == null || isNaN(n)) return '—';
     return Number(n).toLocaleString('en-US', { maximumFractionDigits: d });
   }
+  /** Formatta un costo in USD (più decimali per importi piccoli). */
+  _fmtCost(n) {
+    if (n == null || isNaN(n)) return '—';
+    const v = Number(n);
+    if (v === 0) return '$0';
+    return '$' + v.toFixed(v < 1 ? 4 : 2);
+  }
 
   // ---- Lifecycle ----
   async onShow() {
@@ -561,11 +568,15 @@ class PerpsApp {
         this.api('/api/agents/proposals?status=pending')
       ]);
       const a = status.analyst || {};
-      const st = document.getElementById('agentStatus');
+      const st = document.getElementById('aiAgentStatus');
       if (st) {
-        if (!a.hasApiKey) st.textContent = '⚪ chiave AI non configurata';
-        else if (!a.enabled) st.textContent = '⏸️ disattivato (AGENTS_ENABLED)';
-        else st.textContent = `🟢 attivo · ${a.runsThisHour}/${a.maxCallsPerHour} run/h`;
+        let base;
+        if (!a.hasApiKey) base = '⚪ chiave AI non configurata';
+        else if (!a.enabled) base = '⏸️ disattivato (AGENTS_ENABLED)';
+        else base = `🟢 attivo · ${a.runsThisHour}/${a.maxCallsPerHour} run/h`;
+        const cost = a.costTotal ? ` · 💸 speso ${this._fmtCost(a.costTotal)}` : '';
+        st.textContent = base + cost;
+        if (st.title !== undefined) st.title = a.model ? `Modello: ${a.model}` : '';
       }
       const ks = document.getElementById('killswitchState');
       if (ks) ks.textContent = status.killSwitch ? '🔴 ATTIVO — aperture bloccate' : '';
@@ -598,10 +609,12 @@ class PerpsApp {
             outcome = `<span class="sh-outcome">📊 ${h.botName}: ${o.trades} op · WR ${(o.winRate * 100).toFixed(0)}% · PF ${pf} · PnL <span class="${pnlCls}">${this.fmtUsd(o.totalPnl)}</span></span>`;
           }
         }
+        const costLine = h.model ? `<div class="sh-cost">🧠 ${h.model} · elaborazione ${this._fmtCost(h.costUsd)}</div>` : '';
         return `
         <div class="sh-row">
           <div class="sh-line1">${badge} <b>${h.coin || ''}</b> <span class="muted">${date}</span></div>
           ${h.rationale ? `<div class="sh-rationale">${h.rationale}</div>` : ''}
+          ${costLine}
           ${outcome ? `<div>${outcome}</div>` : ''}
         </div>`;
       }).join('');
@@ -633,6 +646,7 @@ class PerpsApp {
         </div>
         <div class="ap-rationale">${p.rationale || ''}</div>
         ${payload ? `<div class="ap-payload">${payload}</div>` : ''}
+        ${p.model ? `<div class="ap-cost">🧠 ${p.model} · costo elaborazione ${this._fmtCost(p.costUsd)}</div>` : ''}
         <div class="ap-actions">
           ${approveBtn}
           <button class="btn btn-sm btn-outline" onclick="perps.rejectProposal('${p.id}')">🚫 Rifiuta</button>
@@ -677,12 +691,32 @@ class PerpsApp {
     this.loadAgents();
   }
 
+  toggleAnalysisParams() {
+    document.getElementById('analysisParams')?.classList.toggle('hidden');
+  }
+
+  _analysisParams() {
+    const v = id => document.getElementById(id)?.value;
+    return {
+      model: v('anModel') || undefined,
+      riskAppetite: v('anRisk') || undefined,
+      maxProposals: parseInt(v('anMax')) || 5,
+      exploration: document.getElementById('anExplore')?.checked !== false,
+      focusMarkets: (v('anFocus') || '').split(',').map(s => s.trim()).filter(Boolean),
+      notes: (v('anNotes') || '').trim() || undefined
+    };
+  }
+
   async runAnalyst() {
-    const st = document.getElementById('agentStatus');
-    if (st) st.textContent = '⏳ analisi in corso…';
+    const st = document.getElementById('aiAgentStatus');
+    if (st) st.textContent = '⏳ analisi in corso… (può richiedere ~1 minuto)';
     try {
-      const r = await this.api('/api/agents/analyst/run', { method: 'POST' });
-      this.toast(r?.summary ? `Analyst: ${r.proposals} proposte` : 'Analisi completata', 'success');
+      const r = await this.api('/api/agents/analyst/run', {
+        method: 'POST',
+        body: JSON.stringify(this._analysisParams())
+      });
+      const cost = r?.cost ? ` · ${this._fmtCost(r.cost)}` : '';
+      this.toast(`Analyst (${r?.model || 'AI'}): ${r?.proposals ?? 0} proposte${cost}`, 'success');
     } catch (e) {
       this.toast(`Analyst: ${e.message}`, 'warning');
     }

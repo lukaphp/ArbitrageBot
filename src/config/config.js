@@ -120,6 +120,78 @@ export const ARBITRAGE_CONFIG = {
 };
 
 /**
+ * Configurazione Perps Trading (Hyperliquid)
+ * =========================================
+ * Endpoint testnet/mainnet, limiti di rischio e parametri auto-pilot.
+ * Lo switch tra testnet e mainnet è gestito a runtime (vedi src/perps/hyperliquidClient.js).
+ */
+export const HYPERLIQUID_CONFIG = {
+  // Endpoint REST/WS ufficiali
+  endpoints: {
+    testnet: {
+      api: 'https://api.hyperliquid-testnet.xyz',
+      ws: 'wss://api.hyperliquid-testnet.xyz/ws',
+      explorer: 'https://app.hyperliquid-testnet.xyz',
+      hyperliquidChain: 'Testnet'
+    },
+    mainnet: {
+      api: 'https://api.hyperliquid.xyz',
+      ws: 'wss://api.hyperliquid.xyz/ws',
+      explorer: 'https://app.hyperliquid.xyz',
+      hyperliquidChain: 'Mainnet'
+    }
+  },
+  // Rete attiva di default (testnet per sicurezza). Sovrascrivibile via ENV o API.
+  defaultNetwork: process.env.HYPERLIQUID_NETWORK || 'testnet',
+  // signatureChainId usato nel dominio EIP-712 per le user-signed action (approveAgent).
+  // Arbitrum One (0xa4b1) è il valore canonico accettato da Hyperliquid per la firma,
+  // indipendentemente dalla rete HL effettiva (differenziata da hyperliquidChain).
+  signatureChainId: '0xa4b1',
+  // Limiti di rischio di default applicati lato server prima di ogni ordine
+  risk: {
+    maxLeverage: parseInt(process.env.PERPS_MAX_LEVERAGE) || 20,
+    maxPositionUsd: parseFloat(process.env.PERPS_MAX_POSITION_USD) || 5000,
+    defaultLeverage: parseInt(process.env.PERPS_DEFAULT_LEVERAGE) || 3,
+    maxDailyLossUsd: parseFloat(process.env.PERPS_MAX_DAILY_LOSS_USD) || 1000
+  },
+  // Intervallo (ms) del loop di valutazione di ogni bot auto-pilot
+  botLoopInterval: parseInt(process.env.PERPS_BOT_INTERVAL) || 10000,
+  // Optimizer (Hyperopt): default conservativi per restare reattivo (il backtester
+  // è O(N²) per valutazione, quindi limitiamo evals e candele).
+  optimizer: {
+    maxEvals: parseInt(process.env.PERPS_OPT_MAX_EVALS) || 50,
+    minTrades: parseInt(process.env.PERPS_OPT_MIN_TRADES) || 10,
+    oosFraction: parseFloat(process.env.PERPS_OPT_OOS_FRACTION) || 0.3,
+    candleCap: parseInt(process.env.PERPS_OPT_CANDLE_CAP) || 1500
+  },
+  // Predittore ML (FreqAI-lite): orizzonte di previsione e soglia di rialzo.
+  predictor: {
+    lookbackDays: parseInt(process.env.PERPS_ML_LOOKBACK_DAYS) || 90,
+    lookforward: parseInt(process.env.PERPS_ML_LOOKFORWARD) || 5,
+    threshold: parseFloat(process.env.PERPS_ML_THRESHOLD) || 0.003,
+    candleCap: parseInt(process.env.PERPS_ML_CANDLE_CAP) || 2000
+  },
+  // Sistema agentico + Analyst AI (Claude). L'AI è solo advisory.
+  agents: {
+    enabled: process.env.AGENTS_ENABLED === 'true',
+    analystModel: process.env.AGENT_ANALYST_MODEL || 'claude-sonnet-4-6',
+    cadenceMin: parseInt(process.env.AGENT_CADENCE_MIN) || 30,        // ogni quanto gira l'Analyst
+    maxCallsPerHour: parseInt(process.env.AGENT_MAX_CALLS_PER_HOUR) || 8, // cap costi/latenza
+    proposalTtlMin: parseInt(process.env.AGENT_PROPOSAL_TTL_MIN) || 30,   // scadenza proposte
+    // Whitelist mercati per le azioni di apertura (vuota = tutti). Es: "ETH,BTC,SOL"
+    marketWhitelist: (process.env.AGENT_MARKET_WHITELIST || '').split(',').map(s => s.trim()).filter(Boolean),
+    // Prezzi STIMATI dei modelli Claude in USD per 1M di token (input/output).
+    // Configurabili: aggiorna se i listini cambiano. La scelta del tier avviene
+    // per sottostringa del nome modello (opus/sonnet/haiku).
+    pricing: {
+      opus: { in: parseFloat(process.env.PRICE_OPUS_IN) || 15, out: parseFloat(process.env.PRICE_OPUS_OUT) || 75 },
+      sonnet: { in: parseFloat(process.env.PRICE_SONNET_IN) || 3, out: parseFloat(process.env.PRICE_SONNET_OUT) || 15 },
+      haiku: { in: parseFloat(process.env.PRICE_HAIKU_IN) || 1, out: parseFloat(process.env.PRICE_HAIKU_OUT) || 5 }
+    }
+  }
+};
+
+/**
  * Configurazione sicurezza
  */
 export const SECURITY_CONFIG = {
@@ -163,12 +235,38 @@ export const API_CONFIG = {
  */
 export function validateConfig() {
   const errors = [];
-  
-  // Verifica modalità testnet
-  if (SECURITY_CONFIG.networkMode !== 'testnet') {
-    errors.push('ERRORE CRITICO: Il bot deve funzionare SOLO in modalità testnet!');
+  const isProd = process.env.NODE_ENV === 'production';
+  const hlNetwork = HYPERLIQUID_CONFIG.defaultNetwork;
+
+  // --- Sicurezza di produzione (segreti obbligatori) ---
+  // NOTA: NETWORK_MODE riguarda l'arbitraggio EVM (resta testnet); la rete
+  // Hyperliquid è separata e governata da HYPERLIQUID_NETWORK.
+  if (isProd) {
+    const encKey = process.env.AGENT_ENCRYPTION_KEY || '';
+    if (encKey.length < 32) {
+      errors.push('PROD: AGENT_ENCRYPTION_KEY mancante o troppo corta (richiesti ≥32 caratteri).');
+    }
+    if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 16) {
+      errors.push('PROD: SESSION_SECRET mancante o troppo corta (richiesti ≥16 caratteri).');
+    }
+    if (!process.env.APP_PASSWORD_HASH) {
+      errors.push('PROD: APP_PASSWORD_HASH mancante (genera con: node scripts/hash-password.js).');
+    }
   }
-  
+
+  // --- Guard mainnet Hyperliquid: conferma esplicita per denaro reale ---
+  if (hlNetwork === 'mainnet' && process.env.ALLOW_MAINNET !== 'true') {
+    errors.push('Hyperliquid MAINNET richiede ALLOW_MAINNET=true (conferma esplicita per operare con denaro reale).');
+  }
+  if (hlNetwork === 'mainnet' && process.env.ALLOW_MAINNET === 'true') {
+    console.warn('\n🔴🔴🔴 ATTENZIONE: Hyperliquid MAINNET ATTIVO — gli ordini useranno DENARO REALE 🔴🔴🔴\n');
+  }
+
+  // Verifica modalità testnet dell'arbitraggio EVM (separata da Hyperliquid)
+  if (SECURITY_CONFIG.networkMode !== 'testnet') {
+    errors.push('ERRORE CRITICO: l\'arbitraggio EVM deve funzionare SOLO in modalità testnet (NETWORK_MODE=testnet)!');
+  }
+
   // Verifica RPC URLs
   Object.entries(NETWORKS).forEach(([network, config]) => {
     if (!config.rpcUrl) {
@@ -207,6 +305,7 @@ export default {
   DEX_CONFIG,
   TOKENS,
   ARBITRAGE_CONFIG,
+  HYPERLIQUID_CONFIG,
   SECURITY_CONFIG,
   LOGGING_CONFIG,
   API_CONFIG,

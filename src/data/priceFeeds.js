@@ -32,6 +32,13 @@ class PriceFeedManager {
       'function decimals() view returns (uint8)',
       'function symbol() view returns (string)'
     ];
+    
+    this.simulationMode = true; // Default true
+  }
+  
+  setSimulationMode(enabled) {
+      this.simulationMode = enabled;
+      logger.info(`📊 Modalità simulazione prezzi: ${enabled ? 'ATTIVA' : 'DISATTIVATA (Prezzi Reali)'}`);
   }
   
   /**
@@ -137,7 +144,7 @@ class PriceFeedManager {
     Object.assign(prices, dexPrices);
     
     // In testnet saltiamo le API esterne per velocità e per evitare conflitti con i prezzi simulati
-    if (SECURITY_CONFIG.networkMode !== 'testnet') {
+    if (!this.simulationMode) {
       // Prezzi da API esterne
       const apiPrices = await this.getApiPrices(tokenSymbol);
       Object.assign(prices, apiPrices);
@@ -159,7 +166,7 @@ class PriceFeedManager {
     // 2. BSC Testnet ha liquidità limitata/assente
     // 3. Sepolia ha pool con liquidità frammentata o assente
     // 4. Vercel ha limitazioni di timeout per chiamate RPC multiple
-    if (SECURITY_CONFIG.networkMode === 'testnet') {
+    if (this.simulationMode) {
       return this.generateMockPrices(networkName, tokenSymbol);
     }
     

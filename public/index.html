@@ -6,8 +6,10 @@
     <title>🤖 Arbitrage Bot - Testnet Only</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles_perps.css">
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
     <!-- Header -->
@@ -19,6 +21,7 @@
                     <span class="testnet-badge">TESTNET ONLY</span>
                 </div>
                 <div class="connection-status">
+                    <button id="openSettings" class="btn btn-sm btn-outline" style="margin-right: 15px;">⚙️ Impostazioni</button>
                     <div id="serverStatus" class="status-indicator offline">
                         <span class="dot"></span>
                         <span class="text">Server</span>
@@ -70,6 +73,14 @@
                 </div>
             </section>
 
+            <!-- Navigazione viste: Arbitraggio | Perps -->
+            <nav class="view-tabs">
+                <button class="view-tab active" data-view="arbitrage" onclick="switchView('arbitrage')">🔍 Arbitraggio</button>
+                <button class="view-tab" data-view="perps" onclick="switchView('perps')">📈 Perps Trading</button>
+            </nav>
+
+            <!-- ====================== VISTA ARBITRAGGIO ====================== -->
+            <div id="view-arbitrage">
             <!-- Dashboard -->
             <section class="dashboard">
                 <div class="stats-grid">
@@ -220,6 +231,358 @@
                     </div>
                 </div>
             </section>
+            </div><!-- /view-arbitrage -->
+
+            <!-- ====================== VISTA PERPS ====================== -->
+            <div id="view-perps" class="hidden">
+
+                <!-- Account & Agent -->
+                <section class="card perps-account-card">
+                    <div class="card-header">
+                        <h2>🦊 Account Perps · Hyperliquid</h2>
+                        <div class="perps-network-toggle">
+                            <button class="net-pill active" data-net="testnet" onclick="perps.setNetwork('testnet')">Testnet</button>
+                            <button class="net-pill" data-net="mainnet" onclick="perps.setNetwork('mainnet')">Mainnet</button>
+                        </div>
+                    </div>
+                    <div class="card-content">
+                        <div id="perpsNotConnected" class="perps-hint">
+                            🔌 Connetti MetaMask (in alto) per usare il trading Perps.
+                        </div>
+                        <div id="perpsAccountBody" class="hidden">
+                            <div class="perps-stats">
+                                <div class="perps-stat"><span class="label">Equity</span><span class="value" id="perpsEquity">—</span></div>
+                                <div class="perps-stat"><span class="label">Margine usato</span><span class="value" id="perpsMargin">—</span></div>
+                                <div class="perps-stat"><span class="label">Posizioni</span><span class="value" id="perpsPosCount">0</span></div>
+                                <div class="perps-stat"><span class="label">Disponibile</span><span class="value" id="perpsWithdrawable">—</span></div>
+                            </div>
+                            <div class="agent-row">
+                                <div class="agent-status" id="agentStatus">
+                                    <span class="agent-dot offline"></span>
+                                    <span id="agentStatusText">Auto-trading non abilitato</span>
+                                </div>
+                                <button id="enableAgentBtn" class="btn btn-primary" onclick="perps.enableAgent()">
+                                    🔑 Abilita auto-trading
+                                </button>
+                            </div>
+                            <p class="agent-note">L'agent wallet permette ai bot di operare in autonomia. Firmi <strong>una sola volta</strong> con MetaMask; l'agent può fare trading ma <strong>non può prelevare</strong> i tuoi fondi.</p>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Faucet Testnet (solo testnet) -->
+                <section class="card faucet-card" id="faucetCard">
+                    <div class="card-header">
+                        <h2>💧 Faucet Testnet</h2>
+                        <span id="faucetEquityBadge" class="faucet-badge">Equity: —</span>
+                    </div>
+                    <div class="card-content">
+                        <p class="faucet-intro">Per fare trading in testnet serve collaterale <strong>USDC mock</strong> su Hyperliquid. Ottienilo dai faucet qui sotto: l'app rileva <strong>automaticamente</strong> quando i fondi arrivano.</p>
+                        <div class="faucet-options">
+                            <div class="faucet-option">
+                                <div class="faucet-opt-head"><strong>1️⃣ Faucet Hyperliquid</strong><span class="faucet-tag">consigliato</span></div>
+                                <p>1.000 USDC mock direttamente sull'account Perps (ripetibile ogni 4h). Richiede che il wallet abbia avuto attività su mainnet.</p>
+                                <button class="btn btn-primary" onclick="perps.openFaucet('hyperliquid')">💧 Apri faucet & rileva fondi</button>
+                            </div>
+                            <div class="faucet-option">
+                                <div class="faucet-opt-head"><strong>2️⃣ Percorso bridge</strong><span class="faucet-tag">wallet senza storia mainnet</span></div>
+                                <p>Ottieni USDC su Arbitrum Sepolia, poi depositali su Hyperliquid dal loro sito (Deposit).</p>
+                                <div class="faucet-links">
+                                    <button class="btn btn-outline" onclick="perps.openFaucet('circle')">🪙 USDC (Circle)</button>
+                                    <button class="btn btn-outline" onclick="perps.openFaucet('gas')">⛽ Gas Arb. Sepolia</button>
+                                    <button class="btn btn-outline" onclick="perps.openFaucet('deposit')">🏦 Deposita su HL</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="spotTransfer" class="spot-transfer hidden">
+                            <div class="spot-transfer-info">
+                                💼 Hai <strong id="spotBalance">—</strong> nel saldo <strong>Spot</strong>.
+                                Se il tuo account <strong>non è unificato</strong>, trasferiscilo al saldo Perps per fare trading.
+                                (Sugli account unificati lo Spot è già collaterale: puoi fare trading direttamente.)
+                            </div>
+                            <div class="spot-transfer-controls">
+                                <input type="number" id="transferAmount" class="form-input" placeholder="Importo USDC" step="any">
+                                <button class="btn btn-outline btn-sm" onclick="perps.fillTransferMax()">Max</button>
+                                <button class="btn btn-primary" onclick="perps.transferToPerp()">↪️ Trasferisci a Perps</button>
+                            </div>
+                        </div>
+                        <div id="faucetWatch" class="faucet-watch hidden">
+                            <span class="spinner-sm"></span>
+                            <span id="faucetWatchText">In attesa dell'arrivo dei fondi…</span>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Ordine Manuale -->
+                <section class="card">
+                    <div class="card-header"><h2>⚡ Ordine Manuale</h2></div>
+                    <div class="card-content">
+                        <div class="order-form">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Mercato</label>
+                                    <select id="orderMarket" class="form-select"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Leva</label>
+                                    <input type="number" id="orderLeverage" class="form-input" value="3" min="1" max="50">
+                                </div>
+                                <div class="form-group">
+                                    <label>Size (USD notional)</label>
+                                    <input type="number" id="orderSizeUsd" class="form-input" value="50" min="1">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Take Profit %</label>
+                                    <input type="number" id="orderTp" class="form-input" placeholder="es. 2" step="0.1">
+                                </div>
+                                <div class="form-group">
+                                    <label>Stop Loss %</label>
+                                    <input type="number" id="orderSl" class="form-input" placeholder="es. 1" step="0.1">
+                                </div>
+                                <div class="form-group order-mid">
+                                    <label>Prezzo corrente</label>
+                                    <span id="orderMid" class="value">—</span>
+                                </div>
+                            </div>
+                            <div class="order-actions">
+                                <button class="btn btn-long" onclick="perps.submitOrder('long')">🟢 LONG</button>
+                                <button class="btn btn-short" onclick="perps.submitOrder('short')">🔴 SHORT</button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Posizioni & Storico -->
+                <section class="card">
+                    <div class="card-header">
+                        <h2>📈 Posizioni</h2>
+                        <button class="btn btn-outline" onclick="perps.refreshPositionsTab()">🔄 Aggiorna</button>
+                    </div>
+                    <div class="card-content">
+                        <div class="pos-tabs">
+                            <button class="pos-tab active" data-tab="open" onclick="perps.switchPosTab('open')">📈 Aperte</button>
+                            <button class="pos-tab" data-tab="history" onclick="perps.switchPosTab('history')">📜 Storico operazioni</button>
+                        </div>
+
+                        <!-- Tab: posizioni aperte -->
+                        <div id="posOpen">
+                            <div class="hist-filters">
+                                <div class="hist-presets">
+                                    <button class="pos-preset" data-range="1d" onclick="perps.setPosRange('1d')">Oggi</button>
+                                    <button class="pos-preset" data-range="7d" onclick="perps.setPosRange('7d')">Settimana</button>
+                                    <button class="pos-preset" data-range="30d" onclick="perps.setPosRange('30d')">Mese</button>
+                                    <button class="pos-preset" data-range="365d" onclick="perps.setPosRange('365d')">Anno</button>
+                                    <button class="pos-preset active" data-range="all" onclick="perps.setPosRange('all')">Tutto</button>
+                                </div>
+                                <div class="hist-range">
+                                    <label>Da <input type="date" id="posFrom" onchange="perps.applyPosFilter(true)"></label>
+                                    <label>A <input type="date" id="posTo" onchange="perps.applyPosFilter(true)"></label>
+                                    <select id="posBot" class="form-select form-select-sm" onchange="perps.applyPosFilter()">
+                                        <option value="">Tutti i bot</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="table-container">
+                                <table class="history-table perps-positions-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Aperta il</th><th>Bot</th><th>Mercato</th><th>Lato</th><th>Size</th><th>Entry</th>
+                                            <th>PnL</th><th>Leva</th><th>Liq.</th><th>Azioni</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="positionsList"></tbody>
+                                </table>
+                            </div>
+                            <div id="noPositions" class="no-data">
+                                <div class="no-data-icon">📈</div>
+                                <div class="no-data-text">Nessuna posizione nel periodo selezionato</div>
+                            </div>
+                        </div>
+
+                        <!-- Tab: storico operazioni -->
+                        <div id="posHistory" class="hidden">
+                            <div class="hist-filters">
+                                <div class="hist-presets">
+                                    <button class="hist-preset" data-range="1d" onclick="perps.setHistoryRange('1d')">Oggi</button>
+                                    <button class="hist-preset" data-range="7d" onclick="perps.setHistoryRange('7d')">Settimana</button>
+                                    <button class="hist-preset" data-range="30d" onclick="perps.setHistoryRange('30d')">Mese</button>
+                                    <button class="hist-preset" data-range="365d" onclick="perps.setHistoryRange('365d')">Anno</button>
+                                    <button class="hist-preset active" data-range="all" onclick="perps.setHistoryRange('all')">Tutto</button>
+                                </div>
+                                <div class="hist-range">
+                                    <label>Da <input type="date" id="histFrom" onchange="perps.applyHistoryFilter(true)"></label>
+                                    <label>A <input type="date" id="histTo" onchange="perps.applyHistoryFilter(true)"></label>
+                                    <select id="histBot" class="form-select form-select-sm" onchange="perps.applyHistoryFilter()">
+                                        <option value="">Tutti i bot</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="table-container">
+                                <table class="history-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Data</th><th>Bot</th><th>Mercato</th><th>Operazione</th><th>Size</th>
+                                            <th>Prezzo</th><th>PnL</th><th>Fee</th><th>Tx</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="fillsList"></tbody>
+                                </table>
+                            </div>
+                            <div id="noFills" class="no-data">
+                                <div class="no-data-icon">📜</div>
+                                <div class="no-data-text">Nessuna operazione nel periodo selezionato</div>
+                                <div class="no-data-subtitle">Le tue operazioni (manuali e dei bot) appariranno qui</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Bot Auto-Pilot -->
+                <section class="card">
+                    <div class="card-header">
+                        <h2>🤖 Bot Auto-Pilot</h2>
+                        <button class="btn btn-primary" onclick="perps.openBotModal()">➕ Nuovo Bot</button>
+                    </div>
+                    <div class="card-content">
+                        <div id="botsList" class="bots-list"></div>
+                        <div id="noBots" class="no-data">
+                            <div class="no-data-icon">🤖</div>
+                            <div class="no-data-text">Nessun bot configurato</div>
+                            <div class="no-data-subtitle">Crea un bot per fare trading automatico secondo le tue regole</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Rischio di portafoglio & Notifiche -->
+                <section class="card">
+                    <div class="card-header"><h2>🛡️ Rischio di Portafoglio & Notifiche</h2></div>
+                    <div class="card-content">
+                        <h4 class="sub-h">Limiti globali (validi per tutti i bot)</h4>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Max posizioni concorrenti</label>
+                                <input type="number" id="pfMaxPositions" class="form-input" min="1" value="3">
+                            </div>
+                            <div class="form-group">
+                                <label>Max esposizione totale (USD)</label>
+                                <input type="number" id="pfMaxExposure" class="form-input" min="0" value="10000">
+                            </div>
+                            <div class="form-group">
+                                <label>Max perdite consecutive</label>
+                                <input type="number" id="pfMaxLosses" class="form-input" min="1" value="3">
+                            </div>
+                            <div class="form-group">
+                                <label>Cooldown (minuti)</label>
+                                <input type="number" id="pfCooldown" class="form-input" min="1" value="60">
+                            </div>
+                        </div>
+                        <button class="btn btn-primary" onclick="perps.savePortfolio()">💾 Salva limiti</button>
+
+                        <h4 class="sub-h" style="margin-top:20px;">📲 Notifiche Telegram</h4>
+                        <p class="simple-hint">Crea un bot Telegram con @BotFather, poi inserisci token e chat id. Avvisi su entrate/uscite/errori/limiti.</p>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Bot token</label>
+                                <input type="text" id="tgToken" class="form-input" placeholder="123456:ABC-...">
+                            </div>
+                            <div class="form-group">
+                                <label>Chat ID</label>
+                                <input type="text" id="tgChatId" class="form-input" placeholder="es. 987654321">
+                            </div>
+                            <div class="form-group toggle-group">
+                                <label><input type="checkbox" id="tgEnabled"> Abilita</label>
+                                <span id="tgStatus" class="muted"></span>
+                            </div>
+                        </div>
+                        <div class="order-actions" style="gap:10px;">
+                            <button class="btn btn-primary" onclick="perps.saveNotifications()">💾 Salva</button>
+                            <button class="btn btn-outline" onclick="perps.testNotification()">✉️ Invia test</button>
+                        </div>
+                        <div class="tg-commands">
+                            <div class="tg-commands-head">🤖 Controllo remoto via chat <span id="tgControlStatus" class="muted"></span></div>
+                            <p class="simple-hint">Con Telegram abilitato puoi comandare i bot direttamente dalla chat:</p>
+                            <ul class="tg-cmd-list">
+                                <li><code>/status</code> — stato generale (rete, bot attivi, equity)</li>
+                                <li><code>/saldo</code> — saldo e margine dell'account</li>
+                                <li><code>/posizioni</code> — posizioni aperte con PnL</li>
+                                <li><code>/bot</code> — elenco bot con stato e win-rate</li>
+                                <li><code>/avvia &lt;nome&gt;</code> · <code>/ferma &lt;nome&gt;</code> — avvia/ferma un bot</li>
+                                <li><code>/chiuditutto</code> — chiude tutte le posizioni aperte</li>
+                            </ul>
+                            <small class="muted">🔒 Risponde solo al Chat ID configurato.</small>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Agente AI (advisory) -->
+                <section class="perps-card">
+                    <div class="card-header">
+                        <h2>🧠 Agente AI (advisory)</h2>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <span id="aiAgentStatus" class="muted"></span>
+                            <button class="btn btn-sm btn-outline" onclick="perps.toggleAnalysisParams()">⚙️ Parametri</button>
+                            <button class="btn btn-sm btn-primary" onclick="perps.runAnalyst()">▶️ Analizza ora</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <p class="simple-hint">L'AI <strong>esplora più mercati e stili</strong> e propone strategie supportate da backtest. Non esegue nulla da sola: ogni proposta passa dalla tua approvazione e dal gate di rischio.</p>
+
+                        <div id="analysisParams" class="analysis-params hidden">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Modello</label>
+                                    <select id="anModel" class="form-select form-select-sm">
+                                        <option value="">Default (Sonnet)</option>
+                                        <option value="claude-sonnet-4-6">Sonnet (bilanciato)</option>
+                                        <option value="claude-opus-4-8">Opus (approfondito, costa di più)</option>
+                                        <option value="claude-haiku-4-5">Haiku (economico)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Rischio</label>
+                                    <select id="anRisk" class="form-select form-select-sm">
+                                        <option value="balanced">Bilanciato</option>
+                                        <option value="conservative">Conservativo</option>
+                                        <option value="aggressive">Aggressivo</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Max idee</label>
+                                    <input type="number" id="anMax" class="form-input form-input-sm" value="5" min="1" max="8" style="width:70px">
+                                </div>
+                                <div class="form-group toggle-group">
+                                    <label><input type="checkbox" id="anExplore" checked> Idee esplorative</label>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group" style="flex:1">
+                                    <label>Mercati su cui concentrarsi <span class="muted">(vuoto = sceglie l'AI)</span></label>
+                                    <input type="text" id="anFocus" class="form-input" placeholder="es. ETH-PERP, BTC-PERP, SOL-PERP">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group" style="flex:1">
+                                    <label>Note di contesto <span class="muted">(opzionale)</span></label>
+                                    <textarea id="anNotes" class="form-input" rows="2" placeholder="es. evita le alt a bassa liquidità; preferisco operazioni di qualche giorno"></textarea>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="agentProposals" class="agent-proposals"></div>
+
+                        <h4 class="sub-h" style="margin-top:18px;">📜 Storico strategie</h4>
+                        <p class="simple-hint">Strategie approvate o rifiutate. Per quelle avviate, l'esito si aggiorna nel tempo man mano che il bot opera.</p>
+                        <div id="strategyHistory" class="strategy-history"></div>
+
+                        <div class="agent-killswitch">
+                            <button class="btn btn-sm btn-danger" onclick="perps.killSwitch()">🛑 Kill-switch (ferma tutto)</button>
+                            <span id="killswitchState" class="muted"></span>
+                        </div>
+                    </div>
+                </section>
+            </div><!-- /view-perps -->
         </div>
     </main>
 
@@ -256,6 +619,46 @@
         </div>
     </div>
 
+    <div id="settingsModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>⚙️ Impostazioni Avanzate</h3>
+                <button class="modal-close" onclick="closeModal('settingsModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-section">
+                    <h4>Modalità Esecuzione</h4>
+                    <p class="settings-desc">Scegli come il bot deve operare. La modalità Testnet richiede un wallet configurato lato server.</p>
+                    
+                    <div class="mode-selector">
+                        <div class="mode-option selected" id="modeSim" onclick="app.setExecutionMode('simulation')">
+                            <div class="mode-icon">🧪</div>
+                            <div class="mode-info">
+                                <span class="mode-title">Simulazione</span>
+                                <span class="mode-desc">Dati simulati, nessuna interazione reale con la blockchain. Sicuro per test.</span>
+                            </div>
+                            <div class="mode-check">✓</div>
+                        </div>
+                        
+                        <div class="mode-option" id="modeTestnet" onclick="app.setExecutionMode('testnet')">
+                            <div class="mode-icon">🌐</div>
+                            <div class="mode-info">
+                                <span class="mode-title">Testnet Reale</span>
+                                <span class="mode-desc">Prezzi reali, transazioni reali su Goerli/Sepolia. Richiede Gas.</span>
+                            </div>
+                            <div class="mode-check">✓</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-actions">
+                    <button class="btn btn-secondary" onclick="closeModal('settingsModal')">Annulla</button>
+                    <button class="btn btn-primary" onclick="app.saveSettings()">Salva Modifiche</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="securityModal" class="modal hidden">
         <div class="modal-content">
             <div class="modal-header">
@@ -284,10 +687,286 @@
         </div>
     </div>
 
+    <!-- Modal grafico posizione -->
+    <div id="chartModal" class="modal hidden">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h3 id="chartTitle">📊 Grafico</h3>
+                <button class="modal-close" onclick="perps.closeChart()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="chart-toolbar">
+                    <div class="chart-intervals" id="chartIntervals">
+                        <button class="chart-int" data-int="5m" data-days="1">5m</button>
+                        <button class="chart-int active" data-int="15m" data-days="3">15m</button>
+                        <button class="chart-int" data-int="1h" data-days="10">1h</button>
+                        <button class="chart-int" data-int="4h" data-days="45">4h</button>
+                        <span class="chart-int-sep"></span>
+                        <button class="chart-int" data-int="1d" data-days="180" title="Giornaliera">1G</button>
+                        <button class="chart-int" data-int="1w" data-days="730" title="Settimanale">1S</button>
+                        <button class="chart-int" data-int="1M" data-days="1825" title="Mensile">1Me</button>
+                        <button class="chart-int" data-int="1d" data-days="365" title="Ultimo anno">1A</button>
+                    </div>
+                    <div class="chart-legend" id="chartLegend"></div>
+                </div>
+                <div id="chartContainer" class="chart-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Monitor bot -->
+    <div id="botMonitorModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="monitorTitle">📡 Monitor bot</h3>
+                <button class="modal-close" onclick="perps.closeBotMonitor()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="monitorBody"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal creazione/modifica Bot Perps -->
+    <div id="botModal" class="modal hidden">
+        <div class="modal-content modal-wide">
+            <div class="modal-header">
+                <h3 id="botModalTitle">🤖 Nuovo Bot</h3>
+                <button class="modal-close" onclick="closeModal('botModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="botEditId">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Nome bot</label>
+                        <input type="text" id="botName" class="form-input" placeholder="es. BTC RSI Long">
+                    </div>
+                    <div class="form-group">
+                        <label>Mercato</label>
+                        <select id="botMarket" class="form-select"></select>
+                    </div>
+                </div>
+
+                <!-- Toggle modalità -->
+                <div class="bot-mode-toggle">
+                    <button type="button" class="bot-mode active" data-mode="simple" onclick="perps.setBotMode('simple')">🎯 Semplificata</button>
+                    <button type="button" class="bot-mode" data-mode="advanced" onclick="perps.setBotMode('advanced')">⚙️ Avanzata (pro)</button>
+                </div>
+
+                <!-- ===== MODALITÀ SEMPLIFICATA ===== -->
+                <div id="botSimple">
+                    <div class="simple-block">
+                        <h4>📈 1. Scegli una strategia</h4>
+                        <p class="simple-hint">Il consulente la trasforma automaticamente nelle regole tecniche giuste.</p>
+                        <div id="strategyCards" class="strategy-cards"></div>
+                    </div>
+                    <div class="simple-block">
+                        <h4>🛡️ 2. Scegli il profilo di rischio</h4>
+                        <div id="riskProfiles" class="risk-profiles"></div>
+                    </div>
+                    <div id="consultantBox" class="consultant-box hidden">
+                        <div class="consultant-head">👔 Il consulente suggerisce</div>
+                        <div id="consultantText"></div>
+                        <div id="mlEstimate" class="ml-estimate"></div>
+                    </div>
+                </div>
+
+                <!-- ===== MODALITÀ AVANZATA ===== -->
+                <div id="botAdvanced" class="hidden">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Direzione</label>
+                        <select id="botDirection" class="form-select">
+                            <option value="both">Long & Short</option>
+                            <option value="long">Solo Long</option>
+                            <option value="short">Solo Short</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Leva</label>
+                        <input type="number" id="botLeverage" class="form-input" value="3" min="1" max="50">
+                    </div>
+                    <div class="form-group">
+                        <label>Sizing</label>
+                        <select id="botSizingMode" class="form-select">
+                            <option value="percent">% dell'equity</option>
+                            <option value="fixed">Margine fisso (USD)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Valore sizing</label>
+                        <input type="number" id="botSizingValue" class="form-input" value="10" min="0.1" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label>Intervallo candele</label>
+                        <select id="botInterval" class="form-select">
+                            <option value="1m">1m</option><option value="5m">5m</option>
+                            <option value="15m" selected>15m</option><option value="1h">1h</option><option value="4h">4h</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="rules-section">
+                    <div class="rules-header">
+                        <h4>📥 Regole di Ingresso</h4>
+                        <div class="logic-toggle">
+                            <label>Combinazione:</label>
+                            <select id="botLogic" class="form-select form-select-sm">
+                                <option value="any">Una qualsiasi (OR)</option>
+                                <option value="all">Tutte (AND)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="entryRules" class="rules-list"></div>
+                    <button class="btn btn-sm btn-outline" onclick="perps.addRule('entry')">+ Aggiungi regola</button>
+                </div>
+
+                <div class="rules-section">
+                    <h4>📤 Regole di Uscita (opzionali, oltre a TP/SL)</h4>
+                    <div id="exitRules" class="rules-list"></div>
+                    <button class="btn btn-sm btn-outline" onclick="perps.addRule('exit')">+ Aggiungi regola</button>
+                </div>
+
+                <div class="rules-section">
+                    <h4>🛡️ Gestione del Rischio</h4>
+                    <div class="form-row">
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botTpEnabled" checked> Take Profit %</label>
+                            <input type="number" id="botTpValue" class="form-input" value="2" step="0.1">
+                        </div>
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botSlEnabled" checked> Stop Loss %</label>
+                            <input type="number" id="botSlValue" class="form-input" value="1" step="0.1">
+                        </div>
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botTrailEnabled"> Trailing stop %</label>
+                            <input type="number" id="botTrailValue" class="form-input" value="1" step="0.1">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Max perdita giornaliera (USD)</label>
+                            <input type="number" id="botMaxDailyLoss" class="form-input" value="100" min="0">
+                        </div>
+                        <div class="form-group">
+                            <label>Max posizione (USD notional)</label>
+                            <input type="number" id="botMaxPosition" class="form-input" value="1000" min="0">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="rules-section">
+                    <h4>🚀 Automazione avanzata</h4>
+                    <div class="form-row">
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botMtfEnabled"> Conferma multi-timeframe</label>
+                            <div style="display:flex; gap:6px;">
+                                <select id="botMtfInterval" class="form-select form-select-sm">
+                                    <option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option>
+                                </select>
+                                <input type="number" id="botMtfPeriod" class="form-input form-input-sm" value="50" title="periodo EMA" style="width:70px">
+                            </div>
+                            <small class="muted">Entra solo se il trend EMA del TF superiore concorda.</small>
+                        </div>
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botDcaEnabled"> DCA (mediazione)</label>
+                            <div style="display:flex; gap:6px;">
+                                <input type="number" id="botDcaSteps" class="form-input form-input-sm" value="2" title="step" style="width:55px">
+                                <input type="number" id="botDcaStep" class="form-input form-input-sm" value="2" title="% avverso per step" style="width:65px">
+                                <input type="number" id="botDcaMult" class="form-input form-input-sm" value="1" step="0.1" title="moltiplicatore size" style="width:65px">
+                            </div>
+                            <small class="muted">step · % avverso · moltiplicatore size</small>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botPtpEnabled"> Take profit parziale</label>
+                            <div style="display:flex; gap:6px; align-items:center;">
+                                <span class="muted">50% a +</span><input type="number" id="botPtp1" class="form-input form-input-sm" value="2" step="0.1" style="width:60px"><span class="muted">%</span>
+                                <span class="muted">· resto a +</span><input type="number" id="botPtp2" class="form-input form-input-sm" value="5" step="0.1" style="width:60px"><span class="muted">%</span>
+                            </div>
+                        </div>
+                        <div class="form-group toggle-group">
+                            <label><input type="checkbox" id="botMlEnabled"> 🧠 Filtro ML (FreqAI-lite)</label>
+                            <div style="display:flex; gap:6px; align-items:center;">
+                                <select id="botMlInterval" class="form-select form-select-sm" style="width:70px">
+                                    <option value="15m">15m</option><option value="1h" selected>1h</option><option value="4h">4h</option>
+                                </select>
+                                <span class="muted">prob. min</span><input type="number" id="botMlMinProb" class="form-input form-input-sm" value="55" min="50" max="95" style="width:60px"><span class="muted">%</span>
+                            </div>
+                            <small class="muted">Apre solo se il modello concorda con la direzione. Ignorato se il modello non ha edge.</small>
+                        </div>
+                    </div>
+                </div>
+                </div><!-- /botAdvanced -->
+
+                <!-- Backtest -->
+                <div class="backtest-section">
+                    <div class="backtest-head">
+                        <h4>📊 Backtest della strategia</h4>
+                        <div class="backtest-controls">
+                            <select id="backtestDays" class="form-select form-select-sm">
+                                <option value="7">7 giorni</option>
+                                <option value="30" selected>30 giorni</option>
+                                <option value="90">90 giorni</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline" onclick="perps.runBacktest()">▶️ Esegui backtest</button>
+                        </div>
+                    </div>
+                    <div id="backtestResult"></div>
+                </div>
+
+                <!-- Ottimizzatore parametri (Hyperopt + walk-forward) -->
+                <div class="backtest-section optimizer-section">
+                    <div class="backtest-head">
+                        <h4>🔧 Ottimizza parametri <span class="muted" style="font-weight:400;font-size:12px">(stile Hyperopt)</span></h4>
+                        <div class="backtest-controls">
+                            <select id="optMethod" class="form-select form-select-sm" title="Metodo di ricerca">
+                                <option value="random" selected>Random</option>
+                                <option value="grid">Grid</option>
+                            </select>
+                            <select id="optObjective" class="form-select form-select-sm" title="Obiettivo">
+                                <option value="expectancy" selected>Expectancy</option>
+                                <option value="profitFactor">Profit factor</option>
+                                <option value="sqn">SQN</option>
+                                <option value="totalReturnPct">Return %</option>
+                            </select>
+                            <select id="optDays" class="form-select form-select-sm" title="Periodo">
+                                <option value="30">30g</option>
+                                <option value="60" selected>60g</option>
+                                <option value="90">90g</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline" onclick="perps.runOptimize()">⚙️ Ottimizza</button>
+                        </div>
+                    </div>
+                    <p class="simple-hint">Cerca i parametri migliori sul passato (in-sample) e li verifica su dati mai visti (out-of-sample) per smascherare l'overfitting.</p>
+                    <div id="optimizeResult"></div>
+                </div>
+
+                <div class="settings-actions">
+                    <button class="btn btn-secondary" onclick="closeModal('botModal')">Annulla</button>
+                    <button class="btn btn-primary" onclick="perps.saveBot()">💾 Salva Bot</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notifications -->
     <div id="toastContainer" class="toast-container"></div>
 
     <!-- Scripts -->
-    <script src="app.js?v=1.0.4"></script>
+    <script>
+        // Switch tra vista Arbitraggio e Perps
+        function switchView(view) {
+            document.getElementById('view-arbitrage').classList.toggle('hidden', view !== 'arbitrage');
+            document.getElementById('view-perps').classList.toggle('hidden', view !== 'perps');
+            document.querySelectorAll('.view-tab').forEach(t => {
+                t.classList.toggle('active', t.dataset.view === view);
+            });
+            if (view === 'perps' && window.perps) window.perps.onShow();
+        }
+    </script>
+    <script src="app.js?v=1.1.0"></script>
+    <script src="perps.js?v=1.9.0"></script>
 </body>
 </html>

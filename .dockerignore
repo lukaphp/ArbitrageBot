@@ -1,0 +1,17 @@
+node_modules
+npm-debug.log*
+.git
+.gitignore
+.env
+.env.*
+data
+logs
+*.log
+dist
+build
+.vercel
+.vercelignore
+vercel.json
+test-bot.js
+*.md
+.DS_Store

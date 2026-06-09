@@ -1,0 +1,38 @@
+# Deploy di produzione: app (Node) + Caddy (reverse proxy HTTPS).
+# L'app NON è esposta all'host: solo Caddy pubblica 80/443. L'app è raggiungibile
+# solo sulla rete interna Docker. SQLite persiste su un volume nominato.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - NODE_ENV=production
+      - BIND_HOST=0.0.0.0       # raggiungibile da Caddy sulla rete interna
+    volumes:
+      - perps-data:/app/data     # persistenza SQLite (bot, posizioni, chiavi agent cifrate)
+    expose:
+      - "3000"                   # solo rete interna, NON pubblicata sull'host
+    networks: [web]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data         # certificati Let's Encrypt
+      - caddy-config:/config
+    depends_on: [app]
+    networks: [web]
+
+networks:
+  web:
+
+volumes:
+  perps-data:
+  caddy-data:
+  caddy-config:

@@ -95,6 +95,13 @@ class BotManager {
     return bot ? bot.getState() : null;
   }
 
+  /** Diagnostica live di un bot (cosa sta valutando in questo momento). */
+  async getMonitor(id) {
+    const bot = this.bots.get(id);
+    if (!bot) throw new Error('Bot non trovato');
+    return bot.getMonitor();
+  }
+
   listStates() {
     return [...this.bots.values()].map(b => b.getState());
   }

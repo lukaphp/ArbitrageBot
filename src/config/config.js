@@ -170,6 +170,16 @@ export const HYPERLIQUID_CONFIG = {
     lookforward: parseInt(process.env.PERPS_ML_LOOKFORWARD) || 5,
     threshold: parseFloat(process.env.PERPS_ML_THRESHOLD) || 0.003,
     candleCap: parseInt(process.env.PERPS_ML_CANDLE_CAP) || 2000
+  },
+  // Sistema agentico + Analyst AI (Claude). L'AI è solo advisory.
+  agents: {
+    enabled: process.env.AGENTS_ENABLED === 'true',
+    analystModel: process.env.AGENT_ANALYST_MODEL || 'claude-sonnet-4-6',
+    cadenceMin: parseInt(process.env.AGENT_CADENCE_MIN) || 30,        // ogni quanto gira l'Analyst
+    maxCallsPerHour: parseInt(process.env.AGENT_MAX_CALLS_PER_HOUR) || 8, // cap costi/latenza
+    proposalTtlMin: parseInt(process.env.AGENT_PROPOSAL_TTL_MIN) || 30,   // scadenza proposte
+    // Whitelist mercati per le azioni di apertura (vuota = tutti). Es: "ETH,BTC,SOL"
+    marketWhitelist: (process.env.AGENT_MARKET_WHITELIST || '').split(',').map(s => s.trim()).filter(Boolean)
   }
 };
 
@@ -217,12 +227,38 @@ export const API_CONFIG = {
  */
 export function validateConfig() {
   const errors = [];
-  
-  // Verifica modalità testnet
-  if (SECURITY_CONFIG.networkMode !== 'testnet') {
-    errors.push('ERRORE CRITICO: Il bot deve funzionare SOLO in modalità testnet!');
+  const isProd = process.env.NODE_ENV === 'production';
+  const hlNetwork = HYPERLIQUID_CONFIG.defaultNetwork;
+
+  // --- Sicurezza di produzione (segreti obbligatori) ---
+  // NOTA: NETWORK_MODE riguarda l'arbitraggio EVM (resta testnet); la rete
+  // Hyperliquid è separata e governata da HYPERLIQUID_NETWORK.
+  if (isProd) {
+    const encKey = process.env.AGENT_ENCRYPTION_KEY || '';
+    if (encKey.length < 32) {
+      errors.push('PROD: AGENT_ENCRYPTION_KEY mancante o troppo corta (richiesti ≥32 caratteri).');
+    }
+    if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 16) {
+      errors.push('PROD: SESSION_SECRET mancante o troppo corta (richiesti ≥16 caratteri).');
+    }
+    if (!process.env.APP_PASSWORD_HASH) {
+      errors.push('PROD: APP_PASSWORD_HASH mancante (genera con: node scripts/hash-password.js).');
+    }
   }
-  
+
+  // --- Guard mainnet Hyperliquid: conferma esplicita per denaro reale ---
+  if (hlNetwork === 'mainnet' && process.env.ALLOW_MAINNET !== 'true') {
+    errors.push('Hyperliquid MAINNET richiede ALLOW_MAINNET=true (conferma esplicita per operare con denaro reale).');
+  }
+  if (hlNetwork === 'mainnet' && process.env.ALLOW_MAINNET === 'true') {
+    console.warn('\n🔴🔴🔴 ATTENZIONE: Hyperliquid MAINNET ATTIVO — gli ordini useranno DENARO REALE 🔴🔴🔴\n');
+  }
+
+  // Verifica modalità testnet dell'arbitraggio EVM (separata da Hyperliquid)
+  if (SECURITY_CONFIG.networkMode !== 'testnet') {
+    errors.push('ERRORE CRITICO: l\'arbitraggio EVM deve funzionare SOLO in modalità testnet (NETWORK_MODE=testnet)!');
+  }
+
   // Verifica RPC URLs
   Object.entries(NETWORKS).forEach(([network, config]) => {
     if (!config.rpcUrl) {

@@ -122,6 +122,7 @@ class PerpsApp {
     await this.loadBots();
     await this.loadPortfolio();
     await this.loadNotifications();
+    await this.loadAgents();
     if (!this.accountTimer) {
       this.accountTimer = setInterval(() => {
         if (!document.getElementById('view-perps').classList.contains('hidden')) {
@@ -220,7 +221,9 @@ class PerpsApp {
       document.getElementById('perpsPosCount').textContent = acc.positions.length;
       this._updateFaucetBadge(acc.accountValue);
       this._updateSpotTransfer(acc.spotUsdc || 0);
-      this._renderPositions(acc.positions);
+      this._allPositions = acc.positions;
+      this._populatePosBotFilter();
+      this.applyPosFilter();
     } catch (e) {
       // Account inesistente su HL = equity 0 (non un errore bloccante)
       this._updateFaucetBadge(0);
@@ -430,7 +433,13 @@ class PerpsApp {
     tbody.innerHTML = positions.map(p => {
       const pnlClass = p.unrealizedPnl >= 0 ? 'profit-positive' : 'profit-negative';
       const coin = p.coin.includes('-PERP') ? p.coin : p.coin + '-PERP';
+      const opened = p.openedAt ? new Date(p.openedAt).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '<span class="muted">—</span>';
+      const botCell = p.botName
+        ? `<span class="hist-bot">${p.botName === 'Manuale' ? '✋ Manuale' : '🤖 ' + p.botName}</span>`
+        : '<span class="muted">—</span>';
       return `<tr>
+        <td>${opened}</td>
+        <td>${botCell}</td>
         <td>${p.coin}</td>
         <td><span class="side-badge ${p.side}">${p.side.toUpperCase()}</span></td>
         <td>${this.fmtNum(p.size)}</td>
@@ -444,6 +453,44 @@ class PerpsApp {
         </td>
       </tr>`;
     }).join('');
+  }
+
+  /** Popola il menu dei bot nel filtro delle posizioni aperte. */
+  _populatePosBotFilter() {
+    const sel = document.getElementById('posBot');
+    if (!sel) return;
+    const names = [...new Set((this._allPositions || []).map(p => p.botName).filter(Boolean))].sort();
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">Tutti i bot</option>' + names.map(n => `<option value="${n}">${n}</option>`).join('');
+    if (names.includes(cur)) sel.value = cur;
+  }
+
+  setPosRange(range) {
+    this._posRange = range;
+    document.querySelectorAll('.pos-preset').forEach(b => b.classList.toggle('active', b.dataset.range === range));
+    const f = document.getElementById('posFrom'); const t = document.getElementById('posTo');
+    if (f) f.value = ''; if (t) t.value = '';
+    this.applyPosFilter();
+  }
+
+  applyPosFilter(fromRange = false) {
+    if (fromRange) {
+      this._posRange = 'custom';
+      document.querySelectorAll('.pos-preset').forEach(b => b.classList.remove('active'));
+    }
+    let fromTs = 0, toTs = Date.now(), hasDate = false;
+    const f = document.getElementById('posFrom')?.value;
+    const t = document.getElementById('posTo')?.value;
+    if (f || t) { hasDate = true; if (f) fromTs = new Date(f + 'T00:00:00').getTime(); if (t) toTs = new Date(t + 'T23:59:59').getTime(); }
+    else { const days = { '1d': 1, '7d': 7, '30d': 30, '365d': 365 }[this._posRange]; if (days) { hasDate = true; fromTs = Date.now() - days * 86400000; } }
+    const botFilter = document.getElementById('posBot')?.value || '';
+    const filtered = (this._allPositions || []).filter(p => {
+      if (botFilter && p.botName !== botFilter) return false;
+      // Le posizioni senza data nota restano sempre visibili (non si nasconde una posizione live)
+      if (hasDate && p.openedAt != null && !(p.openedAt >= fromTs && p.openedAt <= toTs)) return false;
+      return true;
+    });
+    this._renderPositions(filtered);
   }
 
   async closePosition(coin) {
@@ -506,6 +553,152 @@ class PerpsApp {
     } catch { /* ignore */ }
   }
 
+  // ---- Agente AI ----
+  async loadAgents() {
+    try {
+      const [status, props] = await Promise.all([
+        this.api('/api/agents/status'),
+        this.api('/api/agents/proposals?status=pending')
+      ]);
+      const a = status.analyst || {};
+      const st = document.getElementById('agentStatus');
+      if (st) {
+        if (!a.hasApiKey) st.textContent = '⚪ chiave AI non configurata';
+        else if (!a.enabled) st.textContent = '⏸️ disattivato (AGENTS_ENABLED)';
+        else st.textContent = `🟢 attivo · ${a.runsThisHour}/${a.maxCallsPerHour} run/h`;
+      }
+      const ks = document.getElementById('killswitchState');
+      if (ks) ks.textContent = status.killSwitch ? '🔴 ATTIVO — aperture bloccate' : '';
+      this._renderProposals(props || []);
+      await this.loadStrategyHistory();
+    } catch (e) { /* ignore */ }
+  }
+
+  /** Storico delle strategie AI approvate/rifiutate, con esito live di quelle avviate. */
+  async loadStrategyHistory() {
+    const box = document.getElementById('strategyHistory');
+    if (!box) return;
+    try {
+      const hist = await this.api('/api/agents/strategy-history');
+      if (!hist.length) { box.innerHTML = '<div class="agent-empty">Nessuna strategia decisa finora.</div>'; return; }
+      box.innerHTML = hist.map(h => {
+        const date = h.decidedAt ? new Date(h.decidedAt).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+        const badge = h.status === 'approved' ? '<span class="sh-badge ok">approvata</span>'
+          : h.status === 'rejected' ? '<span class="sh-badge no">rifiutata</span>'
+          : '<span class="sh-badge exp">scaduta</span>';
+        let outcome = '';
+        if (h.status === 'approved') {
+          if (!h.linkedBotId) outcome = '<span class="sh-outcome muted">— bot non ancora creato</span>';
+          else if (!h.botExists) outcome = '<span class="sh-outcome muted">— bot eliminato</span>';
+          else if (!h.outcome || !h.outcome.trades) outcome = `<span class="sh-outcome muted">▶️ ${h.botName} · in attesa di operazioni</span>`;
+          else {
+            const o = h.outcome;
+            const pnlCls = o.totalPnl >= 0 ? 'profit-positive' : 'profit-negative';
+            const pf = isFinite(o.profitFactor) ? o.profitFactor.toFixed(2) : '∞';
+            outcome = `<span class="sh-outcome">📊 ${h.botName}: ${o.trades} op · WR ${(o.winRate * 100).toFixed(0)}% · PF ${pf} · PnL <span class="${pnlCls}">${this.fmtUsd(o.totalPnl)}</span></span>`;
+          }
+        }
+        return `
+        <div class="sh-row">
+          <div class="sh-line1">${badge} <b>${h.coin || ''}</b> <span class="muted">${date}</span></div>
+          ${h.rationale ? `<div class="sh-rationale">${h.rationale}</div>` : ''}
+          ${outcome ? `<div>${outcome}</div>` : ''}
+        </div>`;
+      }).join('');
+    } catch (e) { /* ignore */ }
+  }
+
+  _renderProposals(list) {
+    const box = document.getElementById('agentProposals');
+    if (!box) return;
+    this._proposalsById = {};
+    if (!list.length) {
+      box.innerHTML = '<div class="agent-empty">Nessuna proposta in attesa. L\'AI proporrà azioni quando rileva qualcosa di utile.</div>';
+      return;
+    }
+    box.innerHTML = list.map(p => {
+      this._proposalsById[p.id] = p;
+      const conf = p.confidence != null ? `${Math.round(p.confidence * 100)}%` : '—';
+      const payload = p.payload ? Object.entries(p.payload).filter(([k]) => k !== 'config').map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(', ') : '';
+      const isStrategy = p.type === 'new_strategy_candidate';
+      const approveBtn = isStrategy
+        ? `<button class="btn btn-sm btn-primary" onclick="perps.applyStrategyProposal('${p.id}')">⚙️ Approva e configura</button>`
+        : `<button class="btn btn-sm btn-primary" onclick="perps.approveProposal('${p.id}')">✅ Approva</button>`;
+      return `
+      <div class="agent-proposal">
+        <div class="ap-head">
+          <span class="ap-type">${p.type}</span>
+          ${p.coin ? `<span class="ap-coin">${p.coin}</span>` : ''}
+          <span class="ap-conf">confidenza ${conf}</span>
+        </div>
+        <div class="ap-rationale">${p.rationale || ''}</div>
+        ${payload ? `<div class="ap-payload">${payload}</div>` : ''}
+        <div class="ap-actions">
+          ${approveBtn}
+          <button class="btn btn-sm btn-outline" onclick="perps.rejectProposal('${p.id}')">🚫 Rifiuta</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  /** Approva una strategia suggerita e apre il creatore bot precompilato. */
+  async applyStrategyProposal(id) {
+    const p = this._proposalsById?.[id];
+    try {
+      await this.api(`/api/agents/proposals/${id}/approve`, { method: 'POST' });
+    } catch (e) {
+      this.toast(`Errore: ${e.message}`, 'error');
+      return;
+    }
+    const coin = p?.coin || this.markets[0]?.coin;
+    const cfg = (p?.payload && p.payload.config) ? { ...p.payload.config } : {};
+    if (p?.payload?.interval && !cfg.candleInterval) cfg.candleInterval = p.payload.interval;
+    // Apre il creatore bot precompilato con la strategia suggerita (modalità avanzata)
+    this.openBotModal({ name: `AI ${coin || ''}`.trim(), coin, config: cfg });
+    this._pendingProposalId = id; // verrà collegato al bot al salvataggio
+    this.toast('Strategia approvata: rivedi i parametri e salva il bot', 'info');
+  }
+
+  async approveProposal(id) {
+    try {
+      const r = await this.api(`/api/agents/proposals/${id}/approve`, { method: 'POST' });
+      this.toast(r?.suggestion
+        ? '📝 Suggerimento acquisito — configuralo a mano nel creatore bot'
+        : 'Proposta approvata ed eseguita', 'success');
+    } catch (e) {
+      this.toast(`Non eseguita: ${e.message}`, 'warning');
+    }
+    this.loadAgents();
+  }
+
+  async rejectProposal(id) {
+    try { await this.api(`/api/agents/proposals/${id}/reject`, { method: 'POST' }); this.toast('Proposta rifiutata', 'info'); }
+    catch (e) { this.toast(e.message, 'error'); }
+    this.loadAgents();
+  }
+
+  async runAnalyst() {
+    const st = document.getElementById('agentStatus');
+    if (st) st.textContent = '⏳ analisi in corso…';
+    try {
+      const r = await this.api('/api/agents/analyst/run', { method: 'POST' });
+      this.toast(r?.summary ? `Analyst: ${r.proposals} proposte` : 'Analisi completata', 'success');
+    } catch (e) {
+      this.toast(`Analyst: ${e.message}`, 'warning');
+    }
+    this.loadAgents();
+  }
+
+  async killSwitch() {
+    if (!confirm('Attivare il KILL-SWITCH? Ferma tutti i bot e blocca ogni nuova apertura.')) return;
+    try {
+      await this.api('/api/perps/killswitch', { method: 'POST', body: JSON.stringify({ closePositions: false }) });
+      this.toast('🛑 Kill-switch attivato: bot fermati, aperture bloccate', 'warning');
+    } catch (e) { this.toast(e.message, 'error'); }
+    this.loadAgents();
+    this.loadBots();
+  }
+
   async saveNotifications() {
     try {
       const d = await this.api('/api/perps/notifications', {
@@ -559,6 +752,84 @@ class PerpsApp {
     if (this.chartTimer) { clearInterval(this.chartTimer); this.chartTimer = null; }
     this._destroyChart();
     app.closeModal('chartModal');
+  }
+
+  // ---- Monitor bot (cosa sta facendo, anche da fermo) ----
+  async openBotMonitor(id) {
+    this.monitorBotId = id;
+    document.getElementById('monitorBody').innerHTML = '<div class="backtest-loading"><span class="spinner-sm"></span> Lettura stato del bot…</div>';
+    app.showModal('botMonitorModal');
+    await this._refreshMonitor();
+    if (this.monitorTimer) clearInterval(this.monitorTimer);
+    this.monitorTimer = setInterval(() => this._refreshMonitor(), 5000); // aggiornamento live
+  }
+
+  closeBotMonitor() {
+    if (this.monitorTimer) { clearInterval(this.monitorTimer); this.monitorTimer = null; }
+    this.monitorBotId = null;
+    app.closeModal('botMonitorModal');
+  }
+
+  async _refreshMonitor() {
+    if (!this.monitorBotId) return;
+    try {
+      const m = await this.api(`/api/perps/bots/${this.monitorBotId}/monitor`);
+      document.getElementById('monitorTitle').textContent = `📡 ${m.name} · ${m.coin}`;
+      document.getElementById('monitorBody').innerHTML = this._renderMonitor(m);
+    } catch (e) {
+      document.getElementById('monitorBody').innerHTML = `<div class="backtest-empty">Monitor non disponibile: ${e.message}</div>`;
+    }
+  }
+
+  _renderMonitor(m) {
+    const dirIt = { both: 'Long & Short', long: 'solo Long', short: 'solo Short' }[m.direction] || m.direction;
+    const statusDot = m.status === 'running' ? '🟢 attivo' : '⏸️ fermo';
+    const le = m.lastEval || {};
+    const leTime = le.ts ? new Date(le.ts).toLocaleTimeString('it-IT') : '—';
+
+    const ruleRow = (r) => `
+      <div class="mon-rule ${r.met ? 'met' : ''}">
+        <div class="mon-rule-top">
+          <span class="mon-dot">${r.met ? '🟢' : '⚪'}</span>
+          <span class="mon-rule-label">${r.label}</span>
+          <span class="mon-rule-sig side-badge ${r.signal === 'short' ? 'short' : 'long'}">${(r.signal || '').toUpperCase()}</span>
+          <span class="mon-rule-target">${r.target}</span>
+        </div>
+        <div class="mon-rule-hint">${r.met ? '✅ condizione soddisfatta' : '⏳ ' + (r.hint || '')} <span class="muted">· ora: ${r.current}</span></div>
+      </div>`;
+
+    const logic = m.logic === 'all' ? 'tutte le regole insieme (AND)' : 'una qualsiasi regola (OR)';
+
+    let posBlock;
+    if (m.inPosition && m.position) {
+      const p = m.position;
+      posBlock = `<div class="mon-pos in"><b>${p.side.toUpperCase()} ${this.fmtNum(p.size)} ${m.coin}</b> @ ${this.fmtUsd(p.entryPx)} · TP ${p.tpPx ? this.fmtUsd(p.tpPx) : '—'} · SL ${p.slPx ? this.fmtUsd(p.slPx) : '—'}</div>`;
+    } else {
+      posBlock = `<div class="mon-pos flat">Nessuna posizione aperta — il bot sta cercando un punto d'ingresso.</div>`;
+    }
+
+    const gates = [];
+    if (m.gates.mtf) gates.push(`Conferma multi-timeframe (EMA${m.gates.mtf.period} su ${m.gates.mtf.interval})`);
+    if (m.gates.ml) gates.push(`Filtro ML (prob ≥ ${Math.round(m.gates.ml.minProb * 100)}% su ${m.gates.ml.interval})`);
+    if (m.gates.partialTp) gates.push('Take profit parziale');
+    if (m.gates.dca) gates.push('DCA');
+
+    return `
+      <div class="mon-head">
+        <span>${statusDot}</span>
+        <span class="muted">·</span><span>Prezzo ${this.fmtUsd(m.price)}</span>
+        <span class="muted">·</span><span>${dirIt}</span>
+        <span class="muted">·</span><span>TF ${m.interval}</span>
+      </div>
+      ${posBlock}
+      <div class="mon-section-title">Ultima valutazione <span class="muted">(${leTime})</span></div>
+      <div class="mon-lasteval"><b>${le.action || '—'}</b> — ${le.reason || '—'}</div>
+      <div class="mon-section-title">Condizioni d'ingresso <span class="muted">— serve ${logic}</span></div>
+      <div class="mon-rules">${m.entryRules.length ? m.entryRules.map(ruleRow).join('') : '<div class="muted">Nessuna regola d\'ingresso.</div>'}</div>
+      ${m.inPosition && m.exitRules.length ? `<div class="mon-section-title">Condizioni d'uscita</div><div class="mon-rules">${m.exitRules.map(ruleRow).join('')}</div>` : ''}
+      ${gates.length ? `<div class="mon-section-title">Filtri aggiuntivi</div><div class="mon-gates">${gates.map(g => `<span class="mon-gate">🔒 ${g}</span>`).join('')}</div>` : ''}
+      ${m.lastError ? `<div class="bot-error">⚠️ ${m.lastError}</div>` : ''}
+      <div class="mon-foot muted">Aggiornamento automatico ogni 5s · il bot rivaluta ogni ${Math.round((m.loopIntervalMs || 10000) / 1000)}s</div>`;
   }
 
   _destroyChart() {
@@ -686,8 +957,53 @@ class PerpsApp {
     if (!this.connected) return;
     try {
       const fills = await this.api('/api/perps/fills?address=' + this.address);
-      this._renderFills(fills);
-    } catch (e) { this._renderFills([]); }
+      this._allFills = fills || [];
+      this._populateHistBotFilter();
+      this.applyHistoryFilter();
+    } catch (e) { this._allFills = []; this._renderFills([]); }
+  }
+
+  /** Popola il menu dei bot nel filtro storico (dai nomi presenti nei fill). */
+  _populateHistBotFilter() {
+    const sel = document.getElementById('histBot');
+    if (!sel) return;
+    const names = [...new Set((this._allFills || []).map(f => f.botName).filter(Boolean))].sort();
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">Tutti i bot</option>' +
+      names.map(n => `<option value="${n}">${n}</option>`).join('');
+    if (names.includes(cur)) sel.value = cur;
+  }
+
+  /** Imposta un preset temporale (oggi/settimana/mese/anno/tutto). */
+  setHistoryRange(range) {
+    this._histRange = range;
+    document.querySelectorAll('.hist-preset').forEach(b => b.classList.toggle('active', b.dataset.range === range));
+    // svuota i campi da/a quando si usa un preset
+    const from = document.getElementById('histFrom'); const to = document.getElementById('histTo');
+    if (from) from.value = ''; if (to) to.value = '';
+    this.applyHistoryFilter();
+  }
+
+  /** Applica i filtri (preset o range da/a + bot) e rende lo storico. */
+  applyHistoryFilter(fromRange = false) {
+    if (fromRange) { // l'utente ha scelto una data → disattiva i preset
+      this._histRange = 'custom';
+      document.querySelectorAll('.hist-preset').forEach(b => b.classList.remove('active'));
+    }
+    let fromTs = 0, toTs = Date.now();
+    const fromEl = document.getElementById('histFrom')?.value;
+    const toEl = document.getElementById('histTo')?.value;
+    if (fromEl || toEl) {
+      if (fromEl) fromTs = new Date(fromEl + 'T00:00:00').getTime();
+      if (toEl) toTs = new Date(toEl + 'T23:59:59').getTime();
+    } else {
+      const days = { '1d': 1, '7d': 7, '30d': 30, '365d': 365 }[this._histRange];
+      if (days) fromTs = Date.now() - days * 86400000;
+    }
+    const botFilter = document.getElementById('histBot')?.value || '';
+    const filtered = (this._allFills || []).filter(f =>
+      f.time >= fromTs && f.time <= toTs && (!botFilter || f.botName === botFilter));
+    this._renderFills(filtered);
   }
 
   _explorerTxUrl(hash) {
@@ -713,8 +1029,12 @@ class PerpsApp {
       const pnlCell = pnl ? `<span class="${pnl >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(pnl)}</span>` : '—';
       const txLink = f.hash && f.hash !== '0x0000000000000000000000000000000000000000000000000000000000000000'
         ? `<a href="${this._explorerTxUrl(f.hash)}" target="_blank" rel="noopener">🔗</a>` : '—';
+      const botCell = f.botName
+        ? `<span class="hist-bot">${f.botName === 'Manuale' ? '✋ Manuale' : '🤖 ' + f.botName}</span>`
+        : '<span class="muted">—</span>';
       return `<tr>
         <td>${date}</td>
+        <td>${botCell}</td>
         <td>${f.coin}</td>
         <td><span class="${dirClass}">${f.dir || (f.side === 'buy' ? 'Buy' : 'Sell')}</span></td>
         <td>${this.fmtNum(f.sz)}</td>
@@ -752,6 +1072,12 @@ class PerpsApp {
   async loadBots() {
     try {
       this.bots = await this.api('/api/perps/bots');
+      // Mappa bot -> strategia AI d'origine (per mostrare da quale proposta nasce)
+      try {
+        const hist = await this.api('/api/agents/strategy-history');
+        this._botStrategy = {};
+        for (const h of hist) if (h.linkedBotId) this._botStrategy[h.linkedBotId] = h;
+      } catch { this._botStrategy = this._botStrategy || {}; }
       this._renderBots();
     } catch (e) { /* ignore */ }
   }
@@ -783,6 +1109,10 @@ class PerpsApp {
       statsLine = `<div class="bot-meta"><span class="label">Storico reale</span>
         <span class="bot-stats"><span class="${wrClass}">${(b.stats.winRate * 100).toFixed(0)}% win</span> · ${b.stats.trades} trade · PF ${pf} · <span class="${b.stats.totalPnl >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(b.stats.totalPnl)}</span></span></div>`;
     }
+    const strat = this._botStrategy?.[b.id];
+    const stratBadge = strat
+      ? `<div class="bot-strategy-badge" title="${(strat.rationale || '').replace(/"/g, '&quot;')}">🧠 da strategia AI${strat.decidedAt ? ' · ' + new Date(strat.decidedAt).toLocaleDateString('it-IT') : ''}</div>`
+      : '';
     return `<div class="bot-card ${running ? 'running' : ''}" id="bot-${b.id}">
       <div class="bot-card-head">
         <div>
@@ -792,6 +1122,7 @@ class PerpsApp {
         <span class="bot-pnl ${pnlClass}">${this.fmtUsd(b.dailyPnl || 0)}</span>
       </div>
       <div class="bot-card-body">
+        ${stratBadge}
         <div class="bot-meta"><span class="label">Posizione</span> ${pos}</div>
         <div class="bot-meta"><span class="label">Ultima valutazione</span> <span class="eval">${evalTxt}</span></div>
         ${statsLine}
@@ -801,6 +1132,7 @@ class PerpsApp {
         ${running
           ? `<button class="btn btn-sm btn-secondary" onclick="perps.stopBot('${b.id}')">⏹️ Stop</button>`
           : `<button class="btn btn-sm btn-long" onclick="perps.startBot('${b.id}')">▶️ Avvia</button>`}
+        <button class="btn btn-sm btn-outline" onclick="perps.openBotMonitor('${b.id}')">📡 Monitor</button>
         <button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')">✏️</button>
         <button class="btn btn-sm btn-danger" onclick="perps.deleteBot('${b.id}')">🗑️</button>
       </div>
@@ -845,6 +1177,7 @@ class PerpsApp {
 
   // ---- Bot modal & rule builder ----
   openBotModal(bot = null) {
+    this._pendingProposalId = null; // reset; applyStrategyProposal lo reimposta dopo
     document.getElementById('botModalTitle').textContent = bot ? '✏️ Modifica Bot' : '🤖 Nuovo Bot';
     document.getElementById('botEditId').value = bot?.id || '';
     document.getElementById('botName').value = bot?.name || '';
@@ -1354,14 +1687,25 @@ class PerpsApp {
     if (!config) return;
 
     try {
+      let created = null;
       if (id) {
         await this.api(`/api/perps/bots/${id}`, { method: 'PATCH', body: JSON.stringify({ name, coin, config }) });
       } else {
-        await this.api('/api/perps/bots', { method: 'POST', body: JSON.stringify({ name, coin, masterAddress: this.address, config }) });
+        created = await this.api('/api/perps/bots', { method: 'POST', body: JSON.stringify({ name, coin, masterAddress: this.address, config }) });
       }
-      this.toast('Bot salvato', 'success');
+      // Se il bot nasce da una strategia AI approvata, collegalo per seguirne l'esito
+      if (!id && this._pendingProposalId && created?.id) {
+        try {
+          await this.api(`/api/agents/proposals/${this._pendingProposalId}/link`, { method: 'POST', body: JSON.stringify({ botId: created.id }) });
+          this.toast('Bot collegato alla strategia AI: ne seguirai l\'esito nello storico', 'success');
+        } catch (_) { /* il bot è creato comunque */ }
+        this._pendingProposalId = null;
+      } else {
+        this.toast('Bot salvato', 'success');
+      }
       app.closeModal('botModal');
       await this.loadBots();
+      this.loadStrategyHistory?.();
     } catch (e) { this.toast('Errore salvataggio: ' + e.message, 'error'); }
   }
 }

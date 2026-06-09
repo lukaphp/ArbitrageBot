@@ -324,3 +324,62 @@
 .tg-commands-head { font-weight: 700; margin-bottom: 4px; }
 .tg-cmd-list { margin: 6px 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
 .tg-cmd-list code { background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 4px; }
+
+/* ===== Agente AI ===== */
+.agent-proposals { display: flex; flex-direction: column; gap: 10px; margin: 10px 0; }
+.agent-empty { color: #718096; font-size: 13px; padding: 12px; text-align: center; background: rgba(0,0,0,0.02); border-radius: 8px; }
+.agent-proposal { border: 1px solid var(--border, #e2e8f0); border-left: 3px solid #6366f1; border-radius: 10px; padding: 12px; background: var(--card-bg, #fff); }
+.ap-head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+.ap-type { font-weight: 700; background: rgba(99,102,241,0.12); color: #4f46e5; padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+.ap-coin { font-weight: 600; font-size: 13px; }
+.ap-conf { margin-left: auto; color: #718096; font-size: 12px; }
+.ap-rationale { font-size: 13px; line-height: 1.5; color: #2d3748; }
+.ap-payload { font-size: 12px; color: #718096; margin-top: 4px; font-family: ui-monospace, monospace; }
+.ap-actions { display: flex; gap: 8px; margin-top: 10px; }
+.agent-killswitch { display: flex; gap: 10px; align-items: center; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border, #edf2f7); }
+.btn-danger { background: #e53e3e; color: #fff; border: 0; }
+.btn-danger:hover { background: #c53030; }
+
+/* ===== Storico strategie AI ===== */
+.strategy-history { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.sh-row { border: 1px solid var(--border, #e2e8f0); border-radius: 8px; padding: 9px 11px; font-size: 13px; background: var(--card-bg, #fff); }
+.sh-line1 { display: flex; gap: 8px; align-items: center; }
+.sh-badge { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 5px; }
+.sh-badge.ok { background: rgba(56,161,105,0.15); color: #2f855a; }
+.sh-badge.no { background: rgba(229,62,62,0.12); color: #c53030; }
+.sh-badge.exp { background: rgba(0,0,0,0.06); color: #718096; }
+.sh-rationale { color: #4a5568; margin-top: 4px; font-size: 12px; line-height: 1.4; }
+.sh-outcome { display: inline-block; margin-top: 5px; font-size: 12px; }
+
+/* ===== Bot: badge strategia AI d'origine ===== */
+.bot-strategy-badge { display:inline-block; font-size:11px; font-weight:600; color:#4f46e5;
+  background:rgba(99,102,241,0.10); border-radius:6px; padding:2px 8px; margin-bottom:6px; cursor:help; }
+
+/* ===== Storico operazioni: filtri ===== */
+.hist-filters { display:flex; flex-wrap:wrap; gap:10px 16px; align-items:center; justify-content:space-between; margin-bottom:10px; }
+.hist-presets { display:flex; gap:6px; flex-wrap:wrap; }
+.hist-preset, .pos-preset { font-size:12px; padding:4px 10px; border:1px solid var(--border,#e2e8f0); background:#fff; border-radius:7px; cursor:pointer; color:#4a5568; }
+.hist-preset.active, .pos-preset.active { background:#6366f1; color:#fff; border-color:#6366f1; }
+.hist-range { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.hist-range label { font-size:12px; color:#718096; display:flex; gap:4px; align-items:center; }
+.hist-range input[type=date] { font-size:12px; padding:3px 6px; border:1px solid var(--border,#e2e8f0); border-radius:6px; }
+.hist-bot { font-size:12px; white-space:nowrap; }
+
+/* ===== Monitor bot ===== */
+.mon-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:14px; margin-bottom:10px; }
+.mon-pos { padding:9px 11px; border-radius:8px; font-size:13px; margin-bottom:12px; }
+.mon-pos.in { background:rgba(56,161,105,0.10); }
+.mon-pos.flat { background:rgba(0,0,0,0.03); color:#4a5568; }
+.mon-section-title { font-weight:700; font-size:13px; margin:14px 0 6px; }
+.mon-lasteval { font-size:13px; background:rgba(99,102,241,0.07); border-radius:7px; padding:8px 10px; }
+.mon-rules { display:flex; flex-direction:column; gap:7px; }
+.mon-rule { border:1px solid var(--border,#e2e8f0); border-left:3px solid #cbd5e0; border-radius:8px; padding:8px 10px; }
+.mon-rule.met { border-left-color:#38a169; background:rgba(56,161,105,0.05); }
+.mon-rule-top { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:13px; }
+.mon-rule-label { font-weight:600; }
+.mon-rule-sig { font-size:10px; }
+.mon-rule-target { color:#718096; font-size:12px; }
+.mon-rule-hint { font-size:12px; color:#4a5568; margin-top:4px; }
+.mon-gates { display:flex; flex-wrap:wrap; gap:6px; }
+.mon-gate { font-size:12px; background:rgba(0,0,0,0.05); border-radius:6px; padding:3px 8px; }
+.mon-foot { font-size:11px; margin-top:14px; text-align:center; }

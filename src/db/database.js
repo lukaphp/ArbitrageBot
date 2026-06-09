@@ -105,9 +105,45 @@ class PerpsDatabase {
         value TEXT
       );
 
+      -- Proposte dell'Analyst AI (advisory): mai eseguite senza approvazione.
+      CREATE TABLE IF NOT EXISTS proposals (
+        id            TEXT PRIMARY KEY,
+        type          TEXT NOT NULL,
+        coin          TEXT,
+        payload_json  TEXT NOT NULL,
+        rationale     TEXT,
+        confidence    REAL,
+        backtest_json TEXT,
+        source        TEXT DEFAULT 'analyst',
+        status        TEXT NOT NULL DEFAULT 'pending',
+        created_at    INTEGER NOT NULL,
+        decided_at    INTEGER,
+        expires_at    INTEGER
+      );
+
+      -- Audit trail: ogni proposta/decisione/esecuzione degli agenti.
+      CREATE TABLE IF NOT EXISTS audit (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts          INTEGER NOT NULL,
+        actor       TEXT NOT NULL,
+        action      TEXT NOT NULL,
+        detail_json TEXT
+      );
+
       CREATE INDEX IF NOT EXISTS idx_positions_bot ON positions(bot_id);
       CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id);
+      CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
+      CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
     `);
+    this._migrate();
+  }
+
+  /** Migrazioni leggere per schemi già esistenti (aggiunta colonne). */
+  _migrate() {
+    const cols = this.db.prepare(`PRAGMA table_info(proposals)`).all().map(c => c.name);
+    if (!cols.includes('linked_bot_id')) {
+      this.db.exec(`ALTER TABLE proposals ADD COLUMN linked_bot_id TEXT`);
+    }
   }
 
   /** Garantisce che la connessione sia aperta (auto-init lazy). */
@@ -320,6 +356,86 @@ class PerpsDatabase {
     this.ensure();
     const row = this.db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key);
     return row ? row.value : fallback;
+  }
+
+  // ---- Proposte (Analyst AI) ----
+
+  insertProposal(p) {
+    this.ensure();
+    this.db.prepare(`
+      INSERT INTO proposals (id, type, coin, payload_json, rationale, confidence, backtest_json, source, status, created_at, expires_at)
+      VALUES (@id, @type, @coin, @payloadJson, @rationale, @confidence, @backtestJson, @source, 'pending', @createdAt, @expiresAt)
+    `).run({
+      id: p.id,
+      type: p.type,
+      coin: p.coin || null,
+      payloadJson: JSON.stringify(p.payload || {}),
+      rationale: p.rationale || null,
+      confidence: p.confidence ?? null,
+      backtestJson: p.backtest ? JSON.stringify(p.backtest) : null,
+      source: p.source || 'analyst',
+      createdAt: Date.now(),
+      expiresAt: p.expiresAt || null
+    });
+    return this.getProposal(p.id);
+  }
+
+  getProposal(id) {
+    this.ensure();
+    return this.db.prepare(`SELECT * FROM proposals WHERE id = ?`).get(id);
+  }
+
+  listProposals({ status, limit = 50 } = {}) {
+    this.ensure();
+    if (status) {
+      return this.db.prepare(`SELECT * FROM proposals WHERE status = ? ORDER BY created_at DESC LIMIT ?`).all(status, limit);
+    }
+    return this.db.prepare(`SELECT * FROM proposals ORDER BY created_at DESC LIMIT ?`).all(limit);
+  }
+
+  setProposalStatus(id, status) {
+    this.ensure();
+    this.db.prepare(`UPDATE proposals SET status = ?, decided_at = ? WHERE id = ?`)
+      .run(status, Date.now(), id);
+    return this.getProposal(id);
+  }
+
+  /** Collega un bot creato a una proposta (per seguirne l'esito nel tempo). */
+  linkProposalBot(id, botId) {
+    this.ensure();
+    this.db.prepare(`UPDATE proposals SET linked_bot_id = ? WHERE id = ?`).run(botId, id);
+    return this.getProposal(id);
+  }
+
+  /** Storico delle strategie decise (approvate/rifiutate/scadute), più recenti prima. */
+  getStrategyHistory(limit = 50) {
+    this.ensure();
+    return this.db.prepare(
+      `SELECT * FROM proposals WHERE type = 'new_strategy_candidate' AND status != 'pending'
+       ORDER BY COALESCE(decided_at, created_at) DESC LIMIT ?`
+    ).all(limit);
+  }
+
+  /** Marca come 'expired' le proposte pendenti scadute. Ritorna il numero aggiornato. */
+  expireStaleProposals(now = Date.now()) {
+    this.ensure();
+    const info = this.db.prepare(
+      `UPDATE proposals SET status = 'expired', decided_at = ? WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?`
+    ).run(now, now);
+    return info.changes;
+  }
+
+  // ---- Audit ----
+
+  insertAudit(actor, action, detail) {
+    this.ensure();
+    this.db.prepare(`INSERT INTO audit (ts, actor, action, detail_json) VALUES (?, ?, ?, ?)`)
+      .run(Date.now(), actor, action, detail ? JSON.stringify(detail) : null);
+  }
+
+  listAudit(limit = 100) {
+    this.ensure();
+    return this.db.prepare(`SELECT * FROM audit ORDER BY ts DESC LIMIT ?`).all(limit);
   }
 }
 

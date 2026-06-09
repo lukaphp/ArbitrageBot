@@ -18,6 +18,7 @@ import axios from 'axios';
 import botManager from './botManager.js';
 import client from './hyperliquidClient.js';
 import notifier from './notifier.js';
+import proposals from '../agents/proposals.js';
 import logger from '../utils/logger.js';
 
 const HELP = [
@@ -29,6 +30,9 @@ const HELP = [
   '/avvia &lt;id|nome&gt; — avvia un bot',
   '/ferma &lt;id|nome&gt; — ferma un bot',
   '/chiuditutto — chiude tutte le posizioni aperte',
+  '/proposte — proposte AI in attesa',
+  '/approva &lt;id&gt; — approva una proposta AI',
+  '/rifiuta &lt;id&gt; — rifiuta una proposta AI',
   '/help — questo messaggio'
 ].join('\n');
 
@@ -143,6 +147,12 @@ class TelegramControl {
           return this._cmdToggleBot(arg, false);
         case '/chiuditutto':
           return this._cmdCloseAll();
+        case '/proposte':
+          return this._cmdProposals();
+        case '/approva':
+          return this._cmdDecide(arg, true);
+        case '/rifiuta':
+          return this._cmdDecide(arg, false);
         default:
           return this._send('Comando non riconosciuto. Usa /help.');
       }
@@ -202,6 +212,26 @@ class TelegramControl {
     if (!bot) return this._send(`Bot "${arg}" non trovato. Usa /bot per l'elenco.`);
     if (start) botManager.startBot(bot.id); else botManager.stopBot(bot.id);
     return this._send(`${start ? '▶️ Avviato' : '⏸️ Fermato'}: <b>${bot.name}</b>`);
+  }
+
+  async _cmdProposals() {
+    const pending = proposals.list({ status: 'pending' });
+    if (!pending.length) return this._send('Nessuna proposta AI in attesa.');
+    const lines = pending.map(p =>
+      `🧠 <code>${p.id.slice(0, 8)}</code> [${p.type}] ${p.coin || ''} · conf ${p.confidence != null ? Math.round(p.confidence * 100) + '%' : '—'}\n   ${p.rationale || ''}`);
+    return this._send(`<b>Proposte AI in attesa</b>\n${lines.join('\n')}\n\n/approva &lt;id&gt; · /rifiuta &lt;id&gt;`);
+  }
+
+  async _cmdDecide(arg, approve) {
+    if (!arg) return this._send(`Specifica l'id: /${approve ? 'approva' : 'rifiuta'} &lt;id&gt;`);
+    const p = proposals.findByPrefix(arg);
+    if (!p) return this._send(`Proposta "${arg}" non trovata. Usa /proposte.`);
+    if (approve) {
+      const r = await proposals.approve(p.id);
+      return this._send(r.ok ? `✅ Approvata ed eseguita [${p.type}] ${p.coin || ''}` : `⚠️ Non eseguita: ${r.reason}`);
+    }
+    const r = proposals.reject(p.id);
+    return this._send(r.ok ? `🚫 Proposta rifiutata` : `⚠️ ${r.reason}`);
   }
 
   async _cmdCloseAll() {

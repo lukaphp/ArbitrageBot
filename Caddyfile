@@ -1,0 +1,26 @@
+# Reverse proxy con HTTPS automatico (Let's Encrypt).
+# Sostituisci il dominio con il tuo. Caddy ottiene e rinnova il certificato da solo.
+#
+# Socket.IO: il reverse_proxy di Caddy gestisce gli upgrade WebSocket in automatico,
+# quindi non serve configurazione extra.
+
+trading.tuodominio.it {
+    encode gzip
+    reverse_proxy app:3000
+
+    # Header di sicurezza aggiuntivi a livello proxy
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+}
+
+# --- Alternativa: accesso SOLO via rete privata (Tailscale) senza dominio pubblico ---
+# Commenta il blocco sopra e usa questo per ascoltare in HTTP sulla rete interna,
+# esponendo la porta solo all'IP Tailscale dell'host (vedi docs/DEPLOY.md).
+#
+# :8080 {
+#     reverse_proxy app:3000
+# }

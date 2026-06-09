@@ -19,6 +19,16 @@ import logger from '../utils/logger.js';
 
 const PRICE_POLL_MS = 4000;
 const CANDLE_TTL_MS = 20000;
+// Candele da richiedere di default: abbastanza per scaldare gli indicatori
+// (RSI/EMA/MACD…) su QUALSIASI timeframe. Senza questo, su 1h/4h/1d si
+// otterrebbero pochissime candele e gli indicatori resterebbero null (il bot
+// non aprirebbe mai).
+const DEFAULT_TARGET_CANDLES = 300;
+const INTERVAL_MS = {
+  '1m': 60e3, '3m': 180e3, '5m': 300e3, '15m': 900e3, '30m': 1800e3,
+  '1h': 3600e3, '2h': 7200e3, '4h': 14400e3, '8h': 28800e3, '12h': 43200e3,
+  '1d': 86400e3, '3d': 259200e3, '1w': 604800e3, '1M': 2592000e3
+};
 
 class MarketData {
   constructor() {
@@ -69,8 +79,11 @@ class MarketData {
     return px ? parseFloat(px) : null;
   }
 
-  /** Candele cache-ate con TTL. */
+  /** Candele cache-ate con TTL. Il lookback di default scala con l'intervallo. */
   async getCandles(coin, interval = '15m', lookbackMs) {
+    if (lookbackMs == null) {
+      lookbackMs = (INTERVAL_MS[interval] || INTERVAL_MS['15m']) * DEFAULT_TARGET_CANDLES;
+    }
     const key = `${coin}:${interval}`;
     const cached = this.candleCache.get(key);
     if (cached && Date.now() - cached.ts < CANDLE_TTL_MS) {

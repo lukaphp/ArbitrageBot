@@ -17,6 +17,10 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
+import rateLimit from 'express-rate-limit';
+import auth from './middleware/auth.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -45,6 +49,12 @@ import predictor from './perps/predictor.js';
 import telegramControl from './perps/telegramControl.js';
 import { runBacktest } from './perps/backtester.js';
 
+// Sistema agentico (backbone + Analyst AI)
+import agentRuntime from './agents/runtime.js';
+import analyst from './agents/analyst/analyst.js';
+import proposals from './agents/proposals.js';
+import riskAgent from './agents/riskAgent.js';
+
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -55,15 +65,20 @@ dotenv.config();
 class ArbitrageBotServer {
   constructor() {
     this.app = express();
+    // Dietro reverse proxy (Caddy): IP/protocollo corretti per cookie Secure e rate-limit
+    this.app.set('trust proxy', 1);
     this.server = createServer(this.app);
+    // CORS Socket.IO ristretto all'origine nota (default: stesso host)
+    const appOrigin = process.env.APP_ORIGIN || true;
     this.io = new Server(this.server, {
-      cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-      }
+      cors: { origin: appOrigin, methods: ["GET", "POST"], credentials: true }
     });
-    
+    // Autenticazione delle connessioni WebSocket
+    this.io.use(auth.socketAuth);
+
     this.port = process.env.PORT || 3000;
+    // In produzione si lega a localhost: l'esterno passa solo dal reverse proxy (Caddy).
+    this.bindHost = process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '127.0.0.1' : '0.0.0.0');
     this.isRunning = false;
     this.connectedClients = new Set();
     
@@ -77,24 +92,47 @@ class ArbitrageBotServer {
    * Configura middleware Express
    */
   setupMiddleware() {
-    // CORS
-    this.app.use(cors());
-    
-    // JSON parsing
+    // Header di sicurezza (CSP permissiva per la UI inline esistente + CDN charts)
+    this.app.use(helmet({
+      contentSecurityPolicy: false,        // la UI usa script inline + CDN; CSP gestita a parte se necessario
+      crossOriginEmbedderPolicy: false
+    }));
+
+    // CORS ristretto all'origine dell'app (default: stesso host)
+    const appOrigin = process.env.APP_ORIGIN;
+    this.app.use(cors(appOrigin ? { origin: appOrigin, credentials: true } : { credentials: true }));
+
+    // JSON parsing + cookie per la sessione
     this.app.use(express.json());
     this.app.use(express.urlencoded({ extended: true }));
-    
-    // Serve file statici
+    this.app.use(cookieParser());
+
+    // Rate-limit globale sulle API
+    this.app.use('/api', rateLimit({
+      windowMs: 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false
+    }));
+
+    // Serve file statici (UI pubblica: necessaria per mostrare il login)
     this.app.use(express.static(path.join(__dirname, '../public')));
-    
-    // Logging middleware
+
+    // Logging middleware (non logga i body, che possono contenere segreti)
     this.app.use((req, res, next) => {
-      logger.info(`${req.method} ${req.path}`, {
-        ip: req.ip,
-        userAgent: req.get('User-Agent')
-      });
+      logger.info(`${req.method} ${req.path}`, { ip: req.ip });
       next();
     });
+
+    // --- Gate di autenticazione: protegge tutte le /api/* tranne login/logout/status ---
+    const publicApi = new Set(['/api/login', '/api/logout', '/api/auth/status']);
+    this.app.use((req, res, next) => {
+      if (!req.path.startsWith('/api/')) return next();  // statici, /, /health → pubblici
+      if (publicApi.has(req.path)) return next();
+      return auth.requireAuth(req, res, next);
+    });
+  }
+
+  /** Rate-limiter stretto per il login (anti brute-force). */
+  loginLimiter() {
+    return rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
   }
   
   /**
@@ -105,7 +143,27 @@ class ArbitrageBotServer {
     this.app.get('/', (req, res) => {
       res.sendFile(path.join(__dirname, '../public/index.html'));
     });
-    
+
+    // --- Autenticazione (single-user) ---
+    this.app.get('/api/auth/status', (req, res) => {
+      const enabled = auth.isAuthEnabled();
+      const authenticated = !enabled || auth.verifyToken(req.cookies?.[auth.COOKIE]);
+      res.json({ success: true, data: { enabled, authenticated } });
+    });
+    this.app.post('/api/login', this.loginLimiter(), (req, res) => {
+      if (!auth.isAuthEnabled()) return res.json({ success: true, data: { authDisabled: true } });
+      const { password } = req.body || {};
+      if (!password || !auth.verifyPassword(password, process.env.APP_PASSWORD_HASH)) {
+        return res.status(401).json({ success: false, error: 'Password errata' });
+      }
+      res.cookie(auth.COOKIE, auth.issueToken(), auth.cookieOptions());
+      res.json({ success: true });
+    });
+    this.app.post('/api/logout', (req, res) => {
+      res.clearCookie(auth.COOKIE, auth.cookieOptions());
+      res.json({ success: true });
+    });
+
     // API Status
     this.app.get('/api/status', async (req, res) => {
       try {
@@ -471,7 +529,27 @@ class ArbitrageBotServer {
         const { address } = req.query;
         if (!address) return res.status(400).json({ success: false, error: 'address richiesto' });
         const fills = await hyperliquid.getUserFills(address);
-        res.json({ success: true, data: fills });
+
+        // Attribuzione al bot d'origine: mappa oid->bot dai trade registrati,
+        // più fallback per coin con un solo bot.
+        const bots = db.listBots();
+        const botById = new Map(bots.map(b => [b.id, b.name]));
+        const oidToBot = new Map();
+        for (const t of db.listTrades(500)) {
+          if (t.hl_oid != null) oidToBot.set(String(t.hl_oid), t.bot_id ? (botById.get(t.bot_id) || 'Bot') : 'Manuale');
+        }
+        const coinBots = {};
+        for (const b of bots) (coinBots[b.coin] ||= new Set()).add(b.name);
+
+        const enriched = fills.map(f => {
+          let botName = oidToBot.get(String(f.oid));
+          if (!botName) {
+            const s = coinBots[f.coin];
+            botName = (s && s.size === 1) ? [...s][0] : null;
+          }
+          return { ...f, botName };
+        });
+        res.json({ success: true, data: enriched });
       } catch (error) {
         res.status(500).json({ success: false, error: error.message });
       }
@@ -483,6 +561,24 @@ class ArbitrageBotServer {
         const { address } = req.query;
         if (!address) return res.status(400).json({ success: false, error: 'address richiesto' });
         const account = await hyperliquid.getAccount(address);
+
+        // Arricchisce le posizioni aperte con bot d'origine + data di apertura
+        // incrociando le posizioni 'open' tracciate nel nostro DB (per coin+lato).
+        const bots = db.listBots();
+        const botById = new Map(bots.map(b => [b.id, b.name]));
+        const coinBots = {};
+        for (const b of bots) (coinBots[b.coin] ||= new Set()).add(b.name);
+        const dbOpen = db.listPositions(200).filter(p => p.status === 'open');
+        const key = (coin, side) => `${coin}|${side}`;
+        const dbMap = new Map();
+        for (const p of dbOpen) dbMap.set(key(p.coin, p.side), p);
+
+        account.positions = account.positions.map(p => {
+          const match = dbMap.get(key(p.coin, p.side)) || dbMap.get(key(p.coin + '-PERP', p.side));
+          let botName = match ? (match.bot_id ? (botById.get(match.bot_id) || 'Bot') : 'Manuale') : null;
+          if (!botName) { const s = coinBots[p.coin]; botName = (s && s.size === 1) ? [...s][0] : null; }
+          return { ...p, botName, openedAt: match?.opened_at || null };
+        });
         res.json({ success: true, data: account });
       } catch (error) {
         res.status(500).json({ success: false, error: error.message });
@@ -613,6 +709,39 @@ class ArbitrageBotServer {
       res.json({ success: true, data: telegramControl.status() });
     });
 
+    // 🛑 Kill-switch: ferma tutti i bot e (opzionale) chiude tutte le posizioni
+    app.post('/api/perps/killswitch', async (req, res) => {
+      try {
+        const closePositions = req.body?.closePositions === true;
+        // Attiva il flag persistente: il RiskAgent bloccherà ogni nuova apertura
+        riskAgent.setKillSwitch(true);
+        const states = botManager.listStates();
+        for (const s of states) {
+          if (s.status === 'running') { try { botManager.stopBot(s.id); } catch { /* noop */ } }
+        }
+        let closed = [];
+        if (closePositions) {
+          const master = req.body?.masterAddress
+            || [...botManager.bots.values()][0]?.masterAddress
+            || process.env.WALLET_ADDRESS;
+          const network = [...botManager.bots.values()][0]?.network || hyperliquid.network;
+          if (master) {
+            const acc = await hyperliquid.getAccount(master, network);
+            for (const p of acc.positions) {
+              try { const r = await hyperliquid.closePosition({ masterAddress: master, coin: p.coin }, network); closed.push({ coin: p.coin, ok: !r.error }); }
+              catch (e) { closed.push({ coin: p.coin, ok: false, error: e.message }); }
+            }
+          }
+        }
+        notifier.notify(`🛑 <b>KILL-SWITCH</b> attivato: ${states.filter(s => s.status === 'running').length} bot fermati${closePositions ? `, posizioni chiuse: ${closed.length}` : ''}`);
+        logger.warn('🛑 Kill-switch attivato', { closePositions, closed: closed.length });
+        res.json({ success: true, data: { stopped: states.length, closed } });
+      } catch (error) {
+        logger.error('Errore kill-switch:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // Candele storiche (per grafici e backtest UI)
     app.get('/api/perps/candles', async (req, res) => {
       try {
@@ -629,6 +758,15 @@ class ArbitrageBotServer {
     // --- Bot ---
     app.get('/api/perps/bots', (req, res) => {
       res.json({ success: true, data: botManager.listStates() });
+    });
+
+    // Monitor live: cosa sta valutando il bot (indicatori vs soglie, distanza al segnale)
+    app.get('/api/perps/bots/:id/monitor', async (req, res) => {
+      try {
+        res.json({ success: true, data: await botManager.getMonitor(req.params.id) });
+      } catch (error) {
+        res.status(404).json({ success: false, error: error.message });
+      }
     });
 
     // Statistiche reali di un bot (trade chiusi)
@@ -807,8 +945,74 @@ class ArbitrageBotServer {
         res.status(400).json({ success: false, error: error.message });
       }
     });
+
+    // ===== Sistema agentico + Analyst AI =====
+    app.get('/api/agents/status', (req, res) => {
+      res.json({ success: true, data: {
+        runtime: agentRuntime.status(),
+        analyst: analyst.status(),
+        killSwitch: riskAgent.isKillSwitchOn()
+      }});
+    });
+
+    app.get('/api/agents/proposals', (req, res) => {
+      const status = req.query.status || undefined;
+      res.json({ success: true, data: proposals.list({ status, limit: 50 }) });
+    });
+
+    app.post('/api/agents/proposals/:id/approve', async (req, res) => {
+      try {
+        const r = await proposals.approve(req.params.id);
+        res.json({ success: r.ok, data: r, error: r.ok ? undefined : r.reason });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    app.post('/api/agents/proposals/:id/reject', (req, res) => {
+      const r = proposals.reject(req.params.id);
+      res.json({ success: r.ok, data: r, error: r.ok ? undefined : r.reason });
+    });
+
+    // Collega un bot creato a una proposta approvata (per seguirne l'esito)
+    app.post('/api/agents/proposals/:id/link', (req, res) => {
+      try {
+        const { botId } = req.body || {};
+        if (!botId) return res.status(400).json({ success: false, error: 'botId richiesto' });
+        res.json({ success: true, data: proposals.linkBot(req.params.id, botId) });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Storico strategie (approvate/rifiutate) con esito live di quelle avviate
+    app.get('/api/agents/strategy-history', (req, res) => {
+      res.json({ success: true, data: proposals.history() });
+    });
+
+    // Esegue subito un ciclo dell'Analyst (on-demand)
+    app.post('/api/agents/analyst/run', async (req, res) => {
+      try {
+        const r = await analyst.run();
+        res.json({ success: !r?.error, data: r, error: r?.error });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Audit trail
+    app.get('/api/agents/audit', (req, res) => {
+      res.json({ success: true, data: db.listAudit(parseInt(req.query.limit) || 100) });
+    });
+
+    // Kill-switch on/off esplicito (lo stato persiste e blocca le aperture)
+    app.post('/api/agents/killswitch', (req, res) => {
+      const on = req.body?.on !== false;
+      riskAgent.setKillSwitch(on);
+      res.json({ success: true, data: { killSwitch: on } });
+    });
   }
-  
+
   /**
    * Configura WebSocket per aggiornamenti real-time
    */
@@ -915,7 +1119,11 @@ class ArbitrageBotServer {
         botManager.loadFromDb();
         // Avvia il controllo comandi Telegram se configurato
         telegramControl.refresh();
-        logger.info('🤖 Sottosistema Perps pronto');
+        // Avvia il runtime degli agenti (Analyst AI + janitor proposte)
+        agentRuntime.register(analyst);
+        agentRuntime.register(proposals.janitorAgent());
+        await agentRuntime.startAll();
+        logger.info('🤖 Sottosistema Perps + agenti pronto');
       } catch (perpsError) {
         logger.error('⚠️ Errore inizializzazione Perps (arbitraggio resta attivo):', perpsError.message);
       }
@@ -924,10 +1132,10 @@ class ArbitrageBotServer {
       this.setupBotEvents();
       
       // Avvia server HTTP
-      this.server.listen(this.port, () => {
+      this.server.listen(this.port, this.bindHost, () => {
         this.isRunning = true;
-        logger.info(`🌐 Server avviato su http://localhost:${this.port}`);
-        logger.info('⚠️  MODALITÀ TESTNET ATTIVA - Nessuna transazione mainnet');
+        logger.info(`🌐 Server avviato su http://${this.bindHost}:${this.port}`);
+        logger.info(`🔐 Auth: ${auth.isAuthEnabled() ? 'ATTIVA' : 'DISATTIVA (solo sviluppo)'} · HL network: ${config.HYPERLIQUID_CONFIG.defaultNetwork}`);
         
         console.log(`
 🤖 ARBITRAGE BOT WEB - TESTNET ONLY`);
@@ -945,9 +1153,9 @@ class ArbitrageBotServer {
         
         // Avvia comunque il server web anche se alcuni moduli falliscono
         try {
-          this.server.listen(this.port, () => {
+          this.server.listen(this.port, this.bindHost, () => {
             this.isRunning = true;
-            logger.info(`🌐 Server web attivo su http://localhost:${this.port}`);
+            logger.info(`🌐 Server web attivo su http://${this.bindHost}:${this.port}`);
             logger.info('⚠️ Modalità limitata - Alcune funzionalità potrebbero non essere disponibili');
           });
         } catch (serverError) {

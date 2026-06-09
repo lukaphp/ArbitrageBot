@@ -34,9 +34,17 @@ const SIGN_CHAINS = {
 class AgentWallet {
   constructor() {
     const secret = process.env.AGENT_ENCRYPTION_KEY;
-    if (!secret) {
-      logger.warn('⚠️  AGENT_ENCRYPTION_KEY non impostata: uso una chiave di sviluppo. ' +
-        'Imposta AGENT_ENCRYPTION_KEY in .env per la persistenza sicura delle chiavi agent.');
+    const isProd = process.env.NODE_ENV === 'production';
+    if (!secret || secret.length < 32) {
+      if (isProd) {
+        // In produzione la chiave agent firma ordini reali: niente fallback insicuro.
+        throw new Error(
+          'AGENT_ENCRYPTION_KEY mancante o troppo corta (≥32 caratteri). ' +
+          'Obbligatoria in produzione per cifrare le chiavi agent. Avvio interrotto.'
+        );
+      }
+      logger.warn('⚠️  AGENT_ENCRYPTION_KEY non impostata/corta: uso una chiave di SVILUPPO (NON sicura). ' +
+        'Imposta AGENT_ENCRYPTION_KEY (≥32 caratteri) in .env per la persistenza sicura delle chiavi agent.');
     }
     // Deriva una chiave a 32 byte stabile dal segreto.
     this.encKey = crypto.createHash('sha256')

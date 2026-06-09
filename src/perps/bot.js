@@ -400,6 +400,116 @@ export class PerpsBot {
     };
   }
 
+  /**
+   * Diagnostica live: cosa sta "guardando" il bot in questo momento e quanto
+   * manca a far scattare un ingresso. Serve per capire perché è fermo.
+   */
+  async getMonitor() {
+    const interval = this.config.candleInterval || '15m';
+    const needFunding = [...(this.config.entryRules || []), ...(this.config.exitRules || [])].some(r => r.type === 'funding');
+    let snapshot;
+    try {
+      snapshot = await marketData.getSnapshot(this.coin, { interval, withFunding: needFunding });
+    } catch {
+      snapshot = { price: marketData.getMid(this.coin), candles: [], funding: null };
+    }
+    const ctx = { price: snapshot.price, candles: snapshot.candles || [], funding: snapshot.funding };
+
+    return {
+      id: this.id, name: this.name, coin: this.coin, interval,
+      status: this.status, direction: this.config.direction || 'both',
+      logic: this.config.logic || 'any',
+      price: snapshot.price, funding: snapshot.funding,
+      candles: ctx.candles.length,
+      inPosition: !!this.position,
+      position: this.position ? {
+        side: this.position.side, size: this.position.size, entryPx: this.position.entryPx,
+        tpPx: this.position.tpPx, slPx: this.position.slPx
+      } : null,
+      dailyPnl: this.dailyPnl,
+      lastEval: this.lastEval,
+      lastError: this.lastError,
+      entryRules: (this.config.entryRules || []).map(r => this._diagRule(r, ctx)),
+      exitRules: (this.config.exitRules || []).map(r => this._diagRule(r, ctx)),
+      gates: {
+        mtf: this.config.mtfConfirm?.interval ? { interval: this.config.mtfConfirm.interval, period: this.config.mtfConfirm.period || 50 } : null,
+        ml: this.config.mlGate?.enabled ? { interval: this.config.mlGate.interval || interval, minProb: this.config.mlGate.minProb ?? 0.55 } : null,
+        partialTp: !!(this.config.partialTp && this.config.partialTp.length),
+        dca: !!this.config.dca
+      },
+      loopIntervalMs: HYPERLIQUID_CONFIG.botLoopInterval,
+      ts: Date.now()
+    };
+  }
+
+  /** Diagnostica di una singola regola: valore corrente, condizione, distanza. */
+  _diagRule(rule, ctx) {
+    const { price, candles, funding } = ctx;
+    const num = n => (n == null || isNaN(n)) ? null : n;
+    const fmt = n => n == null ? '—' : (Math.abs(n) >= 1000 ? n.toFixed(0) : n.toFixed(2));
+    const cmp = (a, op, b) => {
+      if (a == null || isNaN(a)) return null;
+      return op === '<' ? a < b : op === '>' ? a > b : op === '<=' ? a <= b : op === '>=' ? a >= b : op === '==' ? a === b : null;
+    };
+    const gapHint = (cur, op, target, unit = '') => {
+      if (cur == null) return 'dato non ancora disponibile';
+      if (cmp(cur, op, target)) return '✅ condizione soddisfatta';
+      const verso = (op === '<' || op === '<=') ? 'scendere' : 'salire';
+      return `deve ${verso} di ${fmt(Math.abs(cur - target))}${unit} (ora ${fmt(cur)}${unit}, soglia ${fmt(target)}${unit})`;
+    };
+
+    const base = { type: rule.type, signal: rule.signal };
+
+    if (rule.type === 'price') {
+      const met = cmp(price, rule.op, rule.value);
+      return { ...base, label: 'Prezzo', current: fmt(price), target: `${rule.op} ${fmt(rule.value)}`, met: !!met, hint: gapHint(price, rule.op, rule.value, '$') };
+    }
+    if (rule.type === 'funding') {
+      const met = cmp(funding, rule.op, rule.value);
+      return { ...base, label: 'Funding', current: funding == null ? '—' : (funding * 100).toFixed(4) + '%', target: `${rule.op} ${rule.value}`, met: !!met, hint: gapHint(funding, rule.op, rule.value) };
+    }
+    if (rule.type === 'external') {
+      return { ...base, label: 'Segnale esterno', current: '—', target: `webhook '${rule.signal}'`, met: false, hint: 'in attesa di un segnale webhook' };
+    }
+    if (rule.type === 'indicator') {
+      const p = rule.period;
+      switch (rule.indicator) {
+        case 'rsi': {
+          const v = num(ind.rsi(candles, p || 14));
+          const met = cmp(v, rule.op, rule.value);
+          return { ...base, label: `RSI(${p || 14})`, current: fmt(v), target: `${rule.op} ${rule.value}`, met: !!met, hint: gapHint(v, rule.op, rule.value, ' pt') };
+        }
+        case 'ema':
+        case 'sma': {
+          const fn = rule.indicator === 'ema' ? ind.ema : ind.sma;
+          const v = num(fn(candles, p || 20));
+          if (rule.compareToPrice) {
+            const met = cmp(price, rule.op, v);
+            return { ...base, label: `Prezzo vs ${rule.indicator.toUpperCase()}(${p || 20})`, current: `${fmt(price)} vs ${fmt(v)}`, target: `prezzo ${rule.op} media`, met: !!met, hint: v == null ? 'dato non disponibile' : (met ? '✅ condizione soddisfatta' : `il prezzo deve ${rule.op === '>' ? 'superare' : 'scendere sotto'} ${fmt(v)} (ora ${fmt(price)})`) };
+          }
+          const met = cmp(v, rule.op, rule.value);
+          return { ...base, label: `${rule.indicator.toUpperCase()}(${p || 20})`, current: fmt(v), target: `${rule.op} ${fmt(rule.value)}`, met: !!met, hint: gapHint(v, rule.op, rule.value) };
+        }
+        case 'macd': {
+          const m = ind.macd(candles, rule.params);
+          const hist = m ? num(m.histogram) : null;
+          const met = rule.cond === 'bearish' ? (hist != null && hist < 0) : (hist != null && hist > 0);
+          return { ...base, label: 'MACD', current: hist == null ? '—' : `hist ${fmt(hist)}`, target: rule.cond === 'bearish' ? 'istogramma < 0' : 'istogramma > 0', met, hint: hist == null ? 'dato non disponibile' : (met ? '✅ condizione soddisfatta' : `istogramma ${fmt(hist)} deve diventare ${rule.cond === 'bearish' ? 'negativo' : 'positivo'}`) };
+        }
+        case 'bollinger': {
+          const bb = ind.bollinger(candles, rule.params);
+          if (!bb) return { ...base, label: 'Bollinger', current: '—', target: rule.cond, met: false, hint: 'dato non disponibile' };
+          const met = rule.cond === 'above_upper' ? price > bb.upper : price < bb.lower;
+          const band = rule.cond === 'above_upper' ? bb.upper : bb.lower;
+          return { ...base, label: 'Bollinger', current: `prezzo ${fmt(price)}`, target: rule.cond === 'above_upper' ? `> banda sup ${fmt(bb.upper)}` : `< banda inf ${fmt(bb.lower)}`, met, hint: met ? '✅ condizione soddisfatta' : `il prezzo deve ${rule.cond === 'above_upper' ? 'superare' : 'scendere sotto'} ${fmt(band)} (ora ${fmt(price)})` };
+        }
+        default:
+          return { ...base, label: rule.indicator || 'indicatore', current: '—', target: '—', met: false, hint: 'tipo non riconosciuto' };
+      }
+    }
+    return { ...base, label: rule.type, current: '—', target: '—', met: false, hint: '' };
+  }
+
   _emit() {
     try { this.onUpdate(this.getState()); } catch { /* noop */ }
   }

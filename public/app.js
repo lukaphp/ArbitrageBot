@@ -16,7 +16,10 @@ class ArbitrageBotApp {
 
     async init() {
         console.log('🤖 Inizializzazione Arbitrage Bot Web App...');
-        
+
+        // Gate di autenticazione (single-user): se attivo e non loggato, mostra il login
+        if (!(await this._ensureAuth())) return;
+
         // Detect Vercel environment
         this.isVercel = window.location.hostname.includes('vercel.app');
 
@@ -38,6 +41,63 @@ class ArbitrageBotApp {
         await this.loadInitialData();
         
         console.log('✅ App inizializzata con successo');
+    }
+
+    /** Verifica lo stato di autenticazione; mostra il login se necessario. */
+    async _ensureAuth() {
+        try {
+            const res = await fetch('/api/auth/status');
+            const { data } = await res.json();
+            if (!data?.enabled || data?.authenticated) return true;
+        } catch (e) {
+            console.warn('auth status non raggiungibile', e);
+            return true; // non bloccare se l'endpoint non risponde (es. modalità limitata)
+        }
+        this._showLogin();
+        return false;
+    }
+
+    /** Overlay di login (single-user), iniettato via JS. */
+    _showLogin() {
+        if (document.getElementById('loginOverlay')) return;
+        const ov = document.createElement('div');
+        ov.id = 'loginOverlay';
+        ov.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,0.92);backdrop-filter:blur(4px)';
+        ov.innerHTML = `
+          <form id="loginForm" style="background:#fff;padding:28px 26px;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,0.4);width:320px;max-width:90vw;font-family:inherit">
+            <div style="font-size:30px;text-align:center;margin-bottom:6px">🔒</div>
+            <h2 style="margin:0 0 4px;text-align:center;font-size:19px;color:#1a202c">Accesso richiesto</h2>
+            <p style="margin:0 0 16px;text-align:center;color:#718096;font-size:13px">Inserisci la password per accedere al pannello di trading.</p>
+            <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Password"
+              style="width:100%;padding:11px 12px;border:1px solid #cbd5e0;border-radius:8px;font-size:14px;box-sizing:border-box">
+            <div id="loginError" style="color:#e53e3e;font-size:12px;min-height:16px;margin:6px 2px"></div>
+            <button type="submit" style="width:100%;padding:11px;border:0;border-radius:8px;background:#6366f1;color:#fff;font-size:14px;font-weight:600;cursor:pointer">Accedi</button>
+          </form>`;
+        document.body.appendChild(ov);
+        const form = ov.querySelector('#loginForm');
+        const err = ov.querySelector('#loginError');
+        ov.querySelector('#loginPassword').focus();
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            err.textContent = '';
+            const password = ov.querySelector('#loginPassword').value;
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password })
+                });
+                if (res.ok) { location.reload(); return; }
+                if (res.status === 429) { err.textContent = 'Troppi tentativi, riprova tra qualche minuto.'; return; }
+                err.textContent = 'Password errata.';
+            } catch (_) {
+                err.textContent = 'Errore di connessione.';
+            }
+        });
+    }
+
+    async logout() {
+        try { await fetch('/api/logout', { method: 'POST' }); } catch (_) { /* noop */ }
+        location.reload();
     }
 
     initSocket() {

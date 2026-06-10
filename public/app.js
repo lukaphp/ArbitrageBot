@@ -292,7 +292,7 @@ class ArbitrageBotApp {
         
         if (typeof window.ethereum !== 'undefined') {
             console.log('🦊 MetaMask rilevato');
-            this.provider = new ethers.providers.Web3Provider(window.ethereum);
+            this.provider = new ethers.BrowserProvider(window.ethereum);
             document.getElementById('connectWallet').disabled = false;
             
             // Tenta riconnessione automatica se già autorizzato
@@ -318,7 +318,7 @@ class ArbitrageBotApp {
         console.log('🔍 Debug - connectWallet called');
         
         if (!this.provider && typeof window.ethereum !== 'undefined') {
-            this.provider = new ethers.providers.Web3Provider(window.ethereum);
+            this.provider = new ethers.BrowserProvider(window.ethereum);
         }
         
         if (!this.provider) {
@@ -333,7 +333,7 @@ class ArbitrageBotApp {
             // Richiedi accesso agli account
             const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
             
-            this.signer = this.provider.getSigner();
+            this.signer = await this.provider.getSigner();
             this.walletAddress = await this.signer.getAddress();
             
             // Verifica la rete
@@ -349,8 +349,8 @@ class ArbitrageBotApp {
             }
             
             // Ottieni il saldo
-            const balance = await this.signer.getBalance();
-            const balanceEth = ethers.utils.formatEther(balance);
+            const balance = await this.provider.getBalance(this.walletAddress);
+            const balanceEth = ethers.formatEther(balance);
             
             // Aggiorna UI
             this.isConnected = true;
@@ -484,9 +484,10 @@ class ArbitrageBotApp {
     }
 
     isTestnetChain(chainId) {
-        // Converti chainId in numero se è in formato esadecimale
-        const numericChainId = typeof chainId === 'string' ? parseInt(chainId, 16) : chainId;
-        
+        // ethers v6 restituisce chainId come bigint; normalizziamo a Number.
+        const numericChainId = typeof chainId === 'bigint' ? Number(chainId)
+            : (typeof chainId === 'string' ? parseInt(chainId, 16) : chainId);
+
         const testnetChains = {
             5: 'Ethereum Goerli',
             11155111: 'Ethereum Sepolia',
@@ -497,8 +498,9 @@ class ArbitrageBotApp {
     }
 
     getNetworkName(chainId) {
-        // Converti chainId in numero se è in formato esadecimale
-        const numericChainId = typeof chainId === 'string' ? parseInt(chainId, 16) : chainId;
+        // ethers v6: chainId può essere bigint; normalizziamo a Number.
+        const numericChainId = typeof chainId === 'bigint' ? Number(chainId)
+            : (typeof chainId === 'string' ? parseInt(chainId, 16) : chainId);
         
         const networks = {
             5: 'Ethereum Goerli',
@@ -510,8 +512,9 @@ class ArbitrageBotApp {
     }
 
     getNetworkCurrency(chainId) {
-        // Converti chainId in numero se è in formato esadecimale
-        const numericChainId = typeof chainId === 'string' ? parseInt(chainId, 16) : chainId;
+        // ethers v6: chainId può essere bigint; normalizziamo a Number.
+        const numericChainId = typeof chainId === 'bigint' ? Number(chainId)
+            : (typeof chainId === 'string' ? parseInt(chainId, 16) : chainId);
         
         const currencies = {
             5: 'ETH',

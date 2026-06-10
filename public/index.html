@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="styles_perps.css">
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -960,33 +960,8 @@
     <div id="toastContainer" class="toast-container"></div>
 
     <!-- Scripts -->
-    <script>
-        // Switch tra vista Perps (principale) e Arbitraggio (demo)
-        function switchView(view) {
-            document.getElementById('view-arbitrage').classList.toggle('hidden', view !== 'arbitrage');
-            document.getElementById('view-perps').classList.toggle('hidden', view !== 'perps');
-            document.querySelectorAll('.view-tab').forEach(t => {
-                t.classList.toggle('active', t.dataset.view === view);
-            });
-            if (view === 'perps' && window.perps) window.perps.onShow();
-        }
-
-        // Boot: Perps è il tab principale. Il modulo Arbitraggio EVM è una demo
-        // educativa, visibile solo se il server espone DEMO_EVM_ENABLED=true.
-        (async function bootViews() {
-            let demoEvm = false;
-            try {
-                const res = await fetch('/api/auth/status');
-                const { data } = await res.json();
-                demoEvm = !!data?.demoEvmEnabled;
-            } catch (_) { /* offline: resta solo Perps */ }
-            window.__DEMO_EVM_ENABLED__ = demoEvm;
-            const tab = document.getElementById('tab-arbitrage');
-            if (tab) tab.style.display = demoEvm ? '' : 'none';
-            switchView('perps');
-        })();
-    </script>
-    <script src="app.js?v=1.1.0"></script>
+    <script src="boot.js?v=2.0.0"></script>
+    <script src="app.js?v=1.2.0"></script>
     <script src="perps.js?v=2.0.0"></script>
 </body>
 </html>

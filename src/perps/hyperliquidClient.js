@@ -15,8 +15,16 @@
  */
 
 import axios from 'axios';
+import { createRequire } from 'module';
 import { Hyperliquid } from 'hyperliquid';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
+
+// L'SDK Hyperliquid, in ESM su Node < 23, non riesce a caricare il pacchetto
+// 'ws' (dynamic require non supportato). Esponendo globalThis.require risolve il
+// modulo correttamente e il WebSocket diventa disponibile. No-op se già presente.
+if (typeof globalThis.require === 'undefined') {
+  try { globalThis.require = createRequire(import.meta.url); } catch { /* noop */ }
+}
 import agentWallet from './agentWallet.js';
 import execQueue from './execQueue.js';
 import { withRetry } from './retry.js';
@@ -28,6 +36,7 @@ class HyperliquidClient {
     this.network = HYPERLIQUID_CONFIG.defaultNetwork || 'testnet';
     this.readSdks = new Map();   // network -> SDK (sola lettura)
     this.signSdks = new Map();   // `${network}:${master}` -> SDK (firma con agent key)
+    this.wsSdks = new Map();     // network -> SDK con WebSocket connesso
   }
 
   init() {
@@ -91,6 +100,52 @@ class HyperliquidClient {
   /** Invalida le SDK firmanti in cache (es. dopo cambio agent). */
   resetSignSdk(masterAddress, network = this.network) {
     this.signSdks.delete(`${network}:${masterAddress.toLowerCase()}`);
+  }
+
+  // ---- WebSocket (push real-time, con fallback al polling REST) ----
+
+  /** SDK con WebSocket connesso (lazy). Lancia se la connessione fallisce. */
+  async getWsSdk(network = this.network) {
+    if (!this.wsSdks.has(network)) {
+      const sdk = new Hyperliquid({ enableWs: true, testnet: network === 'testnet' });
+      await sdk.connect();
+      this.wsSdks.set(network, sdk);
+      logger.info(`🔌 Hyperliquid WS connesso (${network})`);
+    }
+    return this.wsSdks.get(network);
+  }
+
+  /** True se il WebSocket per la rete è connesso. */
+  wsConnected(network = this.network) {
+    const sdk = this.wsSdks.get(network);
+    try {
+      // L'SDK espone isConnected() come metodo.
+      return !!(sdk && sdk.ws && sdk.ws.isConnected());
+    } catch {
+      return false;
+    }
+  }
+
+  /** Sottoscrive i mid di tutti i mercati. cb riceve l'oggetto AllMids. */
+  async subscribeAllMids(cb, network = this.network) {
+    const sdk = await this.getWsSdk(network);
+    await sdk.subscriptions.subscribeToAllMids(cb);
+    return sdk;
+  }
+
+  /** Sottoscrive i fill di un utente (riconciliazione event-driven). */
+  async subscribeUserFills(masterAddress, cb, network = this.network) {
+    const sdk = await this.getWsSdk(network);
+    await sdk.subscriptions.subscribeToUserFills(masterAddress, cb);
+    return sdk;
+  }
+
+  /** Chiude le connessioni WebSocket aperte. */
+  async closeWs() {
+    for (const [network, sdk] of this.wsSdks) {
+      try { sdk.disconnect?.(); } catch { /* noop */ }
+      this.wsSdks.delete(network);
+    }
   }
 
   // ---- Info / dati di mercato ----

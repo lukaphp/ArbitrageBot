@@ -1152,6 +1152,7 @@ class PerpsApp {
         <div>
           <span class="bot-status-dot ${running ? 'online' : 'offline'}"></span>
           <strong>${b.name}</strong> <span class="muted">· ${b.coin}</span>
+          ${b.paper ? '<span class="testnet-badge" style="font-size:.6em;vertical-align:middle" title="Forward-test: esecuzione simulata su prezzi reali">PAPER</span>' : ''}
         </div>
         <span class="bot-pnl ${pnlClass}">${this.fmtUsd(b.dailyPnl || 0)}</span>
       </div>
@@ -1217,6 +1218,8 @@ class PerpsApp {
     document.getElementById('botName').value = bot?.name || '';
     document.getElementById('botMarket').value = bot?.coin || (this.markets[0]?.coin || '');
     const c = bot?.config || {};
+    const paperEl = document.getElementById('botPaper');
+    if (paperEl) paperEl.checked = !!c.paper;
     document.getElementById('botDirection').value = c.direction || 'both';
     document.getElementById('botLeverage').value = c.leverage || 3;
     document.getElementById('botSizingMode').value = c.sizing?.mode || 'percent';
@@ -1437,10 +1440,19 @@ class PerpsApp {
 
   /** Costruisce la config del bot dalla modalità attiva (simple/advanced). */
   _buildBotConfig() {
+    let cfg;
     if (this.botMode === 'simple') {
       if (!this.selStrategy) { this.toast('Scegli una strategia', 'warning'); return null; }
-      return this._buildSimpleConfig();
+      cfg = this._buildSimpleConfig();
+    } else {
+      cfg = this._buildAdvancedConfig();
     }
+    // Paper-trading (forward-test): esecuzione simulata sui prezzi reali.
+    if (cfg) cfg.paper = !!document.getElementById('botPaper')?.checked;
+    return cfg;
+  }
+
+  _buildAdvancedConfig() {
     return {
       direction: document.getElementById('botDirection').value,
       leverage: parseFloat(document.getElementById('botLeverage').value),

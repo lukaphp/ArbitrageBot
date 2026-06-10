@@ -747,6 +747,11 @@
                     </div>
                 </div>
 
+                <div class="form-group toggle-group">
+                    <label><input type="checkbox" id="botPaper"> 📝 Paper-trading (forward-test)</label>
+                    <small class="muted">Esecuzione <b>simulata</b> sui prezzi reali live, con le stesse fee: nessun ordine reale. Ideale per validare la strategia prima del mainnet.</small>
+                </div>
+
                 <!-- Toggle modalità -->
                 <div class="bot-mode-toggle">
                     <button type="button" class="bot-mode active" data-mode="simple" onclick="perps.setBotMode('simple')">🎯 Semplificata</button>
@@ -982,6 +987,6 @@
         })();
     </script>
     <script src="app.js?v=1.1.0"></script>
-    <script src="perps.js?v=1.9.0"></script>
+    <script src="perps.js?v=2.0.0"></script>
 </body>
 </html>

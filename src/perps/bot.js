@@ -13,6 +13,7 @@
  */
 
 import client from './hyperliquidClient.js';
+import paperBroker from './paperBroker.js';
 import marketData from './marketData.js';
 import strategyEngine from './strategyEngine.js';
 import riskManager from './riskManager.js';
@@ -36,6 +37,11 @@ export class PerpsBot {
       ? JSON.parse(record.config_json)
       : (record.config || {});
     this.onUpdate = onUpdate || (() => {});
+
+    // Broker di esecuzione: reale (client) o simulato (paperBroker) se paper-mode.
+    // I prezzi/segnali restano sempre reali e live; solo l'esecuzione è simulata.
+    this.paper = !!this.config.paper;
+    this.broker = this.paper ? paperBroker : client;
 
     this.status = 'stopped';
     this.timer = null;
@@ -114,7 +120,7 @@ export class PerpsBot {
       const snapshot = await marketData.getSnapshot(this.coin, { interval, withFunding: needFunding });
 
       // Riallinea lo stato posizione con Hyperliquid (fonte di verità)
-      const account = await client.getAccount(this.masterAddress, this.network);
+      const account = await this.broker.getAccount(this.masterAddress, this.network);
       const livePos = account.positions.find(p => p.coin === this.coin || `${p.coin}-PERP` === this.coin);
       await this._reconcile(livePos);
 
@@ -212,11 +218,11 @@ export class PerpsBot {
       return;
     }
 
-    await client.setLeverage(this.masterAddress, this.coin, leverage,
+    await this.broker.setLeverage(this.masterAddress, this.coin, leverage,
       this.config.marginMode || 'cross', this.network);
 
     const isBuy = side === 'long';
-    const order = await client.placeMarketOrder({
+    const order = await this.broker.placeMarketOrder({
       masterAddress: this.masterAddress, coin: this.coin, isBuy, size: plan.size,
       slippage: this.config.slippage ?? 0.02
     }, this.network);
@@ -319,20 +325,20 @@ export class PerpsBot {
         for (const st of steps) {
           const sz = riskManager.roundSize(this.position.size * st.portion, szDec);
           if (sz > 0) {
-            await client.placeTriggerOrder({
+            await this.broker.placeTriggerOrder({
               masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
               size: sz, triggerPx: st.px, tpsl: 'tp'
             }, this.network);
           }
         }
       } else if (this.position.tpPx) {
-        await client.placeTriggerOrder({
+        await this.broker.placeTriggerOrder({
           masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
           size: this.position.size, triggerPx: this.position.tpPx, tpsl: 'tp'
         }, this.network);
       }
       if (this.position.slPx) {
-        const res = await client.placeTriggerOrder({
+        const res = await this.broker.placeTriggerOrder({
           masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
           size: this.position.size, triggerPx: this.position.slPx, tpsl: 'sl'
         }, this.network);
@@ -346,7 +352,7 @@ export class PerpsBot {
 
   /** Trova l'ordine SL (trigger reduce-only) attivo per questa posizione, se c'è. */
   async _findStopOrder() {
-    const orders = await client.getFrontendOpenOrders(this.masterAddress, this.network);
+    const orders = await this.broker.getFrontendOpenOrders(this.masterAddress, this.network);
     const sameCoin = o => o.coin === this.coin || `${o.coin}-PERP` === this.coin || o.coin === this.coin.replace('-PERP', '');
     return (orders || []).find(o => sameCoin(o) && o.isTrigger && /stop/i.test(o.orderType || '')) || null;
   }
@@ -366,7 +372,7 @@ export class PerpsBot {
       // SL assente: tentativo di ripiazzamento immediato.
       logger.warn(`Bot ${this.name}: stop loss assente, ripiazzo…`);
       const closeIsBuy = this.position.side === 'short';
-      const res = await client.placeTriggerOrder({
+      const res = await this.broker.placeTriggerOrder({
         masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
         size: this.position.size, triggerPx: this.position.slPx, tpsl: 'sl'
       }, this.network);
@@ -409,7 +415,7 @@ export class PerpsBot {
       const roundedSl = client.roundPx(newSl);
       const closeIsBuy = this.position.side === 'short';
       try {
-        const res = await client.placeTriggerOrder({
+        const res = await this.broker.placeTriggerOrder({
           masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
           size: this.position.size, triggerPx: roundedSl, tpsl: 'sl'
         }, this.network);
@@ -419,7 +425,7 @@ export class PerpsBot {
         db.updatePosition(this.position.id, { sl_px: roundedSl, trailing_json: JSON.stringify({ slOid: res.oid }) });
         // Solo ora rimuovo il vecchio SL (se diverso da quello nuovo).
         if (oldOid && res.oid && oldOid !== res.oid) {
-          await client.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: oldOid }, this.network).catch(() => {});
+          await this.broker.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: oldOid }, this.network).catch(() => {});
         }
         logger.info(`🪤 Bot ${this.name}: trailing stop → ${roundedSl}`);
       } catch (error) {
@@ -444,7 +450,7 @@ export class PerpsBot {
       const szDec = market?.szDecimals ?? 3;
       const addSize = riskManager.roundSize(this.position.size * (dca.sizeMultiplier || 1), szDec);
       if (addSize <= 0) return;
-      const order = await client.placeMarketOrder({
+      const order = await this.broker.placeMarketOrder({
         masterAddress: this.masterAddress, coin: this.coin,
         isBuy: this.position.side === 'long', size: addSize, slippage: this.config.slippage ?? 0.02
       }, this.network);
@@ -461,7 +467,7 @@ export class PerpsBot {
 
   async _closeNow(reason) {
     try {
-      await client.closePosition({ masterAddress: this.masterAddress, coin: this.coin }, this.network);
+      await this.broker.closePosition({ masterAddress: this.masterAddress, coin: this.coin }, this.network);
       await this._registerClose(reason, this.position?.lastUnrealized || 0);
       logger.info(`🔴 Bot ${this.name}: posizione chiusa (${reason})`);
     } catch (error) {
@@ -480,7 +486,7 @@ export class PerpsBot {
     let net = fallbackPnl;
     let fee = 0;
     try {
-      const real = await client.getRealizedPnl(this.masterAddress, this.coin, openedAt, this.network);
+      const real = await this.broker.getRealizedPnl(this.masterAddress, this.coin, openedAt, this.network);
       if (real) { net = real.net; fee = real.fee; }
     } catch (e) {
       logger.debug(`Bot ${this.name}: PnL reale non disponibile, uso fallback`, e.message);
@@ -513,7 +519,7 @@ export class PerpsBot {
     try { stats = db.getBotStats(this.id); } catch { /* noop */ }
     return {
       id: this.id, name: this.name, coin: this.coin, network: this.network,
-      status: this.status, inPosition: !!this.position,
+      status: this.status, inPosition: !!this.position, paper: this.paper,
       position: this.position, dailyPnl: this.dailyPnl,
       lastEval: this.lastEval, lastError: this.lastError, config: this.config,
       lastTickAt: this.lastTickAt, tickErrors: this.tickErrors,

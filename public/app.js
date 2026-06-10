@@ -20,25 +20,24 @@ class ArbitrageBotApp {
         // Gate di autenticazione (single-user): se attivo e non loggato, mostra il login
         if (!(await this._ensureAuth())) return;
 
+        // --- Parti CONDIVISE: attive anche quando la demo EVM è disabilitata ---
+        // Socket.IO (stato "Server" + canale usato anche da Perps), connessione
+        // MetaMask (necessaria a Perps per l'approvazione dell'agent wallet) e
+        // listener della UI.
+        this.initSocket();
+        this.initEventListeners();
+        this.checkMetaMaskAvailability();
+
         // Il modulo Arbitraggio EVM è una demo: se il server non lo espone
-        // (DEMO_EVM_ENABLED non attivo) saltiamo tutta l'inizializzazione EVM.
-        // Perps gira in autonomia (perps.js) con il proprio socket.
+        // (DEMO_EVM_ENABLED non attivo) NON facciamo polling dei suoi dati.
         if (this.demoEvm === false) {
             console.log('🔵 Modulo Arbitraggio EVM disabilitato — solo Perps attivo');
             return;
         }
 
-        this.initSocket();
-
-        // Inizializza event listeners
-        this.initEventListeners();
-        
-        // Controlla se MetaMask è disponibile
-        this.checkMetaMaskAvailability();
-        
-        // Carica dati iniziali
+        // Carica dati iniziali (solo demo EVM)
         await this.loadInitialData();
-        
+
         console.log('✅ App inizializzata con successo');
     }
 

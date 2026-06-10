@@ -137,6 +137,19 @@ class PerpsDatabase {
         result_json TEXT
       );
 
+      -- Storico qualità modelli ML nel tempo (per tracciare il decadimento).
+      CREATE TABLE IF NOT EXISTS ml_history (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts        INTEGER NOT NULL,
+        coin      TEXT NOT NULL,
+        interval  TEXT NOT NULL,
+        accuracy  REAL,
+        baseline  REAL,
+        edge      REAL,
+        auc       REAL,
+        samples   INTEGER
+      );
+
       CREATE INDEX IF NOT EXISTS idx_positions_bot ON positions(bot_id);
       CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id);
       CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
@@ -534,6 +547,23 @@ class PerpsDatabase {
     if (!actionId) return;
     this.ensure();
     this.db.prepare(`DELETE FROM executed_actions WHERE action_id = ?`).run(actionId);
+  }
+
+  // ---- Storico qualità ML (decadimento nel tempo) ----
+
+  insertMlHistory({ coin, interval, accuracy, baseline, edge, auc, samples }) {
+    this.ensure();
+    this.db.prepare(
+      `INSERT INTO ml_history (ts, coin, interval, accuracy, baseline, edge, auc, samples)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(Date.now(), coin, interval, accuracy ?? null, baseline ?? null, edge ?? null, auc ?? null, samples ?? null);
+  }
+
+  listMlHistory(coin, interval, limit = 100) {
+    this.ensure();
+    return this.db.prepare(
+      `SELECT * FROM ml_history WHERE coin = ? AND interval = ? ORDER BY ts DESC LIMIT ?`
+    ).all(coin, interval, limit);
   }
 
   // ---- PnL giornaliero persistito (per-bot, per-giorno) ----

@@ -55,6 +55,7 @@ import agentRuntime from './agents/runtime.js';
 import analyst from './agents/analyst/analyst.js';
 import proposals from './agents/proposals.js';
 import riskAgent from './agents/riskAgent.js';
+import mlTrainer from './agents/mlTrainer.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -1026,6 +1027,23 @@ class ArbitrageBotServer {
       riskAgent.setKillSwitch(on);
       res.json({ success: true, data: { killSwitch: on } });
     });
+
+    // Storico qualità ML nel tempo (decadimento dell'edge)
+    app.get('/api/perps/ml/history', (req, res) => {
+      const { coin, interval = '15m', limit } = req.query;
+      if (!coin) return res.status(400).json({ success: false, error: 'coin richiesto' });
+      res.json({ success: true, data: db.listMlHistory(coin, interval, parseInt(limit) || 100) });
+    });
+
+    // Retraining ML on-demand (per i modelli usati dai bot con gate ML)
+    app.post('/api/perps/ml/retrain', async (req, res) => {
+      try {
+        const results = await mlTrainer.runOnce();
+        res.json({ success: true, data: results });
+      } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+      }
+    });
   }
 
   /**
@@ -1139,6 +1157,7 @@ class ArbitrageBotServer {
         // Avvia il runtime degli agenti (Analyst AI + janitor proposte)
         agentRuntime.register(analyst);
         agentRuntime.register(proposals.janitorAgent());
+        agentRuntime.register(mlTrainer);
         await agentRuntime.startAll();
         logger.info('🤖 Sottosistema Perps + agenti pronto');
       } catch (perpsError) {

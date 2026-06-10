@@ -194,6 +194,11 @@ export async function train(coin, interval, opts = {}) {
   cache.set(`${coin}_${interval}`, model);
   try { db.setSetting(`ml_model_${coin}_${interval}`, JSON.stringify(model)); } catch (e) { logger.warn('ML: persistenza modello fallita', e.message); }
 
+  // Traccia la qualità nel tempo (per rilevare il decadimento dell'edge).
+  try {
+    db.insertMlHistory({ coin, interval, accuracy: valAcc, baseline, edge: valAcc - baseline, auc: valAuc, samples: X.length });
+  } catch (e) { logger.debug('ML: storico qualità non salvato', e.message); }
+
   logger.info(`🧠 Modello ML allenato ${coin}/${interval}: acc ${(valAcc * 100).toFixed(1)}% (baseline ${(baseline * 100).toFixed(1)}%, n=${X.length})`);
   return model;
 }

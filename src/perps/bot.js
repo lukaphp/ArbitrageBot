@@ -194,6 +194,14 @@ export class PerpsBot {
       return;
     }
 
+    // Cooldown per-strategia: dopo N perdite consecutive, pausa di M minuti
+    // dall'ultima chiusura prima di poter riaprire (evita re-entry impulsivi).
+    const cd = this._cooldownBlock();
+    if (cd) {
+      this.lastEval = { action: 'hold', reason: cd, ts: Date.now() };
+      return;
+    }
+
     // Limiti di portafoglio (globali): posizioni concorrenti, esposizione, cooldown
     const cl = db.getConsecutiveLosses(this.id);
     const pf = portfolio.canOpen({ account, plannedNotional: plan.notionalUsd, botId: this.id, consecutiveLosses: cl });
@@ -219,7 +227,9 @@ export class PerpsBot {
     }
 
     const entryPx = order.avgPx || snapshot.price;
-    const { tpPx, slPx } = riskManager.computeTpSl(entryPx, side, this.config);
+    // ATR corrente per gli stop adattivi (mode 'atr'); null se non configurati.
+    const atrVal = this._usesAtr() ? ind.atr(snapshot.candles, this.config.atrPeriod || 14) : null;
+    const { tpPx, slPx } = riskManager.computeTpSl(entryPx, side, this.config, { atr: atrVal });
 
     const posId = db.insertPosition({
       botId: this.id, coin: this.coin, side, size: plan.size,
@@ -236,6 +246,32 @@ export class PerpsBot {
 
     logger.info(`🟢 Bot ${this.name}: aperta ${side} ${plan.size} ${this.coin} @ ${entryPx}`);
     notifier.notify(`🟢 <b>${this.name}</b> ha aperto <b>${side.toUpperCase()}</b> ${plan.size} ${this.coin} @ ${entryPx}\nTP ${tpPx ? tpPx.toFixed(2) : '—'} · SL ${slPx ? slPx.toFixed(2) : '—'}`);
+  }
+
+  /** True se la strategia usa stop/trailing ATR (per calcolare l'ATR solo se serve). */
+  _usesAtr() {
+    const c = this.config;
+    return c.sl?.mode === 'atr' || c.tp?.mode === 'atr' || c.trailing?.mode === 'atr';
+  }
+
+  /**
+   * Cooldown per-strategia: se le ultime `afterLosses` chiusure sono perdite e
+   * l'ultima è avvenuta da meno di `minutes`, blocca l'apertura. Ritorna la
+   * motivazione (stringa) se bloccato, altrimenti null.
+   */
+  _cooldownBlock() {
+    const cd = this.config.cooldown;
+    if (!cd || !cd.minutes) return null;
+    const afterLosses = cd.afterLosses || 1;
+    if (db.getConsecutiveLosses(this.id) < afterLosses) return null;
+    const last = db.getOpenPositionByBot(this.id); // null se flat
+    if (last) return null;
+    const lastClosed = db.lastClosedAt(this.id);
+    if (!lastClosed) return null;
+    const elapsedMin = (Date.now() - lastClosed) / 60000;
+    if (elapsedMin >= cd.minutes) return null;
+    const left = Math.ceil(cd.minutes - elapsedMin);
+    return `Cooldown post-perdite: riapertura tra ~${left} min`;
   }
 
   /** Conferma multi-timeframe: true se il TF superiore concorda col lato (o se disattivata). */
@@ -367,7 +403,8 @@ export class PerpsBot {
     await this._maybeDca(snapshot);
     // Trailing stop — PLACE-THEN-CANCEL: piazza il nuovo trigger PRIMA di
     // cancellare il vecchio, così non esiste mai una finestra senza SL.
-    const newSl = riskManager.computeTrailing(this.position, snapshot.price, this.config);
+    const atrVal = this._usesAtr() ? ind.atr(snapshot.candles, this.config.atrPeriod || 14) : null;
+    const newSl = riskManager.computeTrailing(this.position, snapshot.price, this.config, { atr: atrVal });
     if (newSl != null) {
       const roundedSl = client.roundPx(newSl);
       const closeIsBuy = this.position.side === 'short';
@@ -562,6 +599,11 @@ export class PerpsBot {
           const v = num(ind.rsi(candles, p || 14));
           const met = cmp(v, rule.op, rule.value);
           return { ...base, label: `RSI(${p || 14})`, current: fmt(v), target: `${rule.op} ${rule.value}`, met: !!met, hint: gapHint(v, rule.op, rule.value, ' pt') };
+        }
+        case 'adx': {
+          const v = num(ind.adx(candles, p || 14));
+          const met = cmp(v, rule.op, rule.value);
+          return { ...base, label: `ADX(${p || 14})`, current: fmt(v), target: `${rule.op} ${rule.value}`, met: !!met, hint: gapHint(v, rule.op, rule.value, ' pt') };
         }
         case 'ema':
         case 'sma': {

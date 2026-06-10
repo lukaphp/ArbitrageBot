@@ -51,19 +51,22 @@ class RiskManager {
    * @param side 'long' | 'short'
    * @returns { tpPx, slPx }
    */
-  computeTpSl(entryPx, side, config) {
+  computeTpSl(entryPx, side, config, ctx = {}) {
     const out = { tpPx: null, slPx: null };
     const isLong = side === 'long';
+    const atr = ctx.atr; // ATR corrente, per gli stop adattivi alla volatilità
 
     const tp = config.tp;
     if (tp?.enabled) {
       if (tp.mode === 'absolute') out.tpPx = tp.value;
+      else if (tp.mode === 'atr') out.tpPx = atr ? (isLong ? entryPx + tp.value * atr : entryPx - tp.value * atr) : null;
       else out.tpPx = isLong ? entryPx * (1 + tp.value / 100) : entryPx * (1 - tp.value / 100);
     }
 
     const sl = config.sl;
     if (sl?.enabled) {
       if (sl.mode === 'absolute') out.slPx = sl.value;
+      else if (sl.mode === 'atr') out.slPx = atr ? (isLong ? entryPx - sl.value * atr : entryPx + sl.value * atr) : null;
       else out.slPx = isLong ? entryPx * (1 - sl.value / 100) : entryPx * (1 + sl.value / 100);
     }
 
@@ -89,10 +92,13 @@ class RiskManager {
    * Nuovo stop trailing se il prezzo si è mosso a favore. Ritorna null se invariato.
    * @param position { side, slPx }
    */
-  computeTrailing(position, currentPx, config) {
+  computeTrailing(position, currentPx, config, ctx = {}) {
     const tr = config.trailing;
     if (!tr?.enabled) return null;
-    const dist = tr.mode === 'absolute' ? tr.value : currentPx * (tr.value / 100);
+    let dist;
+    if (tr.mode === 'absolute') dist = tr.value;
+    else if (tr.mode === 'atr') { if (!ctx.atr) return null; dist = tr.value * ctx.atr; }
+    else dist = currentPx * (tr.value / 100);
     const isLong = position.side === 'long';
     const candidate = isLong ? currentPx - dist : currentPx + dist;
 

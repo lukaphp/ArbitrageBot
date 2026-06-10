@@ -360,6 +360,15 @@ class PerpsDatabase {
     };
   }
 
+  /** Timestamp (ms) dell'ultima posizione chiusa di un bot, o null. */
+  lastClosedAt(botId) {
+    this.ensure();
+    const row = this.db.prepare(
+      `SELECT closed_at FROM positions WHERE bot_id = ? AND status = 'closed' AND closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1`
+    ).get(botId);
+    return row ? row.closed_at : null;
+  }
+
   /** Conta le perdite consecutive più recenti di un bot. */
   getConsecutiveLosses(botId) {
     this.ensure();

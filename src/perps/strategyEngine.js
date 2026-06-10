@@ -77,6 +77,7 @@ class StrategyEngine {
           case 'rsi': val = pre !== undefined ? pre : ind.rsi(candles, period || 14); break;
           case 'ema': val = pre !== undefined ? pre : ind.ema(candles, period || 20); break;
           case 'sma': val = pre !== undefined ? pre : ind.sma(candles, period || 20); break;
+          case 'adx': val = pre !== undefined ? pre : ind.adx(candles, period || 14); break;
           case 'macd': {
             const m = pre !== undefined ? pre : ind.macd(candles, rule.params);
             if (!m) return { match: false, signal: rule.signal };

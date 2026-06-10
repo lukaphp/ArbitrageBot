@@ -103,8 +103,8 @@ export async function runBacktest(config, coin, opts = {}) {
   let peak = 0, maxDD = 0; // drawdown in USD
   let state = null;        // posizione simulata
 
-  const openTrade = (side, candle) => {
-    const { tpPx, slPx } = riskManager.computeTpSl(candle.c, side, config);
+  const openTrade = (side, candle, atrVal) => {
+    const { tpPx, slPx } = riskManager.computeTpSl(candle.c, side, config, { atr: atrVal });
     state = { side, entryPx: candle.c, tpPx, slPx, entryTime: candle.t, entryIdx: null };
   };
   const closeTrade = (exitPx, time, reason) => {
@@ -136,9 +136,13 @@ export async function runBacktest(config, coin, opts = {}) {
     for (const [key, arr] of series) out[key] = arr[i];
     return out;
   };
+  // ATR precalcolato solo se la strategia usa stop/trailing adattivi.
+  const usesAtr = config.sl?.mode === 'atr' || config.tp?.mode === 'atr' || config.trailing?.mode === 'atr';
+  const atrArr = usesAtr ? ind.atrSeries(C, config.atrPeriod || 14) : null;
 
   for (let i = warmup; i < C.length; i++) {
     const candle = C[i];
+    const atrVal = atrArr ? atrArr[i] : null;
     // candles non più "sliced" per barra: gli indicatori arrivano precalcolati.
     const snapshot = { coin, price: candle.c, candles: C, funding: null, precomputed: precomputedAt(i) };
 
@@ -149,7 +153,7 @@ export async function runBacktest(config, coin, opts = {}) {
         closeTrade(hit.px, candle.t, hit.reason);
       } else {
         // 2) trailing stop
-        const newSl = riskManager.computeTrailing({ side: state.side, slPx: state.slPx }, candle.c, config);
+        const newSl = riskManager.computeTrailing({ side: state.side, slPx: state.slPx }, candle.c, config, { atr: atrVal });
         if (newSl != null) state.slPx = newSl;
         // 3) regole di uscita
         const dec = strategyEngine.evaluate(config, snapshot, { inPosition: true, side: state.side });
@@ -157,8 +161,8 @@ export async function runBacktest(config, coin, opts = {}) {
       }
     } else {
       const dec = strategyEngine.evaluate(config, snapshot, { inPosition: false });
-      if (dec.action === 'open_long') openTrade('long', candle);
-      else if (dec.action === 'open_short') openTrade('short', candle);
+      if (dec.action === 'open_long') openTrade('long', candle, atrVal);
+      else if (dec.action === 'open_short') openTrade('short', candle, atrVal);
     }
     equityCurve.push({ t: candle.t, equity: Number(equity.toFixed(2)) });
   }

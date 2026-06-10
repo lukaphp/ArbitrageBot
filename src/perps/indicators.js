@@ -8,11 +8,34 @@
  */
 
 import pkg from 'technicalindicators';
-const { RSI, EMA, SMA, MACD, BollingerBands } = pkg;
+const { RSI, EMA, SMA, MACD, BollingerBands, ATR, ADX } = pkg;
 
 /** Estrae i prezzi di chiusura da un array di candele. */
 export function closes(candles) {
   return (candles || []).map(c => parseFloat(c.c)).filter(n => !isNaN(n));
+}
+
+function ohlc(candles) {
+  const high = [], low = [], close = [];
+  for (const c of candles || []) { high.push(+c.h); low.push(+c.l); close.push(+c.c); }
+  return { high, low, close };
+}
+
+/** Average True Range: volatilità media (per stop adattivi). Ultimo valore. */
+export function atr(candles, period = 14) {
+  if ((candles || []).length < period + 1) return null;
+  const { high, low, close } = ohlc(candles);
+  const out = ATR.calculate({ period, high, low, close });
+  return out.length ? out[out.length - 1] : null;
+}
+
+/** Average Directional Index: forza del trend (filtro di regime). Ultimo valore. */
+export function adx(candles, period = 14) {
+  if ((candles || []).length < period * 2) return null;
+  const { high, low, close } = ohlc(candles);
+  const out = ADX.calculate({ period, high, low, close });
+  const last = out.length ? out[out.length - 1] : null;
+  return last ? last.adx : null;
 }
 
 export function rsi(candles, period = 14) {
@@ -77,8 +100,16 @@ export function ruleKey(rule) {
     case 'sma': return `sma:${p || 20}`;
     case 'macd': { const { fast = 12, slow = 26, signal = 9 } = rule.params || {}; return `macd:${fast}-${slow}-${signal}`; }
     case 'bollinger': { const { period = 20, stdDev = 2 } = rule.params || {}; return `bb:${period}-${stdDev}`; }
+    case 'adx': return `adx:${p || 14}`;
     default: return `?:${rule.indicator}`;
   }
+}
+
+/** Serie ATR completa, index-aligned (per stop adattivi nel backtester). */
+export function atrSeries(candles, period = 14) {
+  const { high, low, close } = ohlc(candles);
+  const out = ATR.calculate({ period, high, low, close });
+  return alignRight(candles.length, out || []);
 }
 
 /**
@@ -106,6 +137,12 @@ export function precomputeSeries(candles, ruleSets = []) {
       case 'bollinger': {
         const { period = 20, stdDev = 2 } = rule.params || {};
         out = BollingerBands.calculate({ period, stdDev, values });
+        break;
+      }
+      case 'adx': {
+        const { high, low, close } = ohlc(candles);
+        const raw = ADX.calculate({ period: rule.period || 14, high, low, close });
+        out = raw.map(r => (r ? r.adx : null));
         break;
       }
       default: continue;

@@ -73,14 +73,14 @@
                 </div>
             </section>
 
-            <!-- Navigazione viste: Arbitraggio | Perps -->
+            <!-- Navigazione viste: Perps (principale) | Arbitraggio (demo) -->
             <nav class="view-tabs">
-                <button class="view-tab active" data-view="arbitrage" onclick="switchView('arbitrage')">🔍 Arbitraggio</button>
-                <button class="view-tab" data-view="perps" onclick="switchView('perps')">📈 Perps Trading</button>
+                <button class="view-tab active" data-view="perps" onclick="switchView('perps')">📈 Perps Trading</button>
+                <button id="tab-arbitrage" class="view-tab" data-view="arbitrage" onclick="switchView('arbitrage')" style="display:none">🔍 Arbitraggio <span class="testnet-badge" style="font-size:.65em;vertical-align:middle">DEMO</span></button>
             </nav>
 
-            <!-- ====================== VISTA ARBITRAGGIO ====================== -->
-            <div id="view-arbitrage">
+            <!-- ====================== VISTA ARBITRAGGIO (demo educativa) ====================== -->
+            <div id="view-arbitrage" class="hidden">
             <!-- Dashboard -->
             <section class="dashboard">
                 <div class="stats-grid">
@@ -956,7 +956,7 @@
 
     <!-- Scripts -->
     <script>
-        // Switch tra vista Arbitraggio e Perps
+        // Switch tra vista Perps (principale) e Arbitraggio (demo)
         function switchView(view) {
             document.getElementById('view-arbitrage').classList.toggle('hidden', view !== 'arbitrage');
             document.getElementById('view-perps').classList.toggle('hidden', view !== 'perps');
@@ -965,6 +965,21 @@
             });
             if (view === 'perps' && window.perps) window.perps.onShow();
         }
+
+        // Boot: Perps è il tab principale. Il modulo Arbitraggio EVM è una demo
+        // educativa, visibile solo se il server espone DEMO_EVM_ENABLED=true.
+        (async function bootViews() {
+            let demoEvm = false;
+            try {
+                const res = await fetch('/api/auth/status');
+                const { data } = await res.json();
+                demoEvm = !!data?.demoEvmEnabled;
+            } catch (_) { /* offline: resta solo Perps */ }
+            window.__DEMO_EVM_ENABLED__ = demoEvm;
+            const tab = document.getElementById('tab-arbitrage');
+            if (tab) tab.style.display = demoEvm ? '' : 'none';
+            switchView('perps');
+        })();
     </script>
     <script src="app.js?v=1.1.0"></script>
     <script src="perps.js?v=1.9.0"></script>

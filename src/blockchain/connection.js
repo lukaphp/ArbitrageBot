@@ -9,7 +9,7 @@
  */
 
 import { ethers } from 'ethers';
-import { NETWORKS, SECURITY_CONFIG } from '../config/config.js';
+import { NETWORKS, SECURITY_CONFIG, DEMO_EVM } from '../config/config.js';
 import logger from '../utils/logger.js';
 
 class BlockchainConnection {
@@ -19,12 +19,12 @@ class BlockchainConnection {
     this.connectedNetwork = null;
     this.walletAddress = null;
     this.isBrowser = typeof window !== 'undefined' && typeof window.ethereum !== 'undefined';
-    
-    // Inizializza provider per tutte le reti testnet
-    this.initializeProviders();
-    
-    // Inizializza Wallet da Private Key (solo Node.js)
-    this.initializeWallet();
+
+    // Inizializza i provider solo se la demo EVM è attiva (in prod resta off).
+    if (DEMO_EVM.enabled) {
+      this.initializeProviders();
+      this.initializeWallet();
+    }
   }
   
   /**
@@ -81,11 +81,7 @@ class BlockchainConnection {
     }
     
     if (this.providers.size === 0) {
-      if (process.env.VERCEL) {
-        logger.warn('⚠️ Nessun provider blockchain disponibile (OK per Vercel serverless)');
-      } else {
-        throw new Error('Nessun provider blockchain disponibile!');
-      }
+      throw new Error('Nessun provider blockchain disponibile!');
     }
     
     // Se siamo in un browser, inizializza anche MetaMask

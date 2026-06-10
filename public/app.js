@@ -20,17 +20,16 @@ class ArbitrageBotApp {
         // Gate di autenticazione (single-user): se attivo e non loggato, mostra il login
         if (!(await this._ensureAuth())) return;
 
-        // Detect Vercel environment
-        this.isVercel = window.location.hostname.includes('vercel.app');
-
-        if (!this.isVercel) {
-            // Inizializza Socket.IO solo se non siamo su Vercel
-            this.initSocket();
-        } else {
-            console.log('☁️ Vercel detected - switching to polling mode');
-            this.updateServerStatus(true);
+        // Il modulo Arbitraggio EVM è una demo: se il server non lo espone
+        // (DEMO_EVM_ENABLED non attivo) saltiamo tutta l'inizializzazione EVM.
+        // Perps gira in autonomia (perps.js) con il proprio socket.
+        if (this.demoEvm === false) {
+            console.log('🔵 Modulo Arbitraggio EVM disabilitato — solo Perps attivo');
+            return;
         }
-        
+
+        this.initSocket();
+
         // Inizializza event listeners
         this.initEventListeners();
         
@@ -48,6 +47,7 @@ class ArbitrageBotApp {
         try {
             const res = await fetch('/api/auth/status');
             const { data } = await res.json();
+            this.demoEvm = !!data?.demoEvmEnabled;
             if (!data?.enabled || data?.authenticated) return true;
         } catch (e) {
             console.warn('auth status non raggiungibile', e);
@@ -1214,30 +1214,14 @@ class ArbitrageBotApp {
             clearInterval(this.refreshInterval);
         }
         
-        // Su Vercel usiamo un polling più frequente (5s) perché non abbiamo WebSocket
-        // In locale usiamo 30s perché abbiamo WebSocket per il real-time
-        const interval = this.isVercel ? 5000 : 30000;
-        
+        // WebSocket fornisce il real-time; il polling è solo un fallback periodico.
+        const interval = 30000;
+
         this.refreshInterval = setInterval(async () => {
             await this.refreshOpportunities();
             await this.refreshPrices();
-            
-            // Su Vercel aggiorniamo anche stats e history via polling
-            if (this.isVercel) {
-                try {
-                    const statsResponse = await fetch('/api/stats');
-                    if (statsResponse.ok) {
-                        const stats = await statsResponse.json();
-                        this.updateStats(stats);
-                    }
-                    // Refresh history occasionally? Let's do it every loop for simplicity
-                    // await this.refreshHistory(); 
-                } catch (e) {
-                    console.error('Polling error:', e);
-                }
-            }
-        }, interval); 
-        
+        }, interval);
+
         console.log(`⏰ Auto-refresh attivo (intervallo: ${interval}ms)`);
     }
 

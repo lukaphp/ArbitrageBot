@@ -120,6 +120,17 @@ export const ARBITRAGE_CONFIG = {
 };
 
 /**
+ * Modulo Arbitraggio EVM — DEMO EDUCATIVA
+ * =======================================
+ * Prezzi simulati, opportunità casuali, "esecuzione" = self-transfer di 0 ETH.
+ * NON è arbitraggio reale. Disattivato di default e fuori dalla build di produzione.
+ * Attivare solo per dimostrazione con DEMO_EVM_ENABLED=true.
+ */
+export const DEMO_EVM = {
+  enabled: process.env.DEMO_EVM_ENABLED === 'true'
+};
+
+/**
  * Configurazione Perps Trading (Hyperliquid)
  * =========================================
  * Endpoint testnet/mainnet, limiti di rischio e parametri auto-pilot.
@@ -262,39 +273,31 @@ export function validateConfig() {
     console.warn('\n🔴🔴🔴 ATTENZIONE: Hyperliquid MAINNET ATTIVO — gli ordini useranno DENARO REALE 🔴🔴🔴\n');
   }
 
-  // Verifica modalità testnet dell'arbitraggio EVM (separata da Hyperliquid)
-  if (SECURITY_CONFIG.networkMode !== 'testnet') {
-    errors.push('ERRORE CRITICO: l\'arbitraggio EVM deve funzionare SOLO in modalità testnet (NETWORK_MODE=testnet)!');
+  // --- Verifiche specifiche del modulo demo Arbitraggio EVM (solo se attivo) ---
+  if (DEMO_EVM.enabled) {
+    if (SECURITY_CONFIG.networkMode !== 'testnet') {
+      errors.push('ERRORE CRITICO: la demo EVM deve funzionare SOLO in modalità testnet (NETWORK_MODE=testnet)!');
+    }
+    Object.entries(NETWORKS).forEach(([network, config]) => {
+      if (!config.rpcUrl) {
+        errors.push(`RPC URL mancante per ${network}`);
+      }
+      if (!config.isTestnet) {
+        errors.push(`ERRORE CRITICO: ${network} non è configurato come testnet!`);
+      }
+    });
+    if (!process.env.WALLET_ADDRESS) {
+      errors.push('Indirizzo wallet mancante (richiesto dalla demo EVM)');
+    }
   }
 
-  // Verifica RPC URLs
-  Object.entries(NETWORKS).forEach(([network, config]) => {
-    if (!config.rpcUrl) {
-      errors.push(`RPC URL mancante per ${network}`);
-    }
-    if (!config.isTestnet) {
-      errors.push(`ERRORE CRITICO: ${network} non è configurato come testnet!`);
-    }
-  });
-  
-  // Verifica wallet address
-  if (!process.env.WALLET_ADDRESS) {
-    errors.push('Indirizzo wallet mancante');
-  }
-  
   if (errors.length > 0) {
     console.error('❌ Errori di configurazione:');
     errors.forEach(error => console.error(`  - ${error}`));
-    
-    // Su Vercel non usciamo, logghiamo solo l'errore
-    if (!process.env.VERCEL) {
-      process.exit(1);
-    } else {
-      console.warn('⚠️ Esecuzione continuata nonostante errori di configurazione (Ambiente Vercel)');
-    }
+    process.exit(1);
   }
-  
-  console.log('✅ Configurazione validata - Modalità TESTNET attiva');
+
+  console.log(`✅ Configurazione validata — HL: ${hlNetwork}${DEMO_EVM.enabled ? ' · demo EVM attiva' : ''}`);
 }
 
 /**
@@ -305,6 +308,7 @@ export default {
   DEX_CONFIG,
   TOKENS,
   ARBITRAGE_CONFIG,
+  DEMO_EVM,
   HYPERLIQUID_CONFIG,
   SECURITY_CONFIG,
   LOGGING_CONFIG,

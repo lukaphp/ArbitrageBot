@@ -72,7 +72,12 @@ HYPERLIQUID_NETWORK=testnet        # parti da testnet, poi mainnet
 ALLOW_MAINNET=false
 PERPS_MAX_POSITION_USD=500         # cap prudenti
 PERPS_MAX_DAILY_LOSS_USD=100
+DEMO_EVM_ENABLED=false             # in produzione tieni la demo EVM DISATTIVATA
 ```
+
+> **Modulo Arbitraggio EVM**: è una *demo educativa* a prezzi simulati (non arbitraggio
+> reale). In produzione resta disattivata (`DEMO_EVM_ENABLED=false`, default): non vengono
+> registrate le sue route né avviati i suoi servizi. Il prodotto in produzione è **solo Perps**.
 
 > Se manca uno dei segreti obbligatori in `NODE_ENV=production`, **il server non parte**
 > (fail-fast voluto). La chiave agent senza `AGENT_ENCRYPTION_KEY` interrompe l'avvio.

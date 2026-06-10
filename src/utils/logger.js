@@ -28,8 +28,8 @@ class SecureLogger {
     // Debug temporaneo per verificare il livello di log
     console.log(`🔧 Logger initialized - Level: ${LOGGING_CONFIG.level}, CurrentLevel: ${this.currentLevel}, LogLevels[${LOGGING_CONFIG.level}]: ${this.logLevels[LOGGING_CONFIG.level]}`);
     
-    // Crea directory log se abilitata (skip su Vercel)
-    if (LOGGING_CONFIG.enableFileLogging && !process.env.VERCEL) {
+    // Crea directory log se abilitata
+    if (LOGGING_CONFIG.enableFileLogging) {
       this.ensureLogDirectory();
     }
     
@@ -87,7 +87,7 @@ class SecureLogger {
    * Scrive log su file se abilitato
    */
   writeToFile(level, message, data = null) {
-    if (!LOGGING_CONFIG.enableFileLogging || process.env.VERCEL) return;
+    if (!LOGGING_CONFIG.enableFileLogging) return;
     
     try {
       const timestamp = this.getTimestamp();

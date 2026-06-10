@@ -148,7 +148,7 @@ class ArbitrageBotServer {
     this.app.get('/api/auth/status', (req, res) => {
       const enabled = auth.isAuthEnabled();
       const authenticated = !enabled || auth.verifyToken(req.cookies?.[auth.COOKIE]);
-      res.json({ success: true, data: { enabled, authenticated } });
+      res.json({ success: true, data: { enabled, authenticated, demoEvmEnabled: config.DEMO_EVM.enabled } });
     });
     this.app.post('/api/login', this.loginLimiter(), (req, res) => {
       if (!auth.isAuthEnabled()) return res.json({ success: true, data: { authDisabled: true } });
@@ -163,6 +163,11 @@ class ArbitrageBotServer {
       res.clearCookie(auth.COOKIE, auth.cookieOptions());
       res.json({ success: true });
     });
+
+    // ====================== ROUTE DEMO ARBITRAGGIO EVM ======================
+    // Registrate solo se DEMO_EVM_ENABLED=true. È una demo simulata, non
+    // arbitraggio reale: in produzione resta disattivata.
+    if (config.DEMO_EVM.enabled) {
 
     // API Status
     this.app.get('/api/status', async (req, res) => {
@@ -192,11 +197,6 @@ class ArbitrageBotServer {
     // API Prezzi
     this.app.get('/api/prices', async (req, res) => {
       try {
-        // Vercel fix: Ensure data is loaded
-        if (process.env.VERCEL && priceFeedManager.priceCache.size === 0) {
-           await priceFeedManager.initializePriceCache();
-        }
-
         const { network, token } = req.query;
         let prices;
         
@@ -222,14 +222,6 @@ class ArbitrageBotServer {
     // API Opportunità
     this.app.get('/api/opportunities', async (req, res) => {
       try {
-        // Vercel fix: Run analysis on demand
-        if (process.env.VERCEL) {
-           if (priceFeedManager.priceCache.size === 0) {
-               await priceFeedManager.initializePriceCache();
-           }
-           await arbitrageAnalyzer.analyzeAllOpportunities();
-        }
-
         const opportunities = arbitrageAnalyzer.getBestOpportunities();
         res.json({ success: true, data: opportunities });
       } catch (error) {
@@ -399,21 +391,6 @@ class ArbitrageBotServer {
       }
     });
     
-    // API Statistiche
-    this.app.get('/api/stats', async (req, res) => {
-      try {
-        const stats = {
-          execution: transactionExecutor.getExecutionStats(),
-          analyzer: arbitrageAnalyzer.getStats(),
-          priceFeeds: priceFeedManager.getStatus()
-        };
-        res.json({ success: true, data: stats });
-      } catch (error) {
-        logger.error('Errore API stats:', error);
-        res.status(500).json({ success: false, error: error.message });
-      }
-    });
-    
     // API History
     this.app.get('/api/history', async (req, res) => {
       try {
@@ -456,8 +433,8 @@ class ArbitrageBotServer {
         res.status(500).json({ success: false, error: error.message });
       }
     });
-    
-    // Serve index.html per tutte le altre route (SPA)
+
+    } // fine route demo EVM (config.DEMO_EVM.enabled)
 
     // Health check
     this.app.get('/health', (req, res) => {
@@ -1102,17 +1079,18 @@ class ArbitrageBotServer {
       logger.info('🔧 Validazione configurazione...');
       config.validateConfig();
       
-      // Inizializzazione moduli
-      logger.info('🔗 Inizializzazione connessioni blockchain...');
-      await blockchainConnection.initializeProviders();
-      
-      logger.info('📊 Avvio sistema raccolta prezzi...');
-      await priceFeedManager.start();
-      
-      logger.info('🔍 Avvio analizzatore arbitraggio...');
-      await arbitrageAnalyzer.start();
-      
-      logger.info('⚡ Executor pronto...');
+      // Inizializzazione modulo demo Arbitraggio EVM (solo se abilitato)
+      if (config.DEMO_EVM.enabled) {
+        logger.info('🔗 Inizializzazione connessioni blockchain (demo EVM)...');
+        await blockchainConnection.initializeProviders();
+        logger.info('📊 Avvio sistema raccolta prezzi (demo EVM)...');
+        await priceFeedManager.start();
+        logger.info('🔍 Avvio analizzatore arbitraggio (demo EVM)...');
+        await arbitrageAnalyzer.start();
+        logger.info('⚡ Executor demo pronto...');
+      } else {
+        logger.info('🔵 Modulo Arbitraggio EVM disabilitato (DEMO_EVM_ENABLED non attivo)');
+      }
 
       // Inizializzazione sottosistema Perps (Hyperliquid)
       try {
@@ -1131,7 +1109,7 @@ class ArbitrageBotServer {
         await agentRuntime.startAll();
         logger.info('🤖 Sottosistema Perps + agenti pronto');
       } catch (perpsError) {
-        logger.error('⚠️ Errore inizializzazione Perps (arbitraggio resta attivo):', perpsError.message);
+        logger.error('⚠️ Errore inizializzazione Perps:', perpsError.message);
       }
 
       // Setup eventi per WebSocket
@@ -1144,12 +1122,12 @@ class ArbitrageBotServer {
         logger.info(`🔐 Auth: ${auth.isAuthEnabled() ? 'ATTIVA' : 'DISATTIVA (solo sviluppo)'} · HL network: ${config.HYPERLIQUID_CONFIG.defaultNetwork}`);
         
         console.log(`
-🤖 ARBITRAGE BOT WEB - TESTNET ONLY`);
+📈 PERPS TRADING (Hyperliquid)`);
         console.log(`=====================================`);
         console.log(`🌐 Web Interface: http://localhost:${this.port}`);
         console.log(`📊 API Endpoint: http://localhost:${this.port}/api`);
         console.log(`🔌 WebSocket: ws://localhost:${this.port}`);
-        console.log(`⚠️  MODALITÀ TESTNET ATTIVA`);
+        console.log(`🟢 HL network: ${config.HYPERLIQUID_CONFIG.defaultNetwork}${config.DEMO_EVM.enabled ? ' · demo EVM ON' : ''}`);
         console.log(`=====================================\n`);
       });
       
@@ -1176,7 +1154,8 @@ class ArbitrageBotServer {
      * NOTA: Commentato perché i moduli non estendono EventEmitter
      */
     setupBotEvents() {
-    // Invia aggiornamenti periodici delle statistiche
+    // Aggiornamenti periodici statistiche demo EVM (solo se il modulo è attivo)
+    if (!config.DEMO_EVM.enabled) return;
     setInterval(() => {
       if (this.connectedClients.size > 0) {
         try {
@@ -1213,10 +1192,12 @@ class ArbitrageBotServer {
     logger.info('🛑 Arresto server...');
     
     this.isRunning = false;
-    
-    // Arresta moduli bot
-    await priceFeedManager.stop();
-    await arbitrageAnalyzer.stop();
+
+    // Arresta moduli demo EVM (se attivi)
+    if (config.DEMO_EVM.enabled) {
+      await priceFeedManager.stop();
+      await arbitrageAnalyzer.stop();
+    }
 
     // Arresta sottosistema Perps
     try {

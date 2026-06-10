@@ -9,6 +9,7 @@
  */
 
 import logger from '../utils/logger.js';
+import metrics from './metrics.js';
 
 const DEFAULTS = { retries: 3, baseMs: 400, maxMs: 8000 };
 
@@ -61,6 +62,7 @@ export async function withRetry(fn, options = {}) {
       await sleep(wait);
     }
   }
+  metrics.inc('api_errors_total'); // tentativi esauriti: errore definitivo
   throw lastErr;
 }
 

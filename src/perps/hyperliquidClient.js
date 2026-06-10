@@ -28,6 +28,7 @@ if (typeof globalThis.require === 'undefined') {
 import agentWallet from './agentWallet.js';
 import execQueue from './execQueue.js';
 import { withRetry } from './retry.js';
+import metrics from './metrics.js';
 import db from '../db/database.js';
 import logger from '../utils/logger.js';
 
@@ -410,6 +411,7 @@ class HyperliquidClient {
         reduce_only: reduceOnly
       });
       logger.info('⚡ Ordine market inviato', { coin, isBuy, size, px });
+      metrics.inc('orders_placed_total');
       return this._parseOrderResult(res);
     });
   }

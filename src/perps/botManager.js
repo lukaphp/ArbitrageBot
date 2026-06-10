@@ -9,6 +9,8 @@
 
 import crypto from 'crypto';
 import { PerpsBot } from './bot.js';
+import notifier from './notifier.js';
+import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import db from '../db/database.js';
 import logger from '../utils/logger.js';
 
@@ -16,6 +18,8 @@ class BotManager {
   constructor() {
     this.bots = new Map(); // id -> PerpsBot
     this.io = null;
+    this.watchdogTimer = null;
+    this.lastWatchdogAlert = new Map(); // botId -> ts (throttle alert)
   }
 
   setIo(io) {
@@ -106,8 +110,39 @@ class BotManager {
     return [...this.bots.values()].map(b => b.getState());
   }
 
+  /**
+   * WATCHDOG: controlla periodicamente che i bot in esecuzione stiano "ticcando".
+   * Se un bot running non aggiorna lastTickAt da oltre la soglia (3× il suo loop,
+   * minimo 60s) invia un alert Telegram (throttle 10 min/bot).
+   */
+  startWatchdog() {
+    if (this.watchdogTimer) return;
+    const CHECK_MS = 30000;
+    const ALERT_THROTTLE_MS = 10 * 60 * 1000;
+    this.watchdogTimer = setInterval(() => {
+      const now = Date.now();
+      for (const bot of this.bots.values()) {
+        if (bot.status !== 'running' || !bot.lastTickAt) continue;
+        const loop = bot.config.loopInterval || HYPERLIQUID_CONFIG.botLoopInterval;
+        const staleMs = Math.max(3 * loop, 60000);
+        if (now - bot.lastTickAt > staleMs) {
+          const last = this.lastWatchdogAlert.get(bot.id) || 0;
+          if (now - last > ALERT_THROTTLE_MS) {
+            this.lastWatchdogAlert.set(bot.id, now);
+            const secs = Math.round((now - bot.lastTickAt) / 1000);
+            logger.warn(`🐕 Watchdog: bot ${bot.name} fermo da ${secs}s`);
+            notifier.notify(`🐕 <b>Watchdog</b>: il bot <b>${bot.name}</b> (${bot.coin}) non aggiorna da ${secs}s. Controlla connettività/API.`);
+          }
+        }
+      }
+    }, CHECK_MS);
+    this.watchdogTimer.unref?.();
+    logger.info('🐕 Watchdog bot avviato');
+  }
+
   /** Shutdown del server: ferma i timer senza cambiare lo stato persistito. */
   stopAll() {
+    if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
     for (const bot of this.bots.values()) bot.shutdown();
   }
 }

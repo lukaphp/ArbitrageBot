@@ -44,6 +44,7 @@ import riskManager from './perps/riskManager.js';
 import botManager from './perps/botManager.js';
 import portfolio from './perps/portfolio.js';
 import notifier from './perps/notifier.js';
+import metrics from './perps/metrics.js';
 import optimizer from './perps/optimizer.js';
 import predictor from './perps/predictor.js';
 import telegramControl from './perps/telegramControl.js';
@@ -92,9 +93,24 @@ class ArbitrageBotServer {
    * Configura middleware Express
    */
   setupMiddleware() {
-    // Header di sicurezza (CSP permissiva per la UI inline esistente + CDN charts)
+    // Header di sicurezza con CSP restrittiva. Lo script-src include i CDN usati
+    // dalla UI (socket.io, ethers, lightweight-charts). Il 'unsafe-inline' resta
+    // finché ci sono handler onclick inline nell'HTML: verrà rimosso con il build
+    // step (Fase 3.5) passando a una CSP senza inline. Tutto il resto è bloccato.
     this.app.use(helmet({
-      contentSecurityPolicy: false,        // la UI usa script inline + CDN; CSP gestita a parte se necessario
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'", "'unsafe-inline'", 'https://cdn.socket.io', 'https://cdn.jsdelivr.net', 'https://unpkg.com'],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          imgSrc: ["'self'", 'data:'],
+          connectSrc: ["'self'", 'ws:', 'wss:', 'https:'],
+          objectSrc: ["'none'"],
+          baseUri: ["'self'"],
+          frameAncestors: ["'none'"],
+          formAction: ["'self'"]
+        }
+      },
       crossOriginEmbedderPolicy: false
     }));
 
@@ -102,9 +118,9 @@ class ArbitrageBotServer {
     const appOrigin = process.env.APP_ORIGIN;
     this.app.use(cors(appOrigin ? { origin: appOrigin, credentials: true } : { credentials: true }));
 
-    // JSON parsing + cookie per la sessione
-    this.app.use(express.json());
-    this.app.use(express.urlencoded({ extended: true }));
+    // JSON parsing + cookie per la sessione (limite anti-abuso sul body)
+    this.app.use(express.json({ limit: '256kb' }));
+    this.app.use(express.urlencoded({ extended: true, limit: '256kb' }));
     this.app.use(cookieParser());
 
     // Rate-limit globale sulle API
@@ -443,6 +459,22 @@ class ArbitrageBotServer {
         timestamp: new Date().toISOString(),
         uptime: process.uptime()
       });
+    });
+
+    // Metriche Prometheus. Non sotto /api/* (quindi fuori dal gate cookie, per
+    // permettere lo scraping). Se METRICS_TOKEN è impostato, richiede il token.
+    this.app.get('/metrics', async (req, res) => {
+      const required = process.env.METRICS_TOKEN;
+      if (required) {
+        const provided = req.query.token || (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+        if (provided !== required) return res.status(401).type('text/plain').send('# unauthorized\n');
+      }
+      try {
+        res.set('Content-Type', 'text/plain; version=0.0.4');
+        res.send(await metrics.render());
+      } catch (e) {
+        res.status(500).type('text/plain').send(`# errore metriche: ${e.message}\n`);
+      }
     });
 
     // Route del sottosistema Perps (Hyperliquid)
@@ -1101,6 +1133,7 @@ class ArbitrageBotServer {
         await marketData.start(this.io);
         botManager.setIo(this.io);
         botManager.loadFromDb();
+        botManager.startWatchdog();
         // Avvia il controllo comandi Telegram se configurato
         telegramControl.refresh();
         // Avvia il runtime degli agenti (Analyst AI + janitor proposte)

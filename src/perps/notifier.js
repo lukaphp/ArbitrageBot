@@ -9,13 +9,21 @@
 
 import axios from 'axios';
 import db from '../db/database.js';
+import secretBox from './secretBox.js';
 import logger from '../utils/logger.js';
 
 class Notifier {
   getConfig() {
     let cfg = {};
     try { cfg = JSON.parse(db.getSetting('telegram_config') || '{}'); } catch { /* noop */ }
-    const token = cfg.token || process.env.TELEGRAM_BOT_TOKEN || '';
+    // Token cifrato a riposo (tokenEnc). Retrocompat: vecchio `token` in chiaro.
+    let token = '';
+    if (cfg.tokenEnc) {
+      try { token = secretBox.decrypt(cfg.tokenEnc); } catch { token = ''; }
+    } else if (cfg.token) {
+      token = cfg.token; // legacy plaintext
+    }
+    token = token || process.env.TELEGRAM_BOT_TOKEN || '';
     const chatId = cfg.chatId || process.env.TELEGRAM_CHAT_ID || '';
     const enabled = cfg.enabled !== undefined ? cfg.enabled : !!(token && chatId);
     return { token, chatId, enabled };
@@ -28,7 +36,13 @@ class Notifier {
       chatId: chatId !== undefined ? chatId : cur.chatId,
       enabled: enabled !== undefined ? enabled : cur.enabled
     };
-    db.setSetting('telegram_config', JSON.stringify(merged));
+    // Persisti il token SEMPRE cifrato (mai in chiaro nel DB).
+    const toStore = {
+      tokenEnc: merged.token ? secretBox.encrypt(merged.token) : '',
+      chatId: merged.chatId,
+      enabled: merged.enabled
+    };
+    db.setSetting('telegram_config', JSON.stringify(toStore));
     return { ...merged, configured: !!(merged.token && merged.chatId) };
   }
 

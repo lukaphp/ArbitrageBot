@@ -151,17 +151,46 @@ class PerpsDatabase {
     if (!cols.includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
   }
 
-  /** Migrazioni leggere per schemi già esistenti (aggiunta colonne). */
+  /**
+   * Migrazioni VERSIONATE e idempotenti. Ogni voce dell'array è applicata in
+   * ordine una sola volta; `schema_version` traccia fino a dove siamo arrivati.
+   * Le singole migrazioni restano idempotenti (usano _addColumn) così sono
+   * sicure anche su DB preesistenti senza schema_version.
+   */
+  _migrations() {
+    return [
+      // v1 — tracciamento modello/costo AI sulle proposte
+      () => {
+        this._addColumn('proposals', 'linked_bot_id', 'TEXT');
+        this._addColumn('proposals', 'model', 'TEXT');
+        this._addColumn('proposals', 'cost_usd', 'REAL');
+        this._addColumn('proposals', 'tokens_in', 'INTEGER');
+        this._addColumn('proposals', 'tokens_out', 'INTEGER');
+      },
+      // v2 — PnL reale netto fee + motivo chiusura sulle posizioni
+      () => {
+        this._addColumn('positions', 'fee', 'REAL DEFAULT 0');
+        this._addColumn('positions', 'close_reason', 'TEXT');
+      }
+    ];
+  }
+
   _migrate() {
-    // proposals: tracciamento modello/costo AI
-    this._addColumn('proposals', 'linked_bot_id', 'TEXT');
-    this._addColumn('proposals', 'model', 'TEXT');          // modello Claude che ha generato la proposta
-    this._addColumn('proposals', 'cost_usd', 'REAL');       // costo stimato dell'elaborazione (quota della run)
-    this._addColumn('proposals', 'tokens_in', 'INTEGER');
-    this._addColumn('proposals', 'tokens_out', 'INTEGER');
-    // positions: PnL reale al netto delle fee + motivo di chiusura
-    this._addColumn('positions', 'fee', 'REAL DEFAULT 0');  // fee totali del round-trip (open+close)
-    this._addColumn('positions', 'close_reason', 'TEXT');   // perché la posizione è stata chiusa
+    this.db.exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`);
+    let row = this.db.prepare(`SELECT version FROM schema_version LIMIT 1`).get();
+    if (!row) {
+      this.db.prepare(`INSERT INTO schema_version (version) VALUES (0)`).run();
+      row = { version: 0 };
+    }
+    const migrations = this._migrations();
+    const apply = this.db.transaction((from) => {
+      for (let v = from; v < migrations.length; v++) migrations[v]();
+      this.db.prepare(`UPDATE schema_version SET version = ?`).run(migrations.length);
+    });
+    if (row.version < migrations.length) {
+      apply(row.version);
+      logger.info(`🗄️  Schema DB migrato: v${row.version} → v${migrations.length}`);
+    }
   }
 
   /** Garantisce che la connessione sia aperta (auto-init lazy). */

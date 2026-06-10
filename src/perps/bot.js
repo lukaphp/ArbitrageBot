@@ -20,6 +20,7 @@ import portfolio from './portfolio.js';
 import notifier from './notifier.js';
 import predictor from './predictor.js';
 import * as ind from './indicators.js';
+import metrics from './metrics.js';
 import db from '../db/database.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
@@ -41,6 +42,8 @@ export class PerpsBot {
     this.busy = false;
     this.lastEval = null;
     this.lastError = null;
+    this.lastTickAt = 0;       // per il watchdog (rileva bot "fermi")
+    this.tickErrors = 0;       // contatore errori di tick (metriche)
     this.dailyKey = this._todayKey();
     // PnL giornaliero PERSISTITO: sopravvive ai riavvii (il limite di perdita
     // giornaliera non riparte da zero dopo un restart a metà giornata).
@@ -128,8 +131,11 @@ export class PerpsBot {
       this.lastError = null;
     } catch (error) {
       this.lastError = error.message;
+      this.tickErrors++;
+      metrics.inc('tick_errors_total');
       logger.error(`Bot ${this.name} tick error`, error.message);
     } finally {
+      this.lastTickAt = Date.now();
       this.busy = false;
       this._emit();
     }
@@ -473,6 +479,7 @@ export class PerpsBot {
       status: this.status, inPosition: !!this.position,
       position: this.position, dailyPnl: this.dailyPnl,
       lastEval: this.lastEval, lastError: this.lastError, config: this.config,
+      lastTickAt: this.lastTickAt, tickErrors: this.tickErrors,
       stats
     };
   }

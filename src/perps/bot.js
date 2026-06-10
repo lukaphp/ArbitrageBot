@@ -41,16 +41,18 @@ export class PerpsBot {
     this.busy = false;
     this.lastEval = null;
     this.lastError = null;
-    this.dailyPnl = 0;
     this.dailyKey = this._todayKey();
+    // PnL giornaliero PERSISTITO: sopravvive ai riavvii (il limite di perdita
+    // giornaliera non riparte da zero dopo un restart a metà giornata).
+    this.dailyPnl = db.getDailyPnl(this.id, this.dailyKey);
 
     // Stato posizione locale (riallineato da Hyperliquid a ogni tick)
-    this.position = null; // { id, side, size, entryPx, tpPx, slPx, slOid }
+    this.position = null; // { id, side, size, entryPx, tpPx, slPx, slOid, openedAt }
     const open = db.getOpenPositionByBot(this.id);
     if (open) {
       this.position = {
         id: open.id, side: open.side, size: open.size, entryPx: open.entry_px,
-        tpPx: open.tp_px, slPx: open.sl_px,
+        tpPx: open.tp_px, slPx: open.sl_px, openedAt: open.opened_at,
         slOid: open.trailing_json ? JSON.parse(open.trailing_json).slOid : null
       };
     }
@@ -64,7 +66,8 @@ export class PerpsBot {
     const key = this._todayKey();
     if (key !== this.dailyKey) {
       this.dailyKey = key;
-      this.dailyPnl = 0;
+      // Nuovo giorno: ricarica l'eventuale valore persistito (di norma 0).
+      this.dailyPnl = db.getDailyPnl(this.id, key);
     }
   }
 
@@ -110,7 +113,7 @@ export class PerpsBot {
       // Riallinea lo stato posizione con Hyperliquid (fonte di verità)
       const account = await client.getAccount(this.masterAddress, this.network);
       const livePos = account.positions.find(p => p.coin === this.coin || `${p.coin}-PERP` === this.coin);
-      this._reconcile(livePos);
+      await this._reconcile(livePos);
 
       const state = { inPosition: !!this.position, side: this.position?.side };
       const decision = strategyEngine.evaluate(this.config, snapshot, state);
@@ -133,11 +136,10 @@ export class PerpsBot {
   }
 
   /** Allinea this.position con la posizione reale su Hyperliquid. */
-  _reconcile(livePos) {
+  async _reconcile(livePos) {
     if (!livePos && this.position) {
       // Posizione chiusa esternamente (TP/SL scattati o chiusura manuale)
-      const pnl = this.position.lastUnrealized || 0;
-      this._registerClose(pnl, 'chiusa (TP/SL o esterna)');
+      await this._registerClose('chiusa (TP/SL o esterna)', this.position.lastUnrealized || 0);
     } else if (livePos && this.position) {
       this.position.size = livePos.size;
       this.position.lastUnrealized = livePos.unrealizedPnl;
@@ -149,7 +151,7 @@ export class PerpsBot {
           size: livePos.size, entryPx: livePos.entryPx, leverage: livePos.leverage
         }),
         side: livePos.side, size: livePos.size, entryPx: livePos.entryPx,
-        tpPx: null, slPx: null, slOid: null
+        tpPx: null, slPx: null, slOid: null, openedAt: Date.now()
       };
     }
   }
@@ -219,10 +221,12 @@ export class PerpsBot {
     });
     db.insertTrade({ botId: this.id, coin: this.coin, side, px: entryPx, sz: plan.size, hlOid: order.oid });
 
-    this.position = { id: posId, side, size: plan.size, entryPx, tpPx, slPx, slOid: null };
+    this.position = { id: posId, side, size: plan.size, entryPx, tpPx, slPx, slOid: null, openedAt: Date.now() };
 
     // Piazza i trigger TP/SL (reduce-only). Ordine di chiusura: opposto al lato.
     await this._placeTpSl();
+    // Garanzia: nessuna posizione resta senza stop loss (chiude se non riesce a piazzarlo).
+    await this._ensureStopLoss();
 
     logger.info(`🟢 Bot ${this.name}: aperta ${side} ${plan.size} ${this.coin} @ ${entryPx}`);
     notifier.notify(`🟢 <b>${this.name}</b> ha aperto <b>${side.toUpperCase()}</b> ${plan.size} ${this.coin} @ ${entryPx}\nTP ${tpPx ? tpPx.toFixed(2) : '—'} · SL ${slPx ? slPx.toFixed(2) : '—'}`);
@@ -298,30 +302,82 @@ export class PerpsBot {
     }
   }
 
+  /** Trova l'ordine SL (trigger reduce-only) attivo per questa posizione, se c'è. */
+  async _findStopOrder() {
+    const orders = await client.getFrontendOpenOrders(this.masterAddress, this.network);
+    const sameCoin = o => o.coin === this.coin || `${o.coin}-PERP` === this.coin || o.coin === this.coin.replace('-PERP', '');
+    return (orders || []).find(o => sameCoin(o) && o.isTrigger && /stop/i.test(o.orderType || '')) || null;
+  }
+
+  /**
+   * GARANZIA DI PROTEZIONE: verifica che esista uno stop loss attivo sul book.
+   * Se manca (ordine fallito, crash tra fill e trigger, cancellazione) prova a
+   * ripiazzarlo; se ancora assente CHIUDE la posizione per non lasciarla nuda.
+   * No-op se la strategia non prevede SL.
+   */
+  async _ensureStopLoss() {
+    if (!this.position || !this.position.slPx) return;
+    try {
+      let stop = await this._findStopOrder();
+      if (stop) { this.position.slOid = stop.oid; return; }
+
+      // SL assente: tentativo di ripiazzamento immediato.
+      logger.warn(`Bot ${this.name}: stop loss assente, ripiazzo…`);
+      const closeIsBuy = this.position.side === 'short';
+      const res = await client.placeTriggerOrder({
+        masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
+        size: this.position.size, triggerPx: this.position.slPx, tpsl: 'sl'
+      }, this.network);
+      this.position.slOid = res.oid;
+      db.updatePosition(this.position.id, { trailing_json: JSON.stringify({ slOid: res.oid }) });
+
+      // Verifica finale: se ancora non c'è, chiusura di sicurezza.
+      stop = await this._findStopOrder();
+      if (!stop && !res.oid) {
+        logger.error(`Bot ${this.name}: impossibile garantire lo stop loss, chiusura di sicurezza`);
+        notifier.notify(`⚠️ <b>${this.name}</b>: stop loss non piazzabile su ${this.coin} → chiudo la posizione per sicurezza.`);
+        await this._closeNow('SL non garantito (chiusura di sicurezza)');
+      }
+    } catch (error) {
+      logger.error(`Bot ${this.name}: errore verifica stop loss`, error.message);
+      // In caso di errore irriducibile, è più prudente chiudere che restare nudi.
+      try {
+        notifier.notify(`⚠️ <b>${this.name}</b>: errore nel garantire lo stop loss → chiudo la posizione.`);
+        await this._closeNow('errore verifica SL (chiusura di sicurezza)');
+      } catch { /* noop */ }
+    }
+  }
+
   async _manageOpen(snapshot, account, decision) {
     // Uscita su segnale strategia
     if (decision.action === 'close') {
       await this._closeNow(decision.reason);
       return;
     }
+    // Guardia continua: assicura che lo stop loss sia attivo a ogni tick.
+    await this._ensureStopLoss();
+    if (!this.position) return; // _ensureStopLoss può aver chiuso per sicurezza
     // DCA: aggiunge alla posizione su movimento avverso (mediazione del prezzo)
     await this._maybeDca(snapshot);
-    // Trailing stop
+    // Trailing stop — PLACE-THEN-CANCEL: piazza il nuovo trigger PRIMA di
+    // cancellare il vecchio, così non esiste mai una finestra senza SL.
     const newSl = riskManager.computeTrailing(this.position, snapshot.price, this.config);
     if (newSl != null) {
       const roundedSl = client.roundPx(newSl);
       const closeIsBuy = this.position.side === 'short';
       try {
-        if (this.position.slOid) {
-          await client.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: this.position.slOid }, this.network);
-        }
         const res = await client.placeTriggerOrder({
           masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
           size: this.position.size, triggerPx: roundedSl, tpsl: 'sl'
         }, this.network);
+        const oldOid = this.position.slOid;
         this.position.slPx = roundedSl;
         this.position.slOid = res.oid;
         db.updatePosition(this.position.id, { sl_px: roundedSl, trailing_json: JSON.stringify({ slOid: res.oid }) });
+        // Solo ora rimuovo il vecchio SL (se diverso da quello nuovo).
+        if (oldOid && res.oid && oldOid !== res.oid) {
+          await client.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: oldOid }, this.network).catch(() => {});
+        }
         logger.info(`🪤 Bot ${this.name}: trailing stop → ${roundedSl}`);
       } catch (error) {
         logger.debug(`Bot ${this.name}: trailing update fallito`, error.message);
@@ -363,22 +419,43 @@ export class PerpsBot {
   async _closeNow(reason) {
     try {
       await client.closePosition({ masterAddress: this.masterAddress, coin: this.coin }, this.network);
-      const pnl = this.position?.lastUnrealized || 0;
-      this._registerClose(pnl, reason);
+      await this._registerClose(reason, this.position?.lastUnrealized || 0);
       logger.info(`🔴 Bot ${this.name}: posizione chiusa (${reason})`);
     } catch (error) {
       logger.error(`Bot ${this.name}: errore chiusura`, error.message);
     }
   }
 
-  _registerClose(pnl, reason) {
-    if (this.position) {
-      db.updatePosition(this.position.id, { status: 'closed', pnl, closed_at: Date.now() });
+  /**
+   * Registra la chiusura di una posizione usando il PnL REALE dai fill
+   * (closedPnl − fee), non l'unrealized dell'ultimo tick. Se i fill di chiusura
+   * non sono ancora visibili, ripiega su `fallbackPnl` (l'unrealized noto).
+   */
+  async _registerClose(reason, fallbackPnl = 0) {
+    if (!this.position) return;
+    const openedAt = this.position.openedAt;
+    let net = fallbackPnl;
+    let fee = 0;
+    try {
+      const real = await client.getRealizedPnl(this.masterAddress, this.coin, openedAt, this.network);
+      if (real) { net = real.net; fee = real.fee; }
+    } catch (e) {
+      logger.debug(`Bot ${this.name}: PnL reale non disponibile, uso fallback`, e.message);
     }
-    this.dailyPnl += pnl;
+
+    db.updatePosition(this.position.id, {
+      status: 'closed', pnl: net, fee, close_reason: reason, closed_at: Date.now()
+    });
+
+    // Aggiorna e PERSISTE il PnL giornaliero (sopravvive ai riavvii).
+    this.dailyPnl += net;
+    db.setDailyPnl(this.id, this.dailyKey, this.dailyPnl);
     this.position = null;
-    const emoji = pnl >= 0 ? '✅' : '🔻';
-    notifier.notify(`🔴 <b>${this.name}</b> ha chiuso (${reason}) — PnL ${emoji} ${pnl.toFixed(2)}$ · giornaliero ${this.dailyPnl.toFixed(2)}$`);
+
+    const emoji = net >= 0 ? '✅' : '🔻';
+    const feeStr = fee ? ` · fee ${fee.toFixed(2)}$` : '';
+    notifier.notify(`🔴 <b>${this.name}</b> ha chiuso (${reason}) — PnL ${emoji} ${net.toFixed(2)}$${feeStr} · giornaliero ${this.dailyPnl.toFixed(2)}$`);
+
     // Stop automatico se superato il limite di perdita giornaliera
     const maxDailyLoss = this.config.risk?.maxDailyLossUsd ?? HYPERLIQUID_CONFIG.risk.maxDailyLossUsd;
     if (this.dailyPnl <= -Math.abs(maxDailyLoss)) {

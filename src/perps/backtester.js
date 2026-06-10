@@ -61,10 +61,22 @@ function pnlPct(side, entry, exit) {
   return side === 'long' ? (exit - entry) / entry : (entry - exit) / entry;
 }
 
+// Costi di default (Hyperliquid perps). Configurabili via opts/config per
+// rendere l'expectancy realistica: un backtest senza costi è sistematicamente
+// ottimista, specie per strategie ad alta frequenza di trade.
+const DEFAULT_TAKER_FEE_PCT = 0.00035;   // 0.035% per lato (taker)
+const DEFAULT_SLIPPAGE_PCT = 0.0005;     // 0.05% per lato (market IoC)
+const DEFAULT_FUNDING_APR_PCT = 0;       // drag di funding annuo assunto (0 = neutro)
+
 export async function runBacktest(config, coin, opts = {}) {
   const interval = opts.interval || config.candleInterval || '15m';
   const lookbackDays = opts.lookbackDays || 30;
   const notionalUsd = opts.notionalUsd || 1000;
+
+  // Parametri di costo (per lato dove indicato). Entry+exit = 2 lati.
+  const feePct = opts.feePct ?? config.feePct ?? DEFAULT_TAKER_FEE_PCT;
+  const slippagePct = opts.slippagePct ?? config.slippagePct ?? DEFAULT_SLIPPAGE_PCT;
+  const fundingAprPct = opts.fundingAprPct ?? config.fundingAprPct ?? DEFAULT_FUNDING_APR_PCT;
 
   // Se le candele sono già fornite (es. dall'optimizer che le scarica una volta
   // sola e le riusa su molte valutazioni / split in-out-of-sample), si saltano
@@ -96,13 +108,20 @@ export async function runBacktest(config, coin, opts = {}) {
   };
   const closeTrade = (exitPx, time, reason) => {
     const ret = pnlPct(state.side, state.entryPx, exitPx);
-    const usd = notionalUsd * ret;
+    const grossUsd = notionalUsd * ret;
+    // Costi reali del round-trip: fee taker (2 lati) + slippage (2 lati) + funding pro-rata.
+    const feeCost = notionalUsd * feePct * 2;
+    const slipCost = notionalUsd * slippagePct * 2;
+    const holdHours = Math.max(0, (time - state.entryTime) / 3600000);
+    const fundingCost = notionalUsd * (fundingAprPct / 100) * (holdHours / (365 * 24));
+    const cost = feeCost + slipCost + fundingCost;
+    const usd = grossUsd - cost;
     equity += usd;
     peak = Math.max(peak, equity);
     maxDD = Math.max(maxDD, peak - equity);
     trades.push({
       side: state.side, entryPx: state.entryPx, exitPx,
-      retPct: ret * 100, pnlUsd: usd, reason,
+      retPct: ret * 100, grossUsd, cost, pnlUsd: usd, reason,
       entryTime: state.entryTime, exitTime: time
     });
     state = null;
@@ -144,7 +163,9 @@ export async function runBacktest(config, coin, opts = {}) {
       from: C[0].t, to: C[C.length - 1].t, candles: C.length, interval,
       days: Math.round((C[C.length - 1].t - C[0].t) / DAY_MS)
     },
-    notionalUsd
+    notionalUsd,
+    // Ipotesi di costo usate (per trasparenza su UI/Analyst).
+    costs: { feePct, slippagePct, fundingAprPct }
   };
 }
 
@@ -155,6 +176,7 @@ function computeStats(trades, notionalUsd, maxDD) {
   const grossWin = wins.reduce((s, t) => s + t.pnlUsd, 0);
   const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnlUsd, 0));
   const totalPnl = trades.reduce((s, t) => s + t.pnlUsd, 0);
+  const totalCosts = trades.reduce((s, t) => s + (t.cost || 0), 0);
   const winRate = n ? wins.length / n : 0;
   const avgWin = wins.length ? grossWin / wins.length : 0;
   const avgLoss = losses.length ? grossLoss / losses.length : 0;
@@ -170,7 +192,8 @@ function computeStats(trades, notionalUsd, maxDD) {
     profitFactor,
     expectancy,                                // USD/trade
     avgWin, avgLoss,
-    totalPnl,                                  // USD su notionalUsd
+    totalPnl,                                  // USD su notionalUsd (NETTO dei costi)
+    totalCosts,                                // USD totali di fee+slippage+funding
     totalReturnPct: notionalUsd ? (totalPnl / notionalUsd) * 100 : 0,
     maxDrawdown: maxDD,                        // USD
     maxDrawdownPct: notionalUsd ? (maxDD / notionalUsd) * 100 : 0,

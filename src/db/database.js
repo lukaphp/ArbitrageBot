@@ -130,6 +130,13 @@ class PerpsDatabase {
         detail_json TEXT
       );
 
+      -- Idempotenza persistita delle azioni eseguite (sopravvive ai riavvii).
+      CREATE TABLE IF NOT EXISTS executed_actions (
+        action_id   TEXT PRIMARY KEY,
+        executed_at INTEGER NOT NULL,
+        result_json TEXT
+      );
+
       CREATE INDEX IF NOT EXISTS idx_positions_bot ON positions(bot_id);
       CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id);
       CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
@@ -138,15 +145,23 @@ class PerpsDatabase {
     this._migrate();
   }
 
+  /** Aggiunge una colonna se mancante (idempotente). */
+  _addColumn(table, name, type) {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+    if (!cols.includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+  }
+
   /** Migrazioni leggere per schemi già esistenti (aggiunta colonne). */
   _migrate() {
-    const cols = this.db.prepare(`PRAGMA table_info(proposals)`).all().map(c => c.name);
-    const add = (name, type) => { if (!cols.includes(name)) this.db.exec(`ALTER TABLE proposals ADD COLUMN ${name} ${type}`); };
-    add('linked_bot_id', 'TEXT');
-    add('model', 'TEXT');          // modello Claude che ha generato la proposta
-    add('cost_usd', 'REAL');       // costo stimato dell'elaborazione (quota della run)
-    add('tokens_in', 'INTEGER');
-    add('tokens_out', 'INTEGER');
+    // proposals: tracciamento modello/costo AI
+    this._addColumn('proposals', 'linked_bot_id', 'TEXT');
+    this._addColumn('proposals', 'model', 'TEXT');          // modello Claude che ha generato la proposta
+    this._addColumn('proposals', 'cost_usd', 'REAL');       // costo stimato dell'elaborazione (quota della run)
+    this._addColumn('proposals', 'tokens_in', 'INTEGER');
+    this._addColumn('proposals', 'tokens_out', 'INTEGER');
+    // positions: PnL reale al netto delle fee + motivo di chiusura
+    this._addColumn('positions', 'fee', 'REAL DEFAULT 0');  // fee totali del round-trip (open+close)
+    this._addColumn('positions', 'close_reason', 'TEXT');   // perché la posizione è stata chiusa
   }
 
   /** Garantisce che la connessione sia aperta (auto-init lazy). */
@@ -266,7 +281,7 @@ class PerpsDatabase {
   }
 
   updatePosition(id, fields) {
-    const allowed = ['tp_px', 'sl_px', 'trailing_json', 'status', 'pnl', 'closed_at', 'entry_px', 'size'];
+    const allowed = ['tp_px', 'sl_px', 'trailing_json', 'status', 'pnl', 'closed_at', 'entry_px', 'size', 'fee', 'close_reason'];
     const sets = [];
     const params = { id };
     for (const [key, val] of Object.entries(fields)) {
@@ -289,23 +304,29 @@ class PerpsDatabase {
     return this.db.prepare(`SELECT * FROM positions ORDER BY opened_at DESC LIMIT ?`).all(limit);
   }
 
-  /** Statistiche reali di un bot dai trade chiusi (posizioni status='closed'). */
+  /**
+   * Statistiche reali di un bot dalle posizioni chiuse. Il campo `pnl` è già
+   * NETTO delle fee (vedi bot._registerClose), quindi win-rate/PF/expectancy
+   * riflettono il risultato effettivo. `totalFees` è esposto per trasparenza.
+   */
   getBotStats(botId) {
     this.ensure();
     const rows = this.db.prepare(
-      `SELECT pnl FROM positions WHERE bot_id = ? AND status = 'closed'`
+      `SELECT pnl, fee FROM positions WHERE bot_id = ? AND status = 'closed'`
     ).all(botId);
     const n = rows.length;
     const wins = rows.filter(r => (r.pnl || 0) > 0);
     const grossWin = wins.reduce((s, r) => s + r.pnl, 0);
     const grossLoss = Math.abs(rows.filter(r => (r.pnl || 0) < 0).reduce((s, r) => s + r.pnl, 0));
     const totalPnl = rows.reduce((s, r) => s + (r.pnl || 0), 0);
+    const totalFees = rows.reduce((s, r) => s + (r.fee || 0), 0);
     return {
       trades: n,
       wins: wins.length,
       winRate: n ? wins.length / n : 0,
       profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : 0),
       totalPnl,
+      totalFees,
       avgPnl: n ? totalPnl / n : 0
     };
   }
@@ -450,6 +471,48 @@ class PerpsDatabase {
   listAudit(limit = 100) {
     this.ensure();
     return this.db.prepare(`SELECT * FROM audit ORDER BY ts DESC LIMIT ?`).all(limit);
+  }
+
+  // ---- Idempotenza azioni eseguite (persistita) ----
+
+  /** True se l'azione con questo id è già stata eseguita (anche prima di un riavvio). */
+  wasActionExecuted(actionId) {
+    if (!actionId) return false;
+    this.ensure();
+    return !!this.db.prepare(`SELECT 1 FROM executed_actions WHERE action_id = ?`).get(actionId);
+  }
+
+  /** Registra l'azione come eseguita. Idempotente (INSERT OR IGNORE). */
+  markActionExecuted(actionId, result = null) {
+    if (!actionId) return;
+    this.ensure();
+    this.db.prepare(
+      `INSERT OR IGNORE INTO executed_actions (action_id, executed_at, result_json) VALUES (?, ?, ?)`
+    ).run(actionId, Date.now(), result ? JSON.stringify(result).slice(0, 2000) : null);
+  }
+
+  /** Rimuove la marcatura (per consentire un retry dopo un errore di esecuzione). */
+  unmarkActionExecuted(actionId) {
+    if (!actionId) return;
+    this.ensure();
+    this.db.prepare(`DELETE FROM executed_actions WHERE action_id = ?`).run(actionId);
+  }
+
+  // ---- PnL giornaliero persistito (per-bot, per-giorno) ----
+
+  _dailyKey(botId, day) { return `daily_pnl_${botId}_${day}`; }
+
+  /** PnL giornaliero persistito del bot per il giorno indicato (YYYY-MM-DD). */
+  getDailyPnl(botId, day) {
+    this.ensure();
+    const v = this.getSetting(this._dailyKey(botId, day), null);
+    return v == null ? 0 : (parseFloat(v) || 0);
+  }
+
+  /** Salva il PnL giornaliero del bot (sopravvive ai riavvii). */
+  setDailyPnl(botId, day, value) {
+    this.ensure();
+    this.setSetting(this._dailyKey(botId, day), Number(value).toFixed(6));
   }
 }
 

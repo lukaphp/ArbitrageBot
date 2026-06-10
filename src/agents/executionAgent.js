@@ -23,20 +23,31 @@ import logger from '../utils/logger.js';
 
 class ExecutionAgent {
   constructor() {
-    this.executed = new Set(); // id azioni già eseguite (idempotenza in-process)
+    this.executed = new Set(); // cache hot in-process (l'autorità è il DB)
+  }
+
+  /** True se l'azione è già stata eseguita (cache in-memory O persistenza DB). */
+  _alreadyExecuted(id) {
+    if (!id) return false;
+    if (this.executed.has(id)) return true;
+    return db.wasActionExecuted(id);
   }
 
   /**
    * Esegue un'azione approvata. action: { id, type, coin, side?, size?, leverage?,
    * triggerPx?, botId?, masterAddress?, network? }
+   *
+   * Idempotenza PERSISTITA: l'id eseguito è registrato su DB (executed_actions),
+   * così non viene rieseguito nemmeno dopo un riavvio del processo.
    * @returns { ok, result?, error?, skipped? }
    */
   async execute(action) {
-    if (action.id && this.executed.has(action.id)) {
+    if (this._alreadyExecuted(action.id)) {
       logger.info('⏭️  ExecutionAgent: azione già eseguita, salto', { id: action.id });
       return { ok: true, skipped: true };
     }
-    if (action.id) this.executed.add(action.id);
+    // Prenota subito l'id (DB + cache) per bloccare invii concorrenti/duplicati.
+    if (action.id) { this.executed.add(action.id); db.markActionExecuted(action.id); }
 
     try {
       let result;
@@ -48,6 +59,8 @@ class ExecutionAgent {
         case 'open':            result = await this._open(action); break;
         default:
           // Tipi non auto-eseguibili (es. new_strategy_candidate): solo registrati.
+          // Non è una vera esecuzione: libera la prenotazione idempotenza.
+          if (action.id) { this.executed.delete(action.id); db.unmarkActionExecuted(action.id); }
           db.insertAudit('executionAgent', 'action.noop', { type: action.type, coin: action.coin });
           return { ok: true, result: { noop: true, message: 'Tipo non auto-eseguibile: configura manualmente.' } };
       }
@@ -55,7 +68,8 @@ class ExecutionAgent {
       bus.publish(EVENTS.ORDER_FILLED, { action, result });
       return { ok: true, result };
     } catch (e) {
-      if (action.id) this.executed.delete(action.id); // consenti retry su errore
+      // Errore: libera la prenotazione (DB + cache) per consentire un retry.
+      if (action.id) { this.executed.delete(action.id); db.unmarkActionExecuted(action.id); }
       db.insertAudit('executionAgent', 'order.error', { type: action.type, coin: action.coin, error: e.message });
       bus.publish(EVENTS.ORDER_ERROR, { action, error: e.message });
       logger.error('ExecutionAgent: errore esecuzione', e.message);

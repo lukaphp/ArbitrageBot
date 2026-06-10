@@ -21,6 +21,7 @@
 import crypto from 'crypto';
 import { ethers } from 'ethers';
 import db from '../db/database.js';
+import execQueue from './execQueue.js';
 import logger from '../utils/logger.js';
 
 const ALGO = 'aes-256-gcm';
@@ -100,7 +101,7 @@ class AgentWallet {
     }
 
     const agent = ethers.Wallet.createRandom();
-    const nonce = Date.now();
+    const nonce = execQueue.nextNonce(); // monotono e persistito (no collisioni)
 
     // Salva subito la chiave agent cifrata (pending). approved_at resta null.
     db.upsertAgent({
@@ -180,7 +181,7 @@ class AgentWallet {
     const amt = Number(amount);
     if (!amt || amt <= 0 || isNaN(amt)) throw new Error('Importo non valido');
     const { chainHex, chainIdNum, hyperliquidChain } = this._resolveSignChain(network, signatureChainId);
-    const nonce = Date.now();
+    const nonce = execQueue.nextNonce(); // monotono e persistito (no collisioni)
     const amountStr = String(amt);
 
     const action = {

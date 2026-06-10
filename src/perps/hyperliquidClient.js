@@ -18,6 +18,8 @@ import axios from 'axios';
 import { Hyperliquid } from 'hyperliquid';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import agentWallet from './agentWallet.js';
+import execQueue from './execQueue.js';
+import { withRetry } from './retry.js';
 import db from '../db/database.js';
 import logger from '../utils/logger.js';
 
@@ -123,7 +125,7 @@ class HyperliquidClient {
 
   async getAllMids(network = this.network) {
     const sdk = await this.getReadSdk(network);
-    return sdk.info.getAllMids();
+    return withRetry(() => sdk.info.getAllMids(), { label: 'getAllMids' });
   }
 
   async getMid(coin, network = this.network) {
@@ -137,7 +139,7 @@ class HyperliquidClient {
     const sdk = await this.getReadSdk(network);
     const endTime = Date.now();
     const startTime = endTime - lookbackMs;
-    return sdk.info.getCandleSnapshot(coin, interval, startTime, endTime);
+    return withRetry(() => sdk.info.getCandleSnapshot(coin, interval, startTime, endTime), { label: 'getCandles' });
   }
 
   async getFundingHistory(coin, lookbackMs = 1000 * 60 * 60 * 24, network = this.network) {
@@ -184,7 +186,7 @@ class HyperliquidClient {
   async getAccount(masterAddress, network = this.network) {
     const sdk = await this.getReadSdk(network);
     const [state, spotUsdc] = await Promise.all([
-      sdk.info.perpetuals.getClearinghouseState(masterAddress),
+      withRetry(() => sdk.info.perpetuals.getClearinghouseState(masterAddress), { label: 'getAccount' }),
       this.getSpotUsdc(masterAddress, network).catch(() => 0)
     ]);
     const ms = state.marginSummary || {};
@@ -227,7 +229,7 @@ class HyperliquidClient {
   /** Ordini aperti dettagliati (include trigger TP/SL con triggerPx). */
   async getFrontendOpenOrders(masterAddress, network = this.network) {
     const sdk = await this.getReadSdk(network);
-    const orders = await sdk.info.getFrontendOpenOrders(masterAddress);
+    const orders = await withRetry(() => sdk.info.getFrontendOpenOrders(masterAddress), { label: 'getFrontendOpenOrders' });
     return (orders || []).map(o => ({
       coin: o.coin,
       side: o.side === 'B' ? 'buy' : 'sell',
@@ -244,7 +246,7 @@ class HyperliquidClient {
   /** Storico delle operazioni eseguite (fill), manuali e dei bot. */
   async getUserFills(masterAddress, network = this.network) {
     const sdk = await this.getReadSdk(network);
-    const fills = await sdk.info.getUserFills(masterAddress);
+    const fills = await withRetry(() => sdk.info.getUserFills(masterAddress), { label: 'getUserFills' });
     return (fills || [])
       .sort((a, b) => b.time - a.time)
       .slice(0, 200)
@@ -262,6 +264,26 @@ class HyperliquidClient {
       }));
   }
 
+  /**
+   * PnL realizzato di un singolo ciclo di posizione dai FILL reali (non
+   * dall'unrealized dell'ultimo tick). Somma il closedPnl dei fill di chiusura e
+   * le fee di tutti i fill del coin a partire da `sinceTs` (apertura posizione).
+   *
+   * @returns {{ closedPnl, fee, net, fills }} net = closedPnl - fee
+   *   oppure null se non sono ancora arrivati fill di chiusura (ritenta al tick dopo).
+   */
+  async getRealizedPnl(masterAddress, coin, sinceTs, network = this.network) {
+    const fills = await this.getUserFills(masterAddress, network);
+    const matchCoin = f => f.coin === coin || `${f.coin}-PERP` === coin || f.coin === coin.replace('-PERP', '');
+    const since = sinceTs ? sinceTs - 1000 : 0; // piccolo margine per il clock skew
+    const rel = fills.filter(f => matchCoin(f) && f.time >= since);
+    const closing = rel.filter(f => /close/i.test(f.dir || ''));
+    if (!closing.length) return null; // nessun fill di chiusura ancora visibile
+    const closedPnl = closing.reduce((s, f) => s + (f.closedPnl || 0), 0);
+    const fee = rel.reduce((s, f) => s + (f.fee || 0), 0); // fee open+close del ciclo
+    return { closedPnl, fee, net: closedPnl - fee, fills: rel.length };
+  }
+
   // ---- Azioni user-signed (firmate da MetaMask) ----
 
   /**
@@ -271,22 +293,25 @@ class HyperliquidClient {
   async submitSignedAction(action, signature, network = this.network) {
     const url = `${this.endpoints(network).api}/exchange`;
     const body = { action, nonce: action.nonce, signature };
-    const { data } = await axios.post(url, body, {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 15000
-    });
-    if (data?.status === 'err') {
-      throw new Error(typeof data.response === 'string' ? data.response : JSON.stringify(data.response));
-    }
-    return data;
+    // Retry sicuro: il nonce è fisso, quindi un eventuale reinvio viene scartato
+    // da Hyperliquid (no doppia esecuzione).
+    return withRetry(async () => {
+      const { data } = await axios.post(url, body, {
+        headers: { 'Content-Type': 'application/json' }, timeout: 15000
+      });
+      if (data?.status === 'err') {
+        throw new Error(typeof data.response === 'string' ? data.response : JSON.stringify(data.response));
+      }
+      return data;
+    }, { label: 'submitSignedAction' });
   }
 
   /** Saldo USDC nel wallet Spot (HyperCore) del master. */
   async getSpotUsdc(masterAddress, network = this.network) {
     const url = `${this.endpoints(network).api}/info`;
-    const { data } = await axios.post(url, { type: 'spotClearinghouseState', user: masterAddress }, {
+    const { data } = await withRetry(() => axios.post(url, { type: 'spotClearinghouseState', user: masterAddress }, {
       headers: { 'Content-Type': 'application/json' }, timeout: 10000
-    });
+    }), { label: 'getSpotUsdc' });
     const usdc = (data?.balances || []).find(b => b.coin === 'USDC');
     return usdc ? parseFloat(usdc.total) : 0;
   }
@@ -304,7 +329,8 @@ class HyperliquidClient {
   /** Imposta la leva (cross di default) prima di aprire una posizione. */
   async setLeverage(masterAddress, coin, leverage, mode = 'cross', network = this.network) {
     const sdk = await this.getSignSdk(masterAddress, network);
-    return sdk.exchange.updateLeverage(coin, mode, leverage);
+    // Serializzato per master: niente firme concorrenti che fanno collidere i nonce.
+    return execQueue.run(masterAddress, () => sdk.exchange.updateLeverage(coin, mode, leverage));
   }
 
   /**
@@ -313,20 +339,24 @@ class HyperliquidClient {
    */
   async placeMarketOrder({ masterAddress, coin, isBuy, size, slippage = 0.02, reduceOnly = false }, network = this.network) {
     const sdk = await this.getSignSdk(masterAddress, network);
-    const mid = await this.getMid(coin, network);
-    if (!mid) throw new Error(`Prezzo non disponibile per ${coin}`);
-    const px = this.roundPx(isBuy ? mid * (1 + slippage) : mid * (1 - slippage));
-
-    const res = await sdk.exchange.placeOrder({
-      coin,
-      is_buy: isBuy,
-      sz: size,
-      limit_px: px,
-      order_type: { limit: { tif: 'Ioc' } },
-      reduce_only: reduceOnly
+    // Serializzato per master. NB: i market order NON vengono ritentati
+    // automaticamente (un reinvio rischierebbe una doppia esecuzione): l'errore
+    // si propaga e viene gestito dal chiamante.
+    return execQueue.run(masterAddress, async () => {
+      const mid = await this.getMid(coin, network);
+      if (!mid) throw new Error(`Prezzo non disponibile per ${coin}`);
+      const px = this.roundPx(isBuy ? mid * (1 + slippage) : mid * (1 - slippage));
+      const res = await sdk.exchange.placeOrder({
+        coin,
+        is_buy: isBuy,
+        sz: size,
+        limit_px: px,
+        order_type: { limit: { tif: 'Ioc' } },
+        reduce_only: reduceOnly
+      });
+      logger.info('⚡ Ordine market inviato', { coin, isBuy, size, px });
+      return this._parseOrderResult(res);
     });
-    logger.info('⚡ Ordine market inviato', { coin, isBuy, size, px });
-    return this._parseOrderResult(res);
   }
 
   /**
@@ -338,21 +368,23 @@ class HyperliquidClient {
   async placeTriggerOrder({ masterAddress, coin, isBuy, size, triggerPx, tpsl }, network = this.network) {
     const sdk = await this.getSignSdk(masterAddress, network);
     const px = this.roundPx(triggerPx);
-    const res = await sdk.exchange.placeOrder({
-      coin,
-      is_buy: isBuy,
-      sz: size,
-      limit_px: px,
-      order_type: { trigger: { isMarket: true, triggerPx: px, tpsl } },
-      reduce_only: true
+    return execQueue.run(masterAddress, async () => {
+      const res = await sdk.exchange.placeOrder({
+        coin,
+        is_buy: isBuy,
+        sz: size,
+        limit_px: px,
+        order_type: { trigger: { isMarket: true, triggerPx: px, tpsl } },
+        reduce_only: true
+      });
+      logger.info(`🎯 Ordine ${tpsl.toUpperCase()} inviato`, { coin, triggerPx: px, size });
+      return this._parseOrderResult(res);
     });
-    logger.info(`🎯 Ordine ${tpsl.toUpperCase()} inviato`, { coin, triggerPx: px, size });
-    return this._parseOrderResult(res);
   }
 
   async cancelOrder({ masterAddress, coin, oid }, network = this.network) {
     const sdk = await this.getSignSdk(masterAddress, network);
-    return sdk.exchange.cancelOrder({ coin, o: oid });
+    return execQueue.run(masterAddress, () => sdk.exchange.cancelOrder({ coin, o: oid }));
   }
 
   /** Chiude completamente una posizione con un market reduce-only. */

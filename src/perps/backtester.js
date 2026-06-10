@@ -18,6 +18,7 @@
 
 import strategyEngine from './strategyEngine.js';
 import riskManager from './riskManager.js';
+import * as ind from './indicators.js';
 import client from './hyperliquidClient.js';
 
 const DAY_MS = 86400000;
@@ -127,9 +128,19 @@ export async function runBacktest(config, coin, opts = {}) {
     state = null;
   };
 
+  // Precalcola UNA volta le serie degli indicatori (O(N) invece di O(N²)).
+  const series = ind.precomputeSeries(C, [config.entryRules, config.exitRules]);
+  const precomputedAt = (i) => {
+    if (!series.size) return undefined;
+    const out = {};
+    for (const [key, arr] of series) out[key] = arr[i];
+    return out;
+  };
+
   for (let i = warmup; i < C.length; i++) {
     const candle = C[i];
-    const snapshot = { coin, price: candle.c, candles: C.slice(0, i + 1), funding: null };
+    // candles non più "sliced" per barra: gli indicatori arrivano precalcolati.
+    const snapshot = { coin, price: candle.c, candles: C, funding: null, precomputed: precomputedAt(i) };
 
     if (state) {
       // 1) TP/SL intrabar

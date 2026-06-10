@@ -53,6 +53,68 @@ export function bollinger(candles, { period = 20, stdDev = 2 } = {}) {
   return out.length ? out[out.length - 1] : null; // { lower, middle, upper, pb }
 }
 
+// ---- Serie complete (per il backtester vettorializzato) ----
+//
+// Gli indicatori usati sono CAUSALI: il valore alla barra i calcolato sull'intera
+// serie coincide con quello calcolato sul prefisso [0..i]. Quindi precalcolando
+// la serie UNA volta e allineandola a destra otteniamo gli stessi identici valori
+// del ricalcolo per-candela, ma in O(N) invece di O(N²).
+
+/** Allinea a destra l'output di un indicatore sull'array dei valori. */
+function alignRight(len, out) {
+  const offset = len - out.length;
+  const aligned = new Array(len).fill(null);
+  for (let i = offset; i < len; i++) aligned[i] = out[i - offset];
+  return aligned;
+}
+
+/** Chiave stabile per identificare l'indicatore di una regola (cache/precompute). */
+export function ruleKey(rule) {
+  const p = rule.period;
+  switch (rule.indicator) {
+    case 'rsi': return `rsi:${p || 14}`;
+    case 'ema': return `ema:${p || 20}`;
+    case 'sma': return `sma:${p || 20}`;
+    case 'macd': { const { fast = 12, slow = 26, signal = 9 } = rule.params || {}; return `macd:${fast}-${slow}-${signal}`; }
+    case 'bollinger': { const { period = 20, stdDev = 2 } = rule.params || {}; return `bb:${period}-${stdDev}`; }
+    default: return `?:${rule.indicator}`;
+  }
+}
+
+/**
+ * Precalcola le serie complete (index-aligned) per tutte le regole indicator di
+ * entry+exit. Ritorna una Map chiave→array[len] (valori o null in warmup).
+ */
+export function precomputeSeries(candles, ruleSets = []) {
+  const values = closes(candles);
+  const len = candles.length;
+  const series = new Map();
+  const rules = [].concat(...ruleSets).filter(r => r && r.type === 'indicator');
+  for (const rule of rules) {
+    const key = ruleKey(rule);
+    if (series.has(key)) continue;
+    let out;
+    switch (rule.indicator) {
+      case 'rsi': out = RSI.calculate({ period: rule.period || 14, values }); break;
+      case 'ema': out = EMA.calculate({ period: rule.period || 20, values }); break;
+      case 'sma': out = SMA.calculate({ period: rule.period || 20, values }); break;
+      case 'macd': {
+        const { fast = 12, slow = 26, signal = 9 } = rule.params || {};
+        out = MACD.calculate({ values, fastPeriod: fast, slowPeriod: slow, signalPeriod: signal, SimpleMAOscillator: false, SimpleMASignalLine: false });
+        break;
+      }
+      case 'bollinger': {
+        const { period = 20, stdDev = 2 } = rule.params || {};
+        out = BollingerBands.calculate({ period, stdDev, values });
+        break;
+      }
+      default: continue;
+    }
+    series.set(key, alignRight(len, out || []));
+  }
+  return series;
+}
+
 /**
  * Calcola un set di indicatori richiesti da una lista di regole.
  * Ritorna una mappa nome->valore (per logging/diagnostica).

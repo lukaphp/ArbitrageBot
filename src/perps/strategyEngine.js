@@ -69,20 +69,23 @@ class StrategyEngine {
 
       case 'indicator': {
         const period = rule.period;
+        // Se il backtester ha precalcolato le serie, leggi il valore alla barra
+        // corrente (O(1)) invece di ricalcolare l'indicatore sull'intero prefisso.
+        const pre = ctx.precomputed ? ctx.precomputed[ind.ruleKey(rule)] : undefined;
         let val = null;
         switch (rule.indicator) {
-          case 'rsi': val = ind.rsi(candles, period || 14); break;
-          case 'ema': val = ind.ema(candles, period || 20); break;
-          case 'sma': val = ind.sma(candles, period || 20); break;
+          case 'rsi': val = pre !== undefined ? pre : ind.rsi(candles, period || 14); break;
+          case 'ema': val = pre !== undefined ? pre : ind.ema(candles, period || 20); break;
+          case 'sma': val = pre !== undefined ? pre : ind.sma(candles, period || 20); break;
           case 'macd': {
-            const m = ind.macd(candles, rule.params);
+            const m = pre !== undefined ? pre : ind.macd(candles, rule.params);
             if (!m) return { match: false, signal: rule.signal };
             // cond: 'bullish' (hist>0) | 'bearish' (hist<0)
             const match = rule.cond === 'bearish' ? m.histogram < 0 : m.histogram > 0;
             return { match, signal: rule.signal };
           }
           case 'bollinger': {
-            const b = ind.bollinger(candles, rule.params);
+            const b = pre !== undefined ? pre : ind.bollinger(candles, rule.params);
             if (!b) return { match: false, signal: rule.signal };
             const match = rule.cond === 'above_upper' ? price > b.upper : price < b.lower;
             return { match, signal: rule.signal };
@@ -111,7 +114,8 @@ class StrategyEngine {
       price: snapshot.price,
       candles: snapshot.candles,
       funding: snapshot.funding ?? null,
-      external: this._consumeExternal(snapshot.coin)
+      external: this._consumeExternal(snapshot.coin),
+      precomputed: snapshot.precomputed // valori indicatori già pronti (backtest)
     };
 
     // --- In posizione: valuta le regole di uscita ---

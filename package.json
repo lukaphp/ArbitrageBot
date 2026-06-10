@@ -13,6 +13,8 @@
     "test": "node --test test/*.test.js",
     "test:smoke": "node test-bot.js",
     "lint": "node scripts/lint-syntax.js",
+    "restart": "bash scripts/restart.sh",
+    "stop": "bash scripts/restart.sh stop",
     "web": "npm run build && npm start"
   },
   "keywords": [

@@ -10,7 +10,9 @@
     "cli": "node src/index.js",
     "build": "mkdir -p dist && cp -r public dist/ && echo 'Build completato'",
     "setup": "node setup.js",
-    "test": "node test-bot.js",
+    "test": "node --test test/*.test.js",
+    "test:smoke": "node test-bot.js",
+    "lint": "node scripts/lint-syntax.js",
     "web": "npm run build && npm start"
   },
   "keywords": [

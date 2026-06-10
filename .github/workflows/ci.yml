@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [master, 'feat/**']
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (syntax)
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+        env:
+          # Chiave di sviluppo per i test che toccano la cifratura (no segreti reali).
+          AGENT_ENCRYPTION_KEY: ci-test-encryption-key-at-least-32-chars

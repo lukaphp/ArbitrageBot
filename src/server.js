@@ -50,6 +50,14 @@ import predictor from './perps/predictor.js';
 import telegramControl from './perps/telegramControl.js';
 import { runBacktest } from './perps/backtester.js';
 
+// Polyfill globale per la serializzazione di BigInt in JSON (Express, Socket.IO, logger)
+if (typeof BigInt.prototype.toJSON !== 'function') {
+  BigInt.prototype.toJSON = function () {
+    const num = Number(this);
+    return Number.isSafeInteger(num) ? num : this.toString();
+  };
+}
+
 // Sistema agentico (backbone + Analyst AI)
 import agentRuntime from './agents/runtime.js';
 import analyst from './agents/analyst/analyst.js';

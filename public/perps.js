@@ -1,3 +1,10 @@
+if (typeof BigInt.prototype.toJSON !== 'function') {
+  BigInt.prototype.toJSON = function () {
+    const num = Number(this);
+    return Number.isSafeInteger(num) ? num : this.toString();
+  };
+}
+
 /**
  * PERPS TRADING UI (Hyperliquid)
  * ==============================
@@ -2047,10 +2054,15 @@ class PerpsApp {
 const perps = new PerpsApp();
 window.perps = perps;
 
-// Aggiorna il prezzo mostrato quando cambia il mercato selezionato
+// Aggiorna il prezzo mostrato quando cambia il mercato selezionato e inizializza la vista Perps
 document.addEventListener('DOMContentLoaded', () => {
   const sel = document.getElementById('orderMarket');
   if (sel) sel.addEventListener('change', () => perps._updateMid());
   const botSel = document.getElementById('botMarket');
   if (botSel) botSel.addEventListener('change', () => perps._updateConsultant());
+
+  // Inizializza l'applicazione e registra gli eventi dei tab della cockpit se la vista attiva è Perps
+  if (!document.getElementById('view-perps')?.classList.contains('hidden')) {
+    perps.onShow();
+  }
 });

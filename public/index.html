@@ -15,7 +15,7 @@
     <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
-<body>
+<body class="cockpit-mode">
     <!-- Header -->
     <header class="header">
         <div class="container">
@@ -247,7 +247,7 @@
             </div><!-- /view-arbitrage -->
 
             <!-- ====================== VISTA PERPS ====================== -->
-            <div id="view-perps" class="hidden">
+            <div id="view-perps">
 
                 <nav class="cockpit-tabs" aria-label="Cockpit sections" role="tablist">
                     <button class="cockpit-tab" id="cockpit-tab-dashboard" type="button" role="tab" aria-selected="true" aria-controls="cockpit-panel-dashboard" onclick="perps.switchCockpitTab('dashboard')">DASHBOARD</button>

@@ -1,3 +1,10 @@
+if (typeof BigInt.prototype.toJSON !== 'function') {
+  BigInt.prototype.toJSON = function () {
+    const num = Number(this);
+    return Number.isSafeInteger(num) ? num : this.toString();
+  };
+}
+
 // Arbitrage Bot Web App
 class ArbitrageBotApp {
     constructor() {

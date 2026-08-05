@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📖 Manuale Utente & Guida Completa - ArbitrageBot Perps</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-main: #0b0f19;
+            --bg-card: #131b2e;
+            --bg-card-hover: #1c273e;
+            --border-color: #202d46;
+            --border-accent: #2c3e60;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-green: #10b981;
+            --accent-green-glow: rgba(16, 185, 129, 0.15);
+            --accent-indigo: #6366f1;
+            --accent-indigo-glow: rgba(99, 102, 241, 0.15);
+            --accent-red: #f43f5e;
+            --accent-red-glow: rgba(244, 63, 94, 0.15);
+            --accent-amber: #f59e0b;
+            --accent-amber-glow: rgba(245, 158, 11, 0.15);
+            --sidebar-width: 280px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-main);
+            color: var(--text-primary);
+            line-height: 1.6;
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* Sidebar Navigation */
+        .sidebar {
+            width: var(--sidebar-width);
+            background: var(--bg-card);
+            border-right: 1px solid var(--border-color);
+            position: fixed;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            overflow-y: auto;
+            padding: 24px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            z-index: 100;
+        }
+
+        .sidebar-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .sidebar-brand h2 {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .sidebar-brand span {
+            font-size: 0.75rem;
+            background: var(--accent-indigo-glow);
+            color: var(--accent-indigo);
+            padding: 2px 8px;
+            border-radius: 12px;
+            border: 1px solid var(--accent-indigo);
+        }
+
+        .search-box {
+            position: relative;
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 8px 12px 8px 34px;
+            background: var(--bg-main);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 0.85rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .search-box input:focus {
+            border-color: var(--accent-indigo);
+        }
+
+        .search-box::before {
+            content: "🔍";
+            position: absolute;
+            left: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 0.8rem;
+            opacity: 0.6;
+        }
+
+        .nav-menu {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .nav-section-title {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            font-weight: 700;
+            margin: 12px 8px 4px 8px;
+        }
+
+        .nav-item a {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.88rem;
+            font-weight: 500;
+            border-radius: 6px;
+            transition: all 0.15s ease;
+        }
+
+        .nav-item a:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+
+        .nav-item a.active {
+            background: var(--accent-indigo-glow);
+            color: #818cf8;
+            border-left: 3px solid var(--accent-indigo);
+        }
+
+        /* Main Content Container */
+        .main-container {
+            margin-left: var(--sidebar-width);
+            flex: 1;
+            padding: 40px 60px;
+            max-width: 1200px;
+        }
+
+        header.doc-header {
+            margin-bottom: 40px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .doc-header h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, #fff 0%, #94a3b8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .doc-header p {
+            color: var(--text-secondary);
+            font-size: 1.05rem;
+        }
+
+        .badge-row {
+            display: flex;
+            gap: 10px;
+            margin-top: 14px;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 6px;
+        }
+
+        .badge-green { background: var(--accent-green-glow); color: var(--accent-green); border: 1px solid rgba(16, 185, 129, 0.3); }
+        .badge-indigo { background: var(--accent-indigo-glow); color: var(--accent-indigo); border: 1px solid rgba(99, 102, 241, 0.3); }
+        .badge-amber { background: var(--accent-amber-glow); color: var(--accent-amber); border: 1px solid rgba(245, 158, 11, 0.3); }
+
+        /* Sections & Content Cards */
+        section.doc-section {
+            margin-bottom: 50px;
+            scroll-margin-top: 30px;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .section-header h2 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+
+        .card h3 {
+            font-size: 1.15rem;
+            font-weight: 600;
+            color: #e2e8f0;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .card p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-bottom: 14px;
+        }
+
+        /* Feature Grid */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 20px;
+        }
+
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 16px;
+        }
+
+        /* Key-Value Tables & Lists */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+            font-size: 0.9rem;
+        }
+
+        .feature-table th {
+            text-align: left;
+            padding: 10px 14px;
+            background: rgba(255,255,255,0.03);
+            color: var(--text-muted);
+            font-weight: 600;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .feature-table td {
+            padding: 12px 14px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            color: var(--text-secondary);
+            vertical-align: top;
+        }
+
+        .feature-table td strong {
+            color: var(--text-primary);
+        }
+
+        .ui-element {
+            display: inline-block;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.82rem;
+            background: rgba(255, 255, 255, 0.07);
+            color: #cbd5e1;
+            padding: 2px 8px;
+            border-radius: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+
+        .btn-demo {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 6px;
+            text-transform: uppercase;
+        }
+
+        .btn-demo-primary { background: #6366f1; color: white; }
+        .btn-demo-success { background: #10b981; color: white; }
+        .btn-demo-danger { background: #f43f5e; color: white; }
+        .btn-demo-outline { border: 1px solid var(--border-accent); color: var(--text-primary); }
+
+        /* Alerts & Callouts */
+        .alert {
+            padding: 16px;
+            border-radius: 8px;
+            margin: 16px 0;
+            display: flex;
+            gap: 12px;
+            font-size: 0.92rem;
+        }
+
+        .alert-info { background: var(--accent-indigo-glow); border: 1px solid rgba(99, 102, 241, 0.3); color: #c7d2fe; }
+        .alert-warning { background: var(--accent-amber-glow); border: 1px solid rgba(245, 158, 11, 0.3); color: #fde68a; }
+        .alert-danger { background: var(--accent-red-glow); border: 1px solid rgba(244, 63, 94, 0.3); color: #fecdd3; }
+
+        .alert-icon { font-size: 1.2rem; flex-shrink: 0; }
+
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85em;
+            background: rgba(0,0,0,0.3);
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #f472b6;
+        }
+
+        /* Footer */
+        footer.doc-footer {
+            margin-top: 60px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        @media (max-width: 900px) {
+            .sidebar {
+                display: none;
+            }
+            .main-container {
+                margin-left: 0;
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar Navigation -->
+    <nav class="sidebar" aria-label="Sommario della guida">
+        <div class="sidebar-brand">
+            <h2>🤖 ArbitrageBot</h2>
+            <span>v2.5</span>
+        </div>
+
+        <div class="search-box">
+            <input type="text" id="manualSearch" placeholder="Cerca funzioni, pulsanti, errori..." oninput="filterManual()">
+        </div>
+
+        <ul class="nav-menu">
+            <li class="nav-section-title">Panoramica</li>
+            <li class="nav-item"><a href="#intro" class="active">🚀 Introduzione & Architettura</a></li>
+            <li class="nav-item"><a href="#wallet">🦊 MetaMask & Agent Wallet</a></li>
+
+            <li class="nav-section-title">Interfaccia Cockpit</li>
+            <li class="nav-item"><a href="#tab-dashboard">📊 Tab Dashboard</a></li>
+            <li class="nav-item"><a href="#tab-execution">⚡ Tab Execution (Ordini)</a></li>
+            <li class="nav-item"><a href="#tab-positions">📈 Tab Positions (Posizioni)</a></li>
+            <li class="nav-item"><a href="#tab-risk">🛡️ Tab Risk & Alerts</a></li>
+            <li class="nav-item"><a href="#tab-system">⚙️ Tab System & AI Agent</a></li>
+
+            <li class="nav-section-title">Strategie & AI</li>
+            <li class="nav-item"><a href="#indicators">📐 Indicatori Tecnici (RSI, EMA, ATR)</a></li>
+            <li class="nav-item"><a href="#analyst-ai">🧠 Analyst AI & Auto-Pilot</a></li>
+
+            <li class="nav-section-title">Integrazioni & FAQ</li>
+            <li class="nav-item"><a href="#telegram">📱 Controllo Telegram</a></li>
+            <li class="nav-item"><a href="#faq">❓ domande Frequenti & Troubleshooting</a></li>
+        </ul>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-container">
+
+        <header class="doc-header">
+            <h1>📖 Manuale Utente Completo</h1>
+            <p>Guida interattiva all'uso di ArbitrageBot Perps Trading Platform: spiegazione dettagliata di ogni interfaccia, pulsante, indicatore di rischio e automazione AI.</p>
+            <div class="badge-row">
+                <span class="badge badge-green">🟢 Hyperliquid DEX Live</span>
+                <span class="badge badge-indigo">⚡ Auto-Pilot 24/7 EIP-712</span>
+                <span class="badge badge-amber">🛡️ Risk Engine & Protection</span>
+            </div>
+        </header>
+
+        <!-- INTRODUZIONE -->
+        <section id="intro" class="doc-section">
+            <div class="section-header">
+                <h2>🚀 Introduzione & Architettura</h2>
+            </div>
+            
+            <div class="card">
+                <h3>Cos'è ArbitrageBot Perps?</h3>
+                <p><strong>ArbitrageBot</strong> è una piattaforma avanzata per il trading autonomo e manuale di contratti Futures Perpetui (Perps) integrata con il protocollo decentralizzato <strong>Hyperliquid DEX</strong>. Consente di monitorare in tempo reale i prezzi di mercato, calcolare ed eseguire posizioni Long/Short con leva finanziaria, impostare stop automatici dinamici (ATR Trailing Stop) e sfruttare agenti di Intelligenza Artificiale per l'ottimizzazione e l'auto-pilotaggio 24/7.</p>
+                
+                <div class="grid-2">
+                    <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
+                        <h4 style="color: var(--accent-green); margin-bottom: 6px;">🌐 Dati di Mercato Reali (Live)</h4>
+                        <p style="font-size: 0.88rem; margin: 0;">I dati di ordine, book, prezzi Mid, candele storiche e tassi di funding sono integrati in tempo reale con le API trasparenti di Hyperliquid (Testnet o Mainnet).</p>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
+                        <h4 style="color: var(--accent-indigo); margin-bottom: 6px;">🔒 Sicurezza Non-Custodial</h4>
+                        <p style="font-size: 0.88rem; margin: 0;">Le tue chiavi private principali non lasciano mai MetaMask. Il trading 24/7 utilizza un <em>Agent Wallet</em> dedicato con permessi di solo trading (impossibilitato a prelevare fondi).</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- WALLET & ACCOUNT -->
+        <section id="wallet" class="doc-section">
+            <div class="section-header">
+                <h2>🦊 MetaMask & Agent Wallet</h2>
+            </div>
+
+            <div class="card">
+                <h3>Connessione e Autenticazione EIP-712</h3>
+                <p>Per interagire con la piattaforma occorre connettere il proprio wallet Web3 e abilitare l'Agent Wallet per il trading automatico.</p>
+
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Elemento UI</th>
+                            <th>Azione / Funzione</th>
+                            <th>Descrizione Dettagliata</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-primary">🦊 Connetti MetaMask</span></td>
+                            <td>Connessione Wallet Master</td>
+                            <td>Stabilisce la connessione con l'estensione MetaMask per identificare il wallet titolare dei fondi.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">⚡ Abilita Trading Autonomo</span></td>
+                            <td>Firma EIP-712 Agent Wallet</td>
+                            <td>Genera una coppia di chiavi agent e richiede una singola firma EIP-712 (<code>approveAgent</code>). Questa autorizza l'Agent Wallet a inviare ordini in background senza richiedere un popup MetaMask per ogni operazione.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">ACCOUNT UNIFICATO (USDC)</span></td>
+                            <td>Collaterale Flessibile</td>
+                            <td>Hyperliquid supporta l'account unificato: gli USDC presenti nel tuo portafoglio Spot fungono direttamente da margine per il trading dei Perps.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-outline">🔄 Trasferisci USDC a Perp</span></td>
+                            <td>Trasferimento Interno</td>
+                            <td>Permette di spostare USDC dal saldo Spot al saldo Perp (e viceversa) tramite firma typed data.</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">💡</span>
+                    <div>
+                        <strong>Garanzia di Sicurezza Hyperliquid:</strong> La firma <code>approveAgent</code> concede l'autorizzazione ESCLUSIVAMENTE ad aprire, modificare o chiudere posizioni. L'Agent Wallet non possiede il permesso di ritirare o trasferire fondi all'esterno.
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- COCKPIT DASHBOARD -->
+        <section id="tab-dashboard" class="doc-section">
+            <div class="section-header">
+                <h2>📊 Tab Dashboard</h2>
+            </div>
+
+            <div class="card">
+                <h3>Panoramica Generale delle Performance e dello Stato</h3>
+                <p>La vista Dashboard offre un quadro immediato dell'andamento del capitale, delle posizioni aperte e degli indicatori sintetici.</p>
+
+                <div class="grid-2" style="margin-bottom: 16px;">
+                    <div style="background: rgba(255,255,255,0.02); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
+                        <h4>📈 Grafico Equity & Performance</h4>
+                        <p style="font-size: 0.88rem;">Mostra l'evoluzione temporale del valore del tuo conto (Equity in USD) aggiornato in tempo reale tramite campionamenti periodici.</p>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.02); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
+                        <h4>⚠️ Indicatori Sintetici di Rischio</h4>
+                        <p style="font-size: 0.88rem;">Visualizza il Livello di Rischio attuale, la percentuale di Margine Utilizzato e gli Alert attivi sul portafoglio.</p>
+                    </div>
+                </div>
+
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Metrica / Widget</th>
+                            <th>Significato</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="ui-element">EQUITY</span></td>
+                            <td>Valore totale del conto (Capitale depositato + PnL non realizzato delle posizioni aperte).</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">UNREALIZED PnL</span></td>
+                            <td>Profitto o perdita potenziale complessiva sulle posizioni attualmente aperte in mercato.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">MARGIN USED</span></td>
+                            <td>Ammontare di capitale attualmente bloccato a garanzia delle posizioni attive.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">ALERTS BADGE</span></td>
+                            <td>Contatore in tempo reale delle avvertenze di rischio (es. margine elevato, perdita giornaliera, feed disconnessi). Cliccando sul badge si viene reindirizzati al tab Risk.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- COCKPIT EXECUTION -->
+        <section id="tab-execution" class="doc-section">
+            <div class="section-header">
+                <h2>⚡ Tab Execution (Impostazione ed Esecuzione Ordini)</h2>
+            </div>
+
+            <div class="card">
+                <h3>Form Ordine Manuale & Parametri Avanzati</h3>
+                <p>Nel tab Execution puoi inserire manualmente ordini di acquisto/vendita sui contratti perp supportati (es. SOL-PERP, BTC-PERP, ETH-PERP).</p>
+
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Campo / Controllo UI</th>
+                            <th>Tipo Input</th>
+                            <th>Descrizione & Utilizzo</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="ui-element">Order Market</span></td>
+                            <td>Dropdown Select</td>
+                            <td>Seleziona l'asset su cui fare trading (es. SOL-PERP). Mostra accanto il prezzo <em>MID</em> attuale di mercato.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Order Type</span></td>
+                            <td>Select</td>
+                            <td>Scegli tra <strong>Market</strong> (esecuzione immediata al prezzo corrente) o <strong>Limit</strong> (ordine pendente a un prezzo specifico).</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Leverage (Leva)</span></td>
+                            <td>Slider / Number</td>
+                            <td>Imposta la leva finanziaria da 1x a 20x. La leva moltiplica la dimensione del notionale a parità di margine.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Margin (USD)</span></td>
+                            <td>Number Input</td>
+                            <td>Importo in dollari da allocare per la singola operazione. Il notionale finale equivale a: <code>Margine × Leva</code>.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Take Profit (TP)</span></td>
+                            <td>Number Input</td>
+                            <td>Prezzo obiettivo al raggiungimento del quale la posizione verrà automaticamente chiusa in guadagno.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Stop Loss (SL)</span></td>
+                            <td>Number Input</td>
+                            <td>Prezzo limite di sicurezza oltre il quale la posizione viene liquidata in perdita per salvaguardare il saldo.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">ATR Trailing Stop</span></td>
+                            <td>Checkbox + Multiplier</td>
+                            <td>Abilita uno Stop Loss dinamico basato sull'Average True Range. Lo stop si sposta automaticamente a favore del trend mantenendo una distanza proporzionale alla volatilità.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-success">🟢 LONG (BUY)</span></td>
+                            <td>Button Action</td>
+                            <td>Apre una posizione rialzista: ottieni un profitto se il prezzo dell'asset aumenta.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-danger">🔴 SHORT (SELL)</span></td>
+                            <td>Button Action</td>
+                            <td>Apre una posizione ribassista: ottieni un profitto se il prezzo dell'asset diminuisce.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- COCKPIT POSITIONS -->
+        <section id="tab-positions" class="doc-section">
+            <div class="section-header">
+                <h2>📈 Tab Positions (Gestione Posizioni Attive)</h2>
+            </div>
+
+            <div class="card">
+                <h3>Monitoraggio e Chiusura delle Posizioni Aperte</h3>
+                <p>Elenca tutte le posizioni attualmente aperte nel tuo account Hyperliquid, evidenziando PnL percentuale, prezzo d'ingresso e opzioni di chiusura rapida.</p>
+
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Colonna / Elemento</th>
+                            <th>Descrizione</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="ui-element">Coin & Direction</span></td>
+                            <td>Simbolo dell'asset e direzione (LONG o SHORT con badge colorato verde/rosso).</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Size & Notional</span></td>
+                            <td>Dimensione della posizione espressa in numero di token e valore equivalente in USD.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Entry Price</span></td>
+                            <td>Prezzo medio di carico a cui è stata aperta la posizione.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Mark Price</span></td>
+                            <td>Prezzo corrente stimato del contratto per il calcolo del PnL non realizzato.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">PnL (USD & %)</span></td>
+                            <td>Rendimento attuale in dollari e percentuale sul margine investito.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-danger">Chiudi Posizione</span></td>
+                            <td>Invia un ordine Market contrario della medesima dimensione per chiudere istantaneamente la posizione ed azzerare l'esposizione.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- COCKPIT RISK & ALERTS -->
+        <section id="tab-risk" class="doc-section">
+            <div class="section-header">
+                <h2>🛡️ Tab Risk & Alerts (Protezione Capitale e Gestione Rischio)</h2>
+            </div>
+
+            <div class="card">
+                <h3>Motore di Controllo del Rischio Integrato</h3>
+                <p>ArbitrageBot è dotato di un sistema multilivello per preservare il saldo da perdite incontrollate, drawdown severi o malfunzionamenti di rete.</p>
+
+                <div class="alert alert-warning">
+                    <span class="alert-icon">⚠️</span>
+                    <div>
+                        <strong>Regole di Protezione Attive:</strong>
+                        <ul style="margin-left: 20px; margin-top: 4px;">
+                            <li><strong>Max Daily Loss (Perdita Massima Giornaliera):</strong> Raggiunto il limite stabilito (es. $50/giorno), il sistema blocca automaticamente l'apertura di nuovi bot o ordini manuali per 24 ore.</li>
+                            <li><strong>Max Drawdown Peak:</strong> Monitora la distanza dal picco massimo di equity raggiunto nella sessione.</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Controllo UI / Azione</th>
+                            <th>Funzione</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="ui-element">Risk Score Gauge</span></td>
+                            <td>Valutazione sintetica del livello di rischio complessivo da 0 (Basso) a 100 (Critico).</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Limiti di Portafoglio</span></td>
+                            <td>Pannello di configurazione dove impostare <em>Max Position Size</em>, <em>Max Combined Leverage</em> e <em>Max Daily Loss</em>.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-danger">🛑 KILL-SWITCH DI EMERGENZA</span></td>
+                            <td>Interruttore prioritario che arresta istantaneamente tutti i bot automatici e blocca qualsiasi nuova operazione. Opzionalmente può chiudere a mercato tutte le posizioni aperte.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- SYSTEM & BOTS -->
+        <section id="tab-system" class="doc-section">
+            <div class="section-header">
+                <h2>⚙️ Tab System, Auto-Pilot & AI Agent</h2>
+            </div>
+
+            <div class="card">
+                <h3>Bot Automatici e Integrazione Analyst AI</h3>
+                <p>Questa sezione consente di creare, configurare ed avviare Bot di Trading autonomi basati su strategie tecniche o guidati dall'Analyst AI.</p>
+
+                <div class="grid-2">
+                    <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
+                        <h4>🤖 Bot di Trading Custom</h4>
+                        <p style="font-size: 0.88rem;">Puoi creare un bot personalizzato combinando regole di ingresso (es. RSI &lt; 30, EMA Cross) e regole di uscita collegate a Stop Loss e Take Profit.</p>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
+                        <h4>🧠 Analyst AI (Proposte Strategiche)</h4>
+                        <p style="font-size: 0.88rem;">L'agente AI analizza la struttura del mercato e propone strategie complete corredate di backtest, Sharpe ratio, win rate e stima dei costi.</p>
+                    </div>
+                </div>
+
+                <table class="feature-table" style="margin-top: 16px;">
+                    <thead>
+                        <tr>
+                            <th>Azione Bot</th>
+                            <th>Descrizione</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-success">▶️ Avvia Bot</span></td>
+                            <td>Mette in esecuzione il bot: l'agente monitorerà le candele a ogni intervallo ed eseguirà automaticamente ordini in base alle regole definite.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-outline">⏸️ Pausa / Stop</span></td>
+                            <td>Sospende il monitoraggio del bot senza cancellarne la configurazione.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-primary">⚙️ Ottimizza Parametri</span></td>
+                            <td>Esegue uno studio Walk-Forward Optimization (In-Sample / Out-of-Sample) per trovare i parametri di indicatori più performanti ed evitare l'overfitting.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- INDICATORI TECNICI -->
+        <section id="indicators" class="doc-section">
+            <div class="section-header">
+                <h2>📐 Indicatori Tecnici Spiegati</h2>
+            </div>
+
+            <div class="card">
+                <div class="grid-2">
+                    <div>
+                        <h4 style="color: var(--accent-indigo);">RSI (Relative Strength Index)</h4>
+                        <p style="font-size: 0.88rem;">Oscillatore di momentum tra 0 e 100. Valori sotto 30 indicano zona di <em>Ipervenduto</em> (opportunità di acquisto/Long), mentre valori sopra 70 indicano <em>Ipercomprato</em> (opportunità di vendita/Short).</p>
+                    </div>
+                    <div>
+                        <h4 style="color: var(--accent-green);">EMA / SMA (Medie Mobili)</h4>
+                        <p style="font-size: 0.88rem;">Calcolano la media ponderata o semplice dei prezzi su N periodi. Il crossover di una media veloce (es. EMA 9) sopra una lenta (es. EMA 21) genera un segnale di trend rialzista.</p>
+                    </div>
+                    <div>
+                        <h4 style="color: var(--accent-amber);">ADX (Average Directional Index)</h4>
+                        <p style="font-size: 0.88rem;">Misura la forza di un trend indipendentemente dalla sua direzione. Un ADX superiore a 25 indica un trend solido in corso, utile per filtrare i falsi segnali in fasi laterali.</p>
+                    </div>
+                    <div>
+                        <h4 style="color: var(--accent-red);">ATR (Average True Range)</h4>
+                        <p style="font-size: 0.88rem;">Misura la volatilità assoluta del mercato. Utilizzato dal bot per adattare la ampiezza dello Stop Loss e del Trailing Stop in modo proporzionale ai movimenti dell'asset.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TELEGRAM -->
+        <section id="telegram" class="doc-section">
+            <div class="section-header">
+                <h2>📱 Integrazione & Controllo via Telegram</h2>
+            </div>
+
+            <div class="card">
+                <h3>Ricevi Notifiche e Controlla il Bot via Chat</h3>
+                <p>Impostando il <code>TELEGRAM_BOT_TOKEN</code> e <code>TELEGRAM_CHAT_ID</code> nel file di configurazione, il bot invierà notifiche istantanee per ogni operazione eseguita e risponderà ai tuoi comandi.</p>
+
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Comando Telegram</th>
+                            <th>Risposta del Bot</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>/status</code></td>
+                            <td>Restituisce lo stato corrente del server, l'equity aggiornata e l'elenco dei bot attivi.</td>
+                        </tr>
+                        <tr>
+                            <td><code>/positions</code></td>
+                            <td>Elenca le posizioni aperte in tempo reale con i relativi PnL non realizzati.</td>
+                        </tr>
+                        <tr>
+                            <td><code>/stopall</code></td>
+                            <td>Attiva istantaneamente il Kill-Switch fermando tutte le automazioni.</td>
+                        </tr>
+                        <tr>
+                            <td><code>/help</code></td>
+                            <td>Mostra il menu di aiuto con tutti i comandi supportati.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- FAQ & TROUBLESHOOTING -->
+        <section id="faq" class="doc-section">
+            <div class="section-header">
+                <h2>❓ Domande Frequenti (FAQ) & Troubleshooting</h2>
+            </div>
+
+            <div class="card">
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: var(--text-primary); margin-bottom: 6px;">Q: Perché vedo "Connetti MetaMask" se ho aperto l'applicazione?</h4>
+                    <p style="font-size: 0.9rem;">R: Fai clic sul pulsante <span class="btn-demo btn-demo-primary">🦊 Connetti MetaMask</span> in alto a destra. Per visualizzare saldi ed effettuare operazioni è necessario collegare il tuo indirizzo Ethereum/Arbitrum.</p>
+                </div>
+
+                <div style="margin-bottom: 20px;">
+                    <h4 style="color: var(--text-primary); margin-bottom: 6px;">Q: Cosa significa "Agent Wallet pending approvazione"?</h4>
+                    <p style="font-size: 0.9rem;">R: Significa che la chiave agent è stata generata in locale ma richiede la tua firma EIP-712 in MetaMask per consentire all'agente di inviare ordini in background per conto tuo.</p>
+                </div>
+
+                <div>
+                    <h4 style="color: var(--text-primary); margin-bottom: 6px;">Q: I miei fondi sono al sicuro in modalità Testnet / Mainnet?</h4>
+                    <p style="font-size: 0.9rem;">R: In modalità Testnet le operazioni avvengono su rete di prova senza l'uso di denaro reale. In modalità Mainnet viene utilizzato l'exchange reale Hyperliquid con fondi USDC depositati da te; l'agent wallet possiede permessi limitati esclusivamente all'apertura/chiusura delle posizioni.</p>
+                </div>
+            </div>
+        </section>
+
+        <footer class="doc-footer">
+            <div>🤖 <strong>ArbitrageBot Platform</strong> — Documentazione e Manuale Utente Ufficiale</div>
+            <div>Aggiornato: Agosto 2026 · Versione 2.5</div>
+        </footer>
+
+    </main>
+
+    <script>
+        function filterManual() {
+            const query = document.getElementById('manualSearch').value.toLowerCase();
+            const cards = document.querySelectorAll('.card, .doc-section');
+            cards.forEach(el => {
+                const text = el.textContent.toLowerCase();
+                if (text.includes(query)) {
+                    el.style.display = '';
+                } else {
+                    el.style.display = 'none';
+                }
+            });
+        }
+
+        // Active link highlight on scroll
+        window.addEventListener('scroll', () => {
+            const sections = document.querySelectorAll('section.doc-section');
+            const navItems = document.querySelectorAll('.nav-item a');
+            let current = '';
+
+            sections.forEach(section => {
+                const sectionTop = section.offsetTop - 100;
+                if (pageYOffset >= sectionTop) {
+                    current = section.getAttribute('id');
+                }
+            });
+
+            navItems.forEach(item => {
+                item.classList.remove('active');
+                if (item.getAttribute('href') === `#${current}`) {
+                    item.classList.add('active');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

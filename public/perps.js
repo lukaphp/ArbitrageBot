@@ -85,6 +85,14 @@ class PerpsApp {
     this.selStrategy = null;
     this.selRisk = 'moderato';
     this.posTab = 'open';
+    this.cockpitTab = 'dashboard';
+    this.dashboardChart = null;
+    this.dashboardSeries = null;
+    this.dashboardResizeObserver = null;
+    this.dashboardInitialized = false;
+    this.riskSnapshot = null;
+    this.riskRefreshInFlight = false;
+    this.riskTimer = null;
   }
 
   // ---- Helpers ----
@@ -123,6 +131,8 @@ class PerpsApp {
   // ---- Lifecycle ----
   async onShow() {
     if (!this.socket) this._initSocket();
+    this._initCockpitDashboard();
+    this.switchCockpitTab(this.cockpitTab || 'dashboard');
     await this.loadNetwork();
     await this.loadMarkets();
     await this.refreshAccount();
@@ -130,12 +140,18 @@ class PerpsApp {
     await this.loadPortfolio();
     await this.loadNotifications();
     await this.loadAgents();
+    await this.refreshRiskSnapshot();
     if (!this.accountTimer) {
       this.accountTimer = setInterval(() => {
         if (!document.getElementById('view-perps').classList.contains('hidden')) {
           this.refreshAccount();
         }
       }, 8000);
+    }
+    if (!this.riskTimer) {
+      this.riskTimer = setInterval(() => {
+        if (!document.getElementById('view-perps').classList.contains('hidden')) this.refreshRiskSnapshot();
+      }, 15000);
     }
     this.shown = true;
   }
@@ -144,10 +160,280 @@ class PerpsApp {
     this.socket = app?.socket || (window.io ? window.io() : null);
     if (!this.socket) return;
     this.socket.on('perps:price', (d) => { this.mids = d.mids || {}; this._updateMid(); });
-    this.socket.on('perps:botUpdate', (state) => this._updateBotCard(state));
-    this.socket.on('perps:agentStatus', () => this.refreshAccount());
-    this.socket.on('perps:position', () => { this.refreshAccount(); if (this.posTab === 'history') this.loadFills(); });
-    this.socket.on('perps:fill', () => { this.refreshAccount(); if (this.posTab === 'history') this.loadFills(); });
+    this.socket.on('perps:botUpdate', (state) => { this._updateBotCard(state); this.refreshRiskSnapshot(); });
+    this.socket.on('perps:agentStatus', () => { this.refreshAccount(); this.refreshRiskSnapshot(); });
+    this.socket.on('perps:position', () => { this.refreshAccount(); this.refreshRiskSnapshot(); if (this.posTab === 'history') this.loadFills(); });
+    this.socket.on('perps:fill', () => { this.refreshAccount(); this.refreshRiskSnapshot(); if (this.posTab === 'history') this.loadFills(); });
+  }
+
+  // ---- Cockpit dashboard ----
+  _initCockpitDashboard() {
+    if (this.dashboardInitialized) {
+      this._refreshCockpitDashboard();
+      return;
+    }
+    const chartEl = document.getElementById('cockpitChart');
+    if (chartEl && window.LightweightCharts) {
+      this.dashboardChart = LightweightCharts.createChart(chartEl, {
+        width: chartEl.clientWidth || 640,
+        height: Math.max(chartEl.clientHeight, 214),
+        layout: { background: { color: 'transparent' }, textColor: '#8b97a8', fontFamily: 'JetBrains Mono, monospace', fontSize: 11 },
+        grid: { vertLines: { color: '#1b2538' }, horzLines: { color: '#1b2538' } },
+        rightPriceScale: { borderColor: '#1b2538', minimumWidth: 64 },
+        timeScale: { borderColor: '#1b2538', timeVisible: true, secondsVisible: false },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal }
+      });
+      this.dashboardSeries = this.dashboardChart.addAreaSeries({
+        lineColor: '#26d07c', topColor: 'rgba(38, 208, 124, 0.24)', bottomColor: 'rgba(38, 208, 124, 0.02)',
+        lineWidth: 2, priceLineVisible: false, lastValueVisible: true
+      });
+      this.dashboardSeries.setData(this._dashboardEquityData());
+      this.dashboardChart.timeScale().fitContent();
+      if (window.ResizeObserver) {
+        this.dashboardResizeObserver = new ResizeObserver(() => {
+          if (!this.dashboardChart || !chartEl.clientWidth) return;
+          this.dashboardChart.resize(chartEl.clientWidth, Math.max(chartEl.clientHeight, 214));
+        });
+        this.dashboardResizeObserver.observe(chartEl);
+      }
+    }
+    this._bindCockpitDashboardEvents();
+    this.dashboardInitialized = true;
+    this._refreshCockpitDashboard();
+  }
+
+  _bindCockpitDashboardEvents() {
+    const headerAlerts = document.getElementById('cockpitHeaderAlerts');
+    if (headerAlerts) headerAlerts.addEventListener('click', () => this.switchCockpitTab('risk'));
+    const riskRefresh = document.getElementById('cockpitRiskRefresh');
+    if (riskRefresh) riskRefresh.addEventListener('click', () => this.refreshRiskSnapshot());
+    const riskAlerts = document.getElementById('cockpitRiskAlerts');
+    if (riskAlerts) riskAlerts.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-alert-action]');
+      if (button) this.switchCockpitTab(button.dataset.alertAction || 'risk');
+    });
+
+    const dashboardAlerts = document.getElementById('cockpitAlerts');
+    if (dashboardAlerts) dashboardAlerts.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-alert-action]');
+      if (button) this.switchCockpitTab(button.dataset.alertAction || 'risk');
+    });
+
+    document.querySelectorAll('.cockpit-tab').forEach((tab) => {
+      tab.addEventListener('click', () => this.switchCockpitTab(tab.id.replace('cockpit-tab-', '')));
+      tab.addEventListener('keydown', (event) => {
+        const tabs = [...document.querySelectorAll('.cockpit-tab')];
+        const index = tabs.indexOf(tab);
+        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+          event.preventDefault();
+          tabs[(index + 1) % tabs.length].focus();
+        }
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          tabs[(index - 1 + tabs.length) % tabs.length].focus();
+        }
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          this.switchCockpitTab(tab.id.replace('cockpit-tab-', ''));
+        }
+      });
+    });
+  }
+
+  switchCockpitTab(tab) {
+    const validTabs = ['dashboard', 'execution', 'positions', 'risk', 'system'];
+    const nextTab = validTabs.includes(tab) ? tab : 'dashboard';
+    this.cockpitTab = nextTab;
+    document.querySelectorAll('.cockpit-tab').forEach((button) => {
+      const isActive = button.id === `cockpit-tab-${nextTab}`;
+      button.setAttribute('aria-selected', String(isActive));
+      button.tabIndex = isActive ? 0 : -1;
+    });
+    validTabs.forEach((name) => {
+      const panel = document.getElementById(`cockpit-panel-${name}`);
+      if (panel) panel.hidden = name !== nextTab;
+    });
+    if (nextTab === 'dashboard') this._refreshCockpitDashboard();
+    if (nextTab === 'positions') this.refreshPositionsTab();
+    if (nextTab === 'risk') this.refreshRiskSnapshot();
+  }
+
+  async refreshRiskSnapshot() {
+    if (this.riskRefreshInFlight) return;
+    this.riskRefreshInFlight = true;
+    try {
+      const query = this.connected && this.address ? `?address=${encodeURIComponent(this.address)}` : '';
+      this.riskSnapshot = await this.api(`/api/perps/risk${query}`);
+      if (this.riskSnapshot.account) this.account = this.riskSnapshot.account;
+      this._renderRiskSnapshot(this.riskSnapshot);
+      this._refreshCockpitDashboard();
+    } catch (error) {
+      const updated = document.getElementById('cockpitRiskUpdated');
+      if (updated) updated.textContent = `Aggiornamento fallito: ${error.message}`;
+      const status = document.getElementById('cockpitRiskStatus');
+      if (status) { status.textContent = 'DATI NON DISPONIBILI'; status.className = 'cockpit-risk-status blocked'; }
+    } finally {
+      this.riskRefreshInFlight = false;
+    }
+  }
+
+  _escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[char]));
+  }
+
+  _renderRiskSnapshot(snapshot) {
+    if (!snapshot) return;
+    const account = snapshot.account || {};
+    const limits = snapshot.limits || {};
+    const alerts = snapshot.alerts || [];
+    const summary = snapshot.summary || {};
+    const equity = Number(account.equity ?? account.accountValue);
+    const margin = Number(account.totalMarginUsed);
+    const exposure = Number(account.totalNtlPos ?? (account.positions || []).reduce((sum, p) => sum + Number(p.positionValue || 0), 0));
+    const marginPct = Number.isFinite(equity) && equity > 0 ? (margin / equity) * 100 : null;
+    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+    const usd = (value) => this.fmtUsd(value).replace('$-', '-$');
+    const statusText = summary.status === 'blocked' ? 'BLOCKED' : summary.status === 'review' ? `${summary.actionable || summary.warning} DA VERIFICARE` : 'OK';
+    const statusClass = summary.status === 'blocked' ? 'blocked' : summary.status === 'review' ? 'review' : 'ok';
+    const statusEl = document.getElementById('cockpitRiskStatus');
+    if (statusEl) { statusEl.textContent = statusText; statusEl.className = `cockpit-risk-status ${statusClass}`; }
+    setText('cockpitRiskUpdated', `Ultimo controllo ${new Date(snapshot.generatedAt).toLocaleTimeString('it-IT', { hour12: false })}`);
+    setText('cockpitRiskEquity', Number.isFinite(equity) ? usd(equity) : '—');
+    setText('cockpitRiskMargin', marginPct == null ? '—' : `${marginPct.toFixed(1)}%`);
+    setText('cockpitRiskExposure', Number.isFinite(exposure) ? `${usd(exposure)} / ${usd(limits.maxTotalExposureUsd)}` : '—');
+    setText('cockpitMarginLimit', `Limit ${limits.marginWarningPct ?? 60}%`);
+    setText('cockpitRiskOpenPositions', `${(account.positions || []).length} / ${limits.maxConcurrentPositions ?? '—'}`);
+    const drawdownPct = Number(snapshot.drawdown?.maxPct);
+    setText('cockpitRiskDrawdown', Number.isFinite(drawdownPct) ? `-${drawdownPct.toFixed(2)}%` : '—');
+    const drawdownStatus = document.getElementById('cockpitDrawdownStatus');
+    if (drawdownStatus) {
+      const limit = Number(limits.drawdownWarningPct ?? 5);
+      const critical = Number(limits.drawdownCriticalPct ?? 10);
+      drawdownStatus.textContent = Number.isFinite(drawdownPct) && drawdownPct >= critical ? 'Review now' : Number.isFinite(drawdownPct) && drawdownPct >= limit ? 'Review' : 'Within limit';
+      drawdownStatus.className = drawdownPct >= critical ? 'cockpit-negative' : drawdownPct >= limit ? 'cockpit-warning' : 'cockpit-positive';
+    }
+    const feed = snapshot.system?.wsFresh ? 'LIVE' : snapshot.system?.wsConnected ? 'STALE' : 'POLLING';
+    setText('cockpitRiskFeed', feed);
+
+    ['cockpitHeaderAlertBadge', 'cockpitRiskBadge', 'cockpitAttentionCount', 'cockpitRiskLiveCount'].forEach((id) => setText(id, String(summary.actionable ?? alerts.length)));
+    const renderAlerts = (targetId) => {
+      const target = document.getElementById(targetId);
+      if (!target) return;
+      if (!alerts.length) {
+        target.innerHTML = '<div class="cockpit-risk-empty"><span class="cockpit-positive">●</span> Nessuna condizione da verificare</div>';
+        return;
+      }
+      target.innerHTML = alerts.map((alert) => `
+        <article class="cockpit-alert ${this._escapeHtml(alert.severity)}">
+          <div class="cockpit-alert-head"><span class="cockpit-alert-title">${this._escapeHtml(alert.title)}</span><span class="cockpit-${alert.severity === 'critical' ? 'negative' : alert.severity === 'warning' ? 'warning' : 'info'}">${this._escapeHtml(alert.severity.toUpperCase())}</span></div>
+          <p class="cockpit-alert-body">${this._escapeHtml(alert.body)}</p>
+          <div class="cockpit-alert-meta"><span>${this._escapeHtml(alert.meta)}</span><button class="cockpit-review-link" type="button" data-alert-action="${this._escapeHtml(alert.action)}">Review</button></div>
+        </article>`).join('');
+    };
+    renderAlerts('cockpitAlerts');
+    renderAlerts('cockpitRiskAlerts');
+
+    const checks = [
+      { label: 'Kill-switch', value: snapshot.killSwitch ? 'ATTIVO' : 'spento', state: snapshot.killSwitch ? 'critical' : 'ok' },
+      { label: 'Feed Hyperliquid', value: snapshot.system?.wsFresh ? 'live · fresco' : snapshot.system?.wsConnected ? 'connesso · stale' : 'polling REST', state: snapshot.system?.wsFresh ? 'ok' : 'warning' },
+      { label: 'Bot watchdog', value: snapshot.bots?.stale ? `${snapshot.bots.stale} stale` : 'nessun bot stale', state: snapshot.bots?.stale ? 'critical' : 'ok' },
+      { label: 'Ordini trigger', value: `${snapshot.orders?.trigger ?? 0} protettivi`, state: 'ok' },
+      { label: 'Agent wallet', value: snapshot.agent?.approved ? 'approvato' : snapshot.account ? 'da autorizzare' : 'wallet non collegato', state: snapshot.agent?.approved || !snapshot.account ? 'ok' : 'critical' }
+    ];
+    const checksEl = document.getElementById('cockpitRiskChecks');
+    if (checksEl) checksEl.innerHTML = checks.map((check) => `
+      <div class="cockpit-risk-check"><span><i class="cockpit-risk-check-dot ${check.state}"></i>${this._escapeHtml(check.label)}</span><strong class="cockpit-${check.state === 'critical' ? 'negative' : check.state === 'warning' ? 'warning' : 'positive'}">${this._escapeHtml(check.value)}</strong></div>`).join('');
+  }
+
+  _dashboardEquityData() {
+    const liveHistory = this.riskSnapshot?.equityHistory || [];
+    if (liveHistory.length) return liveHistory.map((point) => ({ time: point.time, value: Number(point.value) }));
+    if (this.riskSnapshot?.account) {
+      const value = Number(this.riskSnapshot.account.equity ?? this.riskSnapshot.account.accountValue);
+      if (Number.isFinite(value)) return [{ time: Math.floor((this.riskSnapshot.generatedAt || Date.now()) / 1000), value }];
+    }
+    const base = Number(this.account?.equity ?? this.account?.accountValue) || 248412.5;
+    const points = [
+      -860, -620, -710, -360, -410, -120, 80, 30, 260, 190, 420, 610,
+      510, 760, 690, 980, 1140, 1060, 1320, 1580, 1490, 1760, 1920, 2367
+    ];
+    const start = Math.floor(Date.now() / 3600000) * 3600000 - (points.length - 1) * 3600000;
+    return points.map((offset, index) => ({ time: Math.floor((start + index * 3600000) / 1000), value: +(base + offset).toFixed(2) }));
+  }
+
+  _refreshCockpitDashboard() {
+    const account = this.account || {};
+    const risk = this.riskSnapshot || {};
+    const liveAccount = risk.account || account;
+    const positions = liveAccount.positions || [];
+    const equity = Number(liveAccount.equity ?? liveAccount.accountValue);
+    const margin = Number(liveAccount.totalMarginUsed);
+    const equityValue = Number.isFinite(equity) && equity > 0 ? equity : 248412.5;
+    const marginPct = Number.isFinite(margin) && equityValue > 0 ? Math.min(100, Math.max(0, (margin / equityValue) * 100)) : 32;
+    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+    const usd = (value) => this.fmtUsd(value).replace('$-', '-$');
+    const now = new Date();
+    const timestamp = now.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) + ' EST';
+
+    setText('cockpitEquity', usd(equityValue));
+    setText('cockpitHeaderEquity', usd(equityValue));
+    setText('cockpitUpdatedAt', timestamp);
+    setText('cockpitMarginUsed', `${Math.round(marginPct)}%`);
+    setText('cockpitMarginFree', `${Math.max(0, 100 - Math.round(marginPct))}% free`);
+    const marginBar = document.getElementById('cockpitMarginBar');
+    if (marginBar) marginBar.style.width = `${marginPct}%`;
+
+    if (risk.account && risk.pnl) {
+      const net = Number(risk.pnl.net);
+      const realized = Number(risk.pnl.realized);
+      const unrealized = Number(risk.pnl.unrealized);
+      if (Number.isFinite(net)) {
+        setText('cockpitNetPnl', `${net >= 0 ? '+' : '-'}${usd(Math.abs(net))}`);
+        const netEl = document.getElementById('cockpitNetPnl');
+        if (netEl) netEl.className = `cockpit-kpi-value ${net >= 0 ? 'cockpit-positive' : 'cockpit-negative'}`;
+      }
+      if (Number.isFinite(realized)) setText('cockpitRealized', `Realized ${realized >= 0 ? '+' : '-'}${usd(Math.abs(realized))}`);
+      if (Number.isFinite(unrealized)) setText('cockpitUnrealized', `Unrealized ${unrealized >= 0 ? '+' : '-'}${usd(Math.abs(unrealized))}`);
+    }
+    if (risk.drawdown && Number.isFinite(Number(risk.drawdown.maxPct))) {
+      setText('cockpitDrawdown', `-${Number(risk.drawdown.maxPct).toFixed(2)}%`);
+    }
+
+    if (this.dashboardSeries) {
+      this.dashboardSeries.setData(this._dashboardEquityData());
+      this.dashboardChart?.timeScale().fitContent();
+    }
+    this._renderCockpitPositions(positions);
+  }
+
+  _renderCockpitPositions(positions) {
+    const tbody = document.getElementById('cockpitPositionsSummary');
+    if (!tbody) return;
+    if (!positions.length) {
+      tbody.innerHTML = '<tr><td class="cockpit-empty" colspan="5">Nessuna posizione aperta</td></tr>';
+      return;
+    }
+    tbody.innerHTML = positions.slice(0, 6).map((position) => {
+      const side = String(position.side || '').toLowerCase();
+      const pnl = Number(position.unrealizedPnl || 0);
+      const row = document.createElement('tr');
+      const values = [
+        { text: position.coin || '—', className: 'cockpit-symbol' },
+        { text: String(position.side || '—').toUpperCase(), className: side === 'long' ? 'cockpit-positive' : 'cockpit-negative' },
+        { text: this.fmtNum(position.size), className: '' },
+        { text: this.fmtUsd(position.entryPx), className: '' },
+        { text: `${pnl >= 0 ? '+' : '-'}${this.fmtUsd(Math.abs(pnl))}`, className: pnl >= 0 ? 'cockpit-positive' : 'cockpit-negative' }
+      ];
+      values.forEach(({ text, className }) => {
+        const cell = document.createElement('td');
+        cell.textContent = text;
+        if (className) cell.className = className;
+        row.appendChild(cell);
+      });
+      return row.outerHTML;
+    }).join('');
   }
 
   // ---- Network ----
@@ -213,6 +499,7 @@ class PerpsApp {
     if (!this.connected) {
       notConn?.classList.remove('hidden');
       body?.classList.add('hidden');
+      this._refreshCockpitDashboard();
       return;
     }
     notConn?.classList.add('hidden');
@@ -231,6 +518,7 @@ class PerpsApp {
       this._allPositions = acc.positions;
       this._populatePosBotFilter();
       this.applyPosFilter();
+      this._refreshCockpitDashboard();
     } catch (e) {
       // Account inesistente su HL = equity 0 (non un errore bloccante)
       this._updateFaucetBadge(0);

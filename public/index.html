@@ -5,8 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>🤖 Arbitrage Bot - Testnet Only</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;700&amp;display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="styles_perps.css">
+    <link rel="stylesheet" href="styles_cockpit.css">
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
@@ -21,6 +25,15 @@
                     <span class="testnet-badge">TESTNET ONLY</span>
                 </div>
                 <div class="connection-status">
+                    <div class="cockpit-header-summary" aria-label="Equity account">
+                        <span>EQUITY</span>
+                        <strong id="cockpitHeaderEquity">—</strong>
+                    </div>
+                    <button id="cockpitHeaderAlerts" class="cockpit-alert-trigger" type="button" aria-label="Apri Risk & Alerts">
+                        <span aria-hidden="true">♢</span>
+                        <span>ALERTS</span>
+                        <span class="cockpit-header-badge" id="cockpitHeaderAlertBadge">3</span>
+                    </button>
                     <button id="openSettings" class="btn btn-sm btn-outline" style="margin-right: 15px;">⚙️ Impostazioni</button>
                     <div id="serverStatus" class="status-indicator offline">
                         <span class="dot"></span>
@@ -236,7 +249,101 @@
             <!-- ====================== VISTA PERPS ====================== -->
             <div id="view-perps" class="hidden">
 
-                <!-- Account & Agent -->
+                <nav class="cockpit-tabs" aria-label="Cockpit sections" role="tablist">
+                    <button class="cockpit-tab" id="cockpit-tab-dashboard" type="button" role="tab" aria-selected="true" aria-controls="cockpit-panel-dashboard" onclick="perps.switchCockpitTab('dashboard')">DASHBOARD</button>
+                    <button class="cockpit-tab" id="cockpit-tab-execution" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-execution" onclick="perps.switchCockpitTab('execution')">EXECUTION</button>
+                    <button class="cockpit-tab" id="cockpit-tab-positions" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-positions" onclick="perps.switchCockpitTab('positions')">POSITIONS</button>
+                    <button class="cockpit-tab" id="cockpit-tab-risk" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-risk" onclick="perps.switchCockpitTab('risk')">RISK &amp; ALERTS <span class="cockpit-tab-badge" id="cockpitRiskBadge">3</span></button>
+                    <button class="cockpit-tab" id="cockpit-tab-system" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-system" onclick="perps.switchCockpitTab('system')">SYSTEM <span class="cockpit-tab-badge" id="cockpitSystemBadge">1</span></button>
+                </nav>
+
+                <section id="cockpit-panel-dashboard" class="cockpit-panel cockpit-dashboard" role="tabpanel" aria-labelledby="cockpit-tab-dashboard">
+                    <div class="cockpit-dashboard-heading">
+                        <div>
+                            <div class="cockpit-eyebrow">OPERATING OVERVIEW · TESTNET</div>
+                            <h2 class="cockpit-title">Dashboard</h2>
+                        </div>
+                        <span class="cockpit-updated">Updated <span id="cockpitUpdatedAt">—</span></span>
+                    </div>
+
+                    <div class="cockpit-kpi-grid" aria-label="Account overview">
+                        <article class="cockpit-kpi">
+                            <div class="cockpit-kpi-head"><span class="cockpit-label">Equity</span><span class="cockpit-info">1D</span></div>
+                            <div class="cockpit-kpi-value" id="cockpitEquity">$248,412.50</div>
+                            <div class="cockpit-kpi-context"><span class="cockpit-positive" id="cockpitEquityDelta">+1.42% Today</span><span id="cockpitEquitySource">Perps + Spot</span></div>
+                        </article>
+                        <article class="cockpit-kpi">
+                            <div class="cockpit-kpi-head"><span class="cockpit-label">Net P&amp;L</span><span class="cockpit-info">RTH</span></div>
+                            <div class="cockpit-kpi-value cockpit-positive" id="cockpitNetPnl">+$4,287.50</div>
+                            <div class="cockpit-kpi-context"><span id="cockpitRealized">Realized +$1,920</span><span id="cockpitUnrealized">Unrealized +$2,367</span></div>
+                        </article>
+                        <article class="cockpit-kpi">
+                            <div class="cockpit-kpi-head"><span class="cockpit-label">Margin used</span><span class="cockpit-warning">Risk</span></div>
+                            <div class="cockpit-kpi-value" id="cockpitMarginUsed">32%</div>
+                            <div class="cockpit-progress" aria-label="Margin used 32 percent"><span id="cockpitMarginBar"></span></div>
+                            <div class="cockpit-kpi-context"><span id="cockpitMarginFree">68% free</span><span id="cockpitMarginLimit">Limit 60%</span></div>
+                        </article>
+                        <article class="cockpit-kpi">
+                            <div class="cockpit-kpi-head"><span class="cockpit-label">Max drawdown</span><span class="cockpit-positive">OK</span></div>
+                            <div class="cockpit-kpi-value cockpit-negative" id="cockpitDrawdown">-1.8%</div>
+                            <div class="cockpit-kpi-context"><span>Daily</span><span id="cockpitDrawdownStatus" class="cockpit-positive">Within limit</span></div>
+                        </article>
+                    </div>
+
+                    <div class="cockpit-main-grid">
+                        <section class="cockpit-surface" aria-labelledby="portfolio-performance-title">
+                            <div class="cockpit-surface-head">
+                                <h3 class="cockpit-surface-title" id="portfolio-performance-title">PORTFOLIO PERFORMANCE</h3>
+                                <span class="cockpit-surface-note">1D · EQUITY CURVE</span>
+                            </div>
+                            <div id="cockpitChart" class="cockpit-chart" role="img" aria-label="Equity curve for the current session"></div>
+                            <div class="cockpit-chart-legend"><span>Equity</span><span>Session high</span></div>
+                        </section>
+
+                        <section class="cockpit-surface" aria-labelledby="attention-title">
+                            <div class="cockpit-surface-head">
+                                <h3 class="cockpit-surface-title" id="attention-title">NEEDS ATTENTION <span class="cockpit-tab-badge" id="cockpitAttentionCount">3</span></h3>
+                                <span class="cockpit-surface-note">REVIEW QUEUE</span>
+                            </div>
+                            <div id="cockpitAlerts" class="cockpit-alerts" aria-live="polite">
+                                <article class="cockpit-alert critical">
+                                    <div class="cockpit-alert-head"><span class="cockpit-alert-title">NQ exposure above limit</span><span class="cockpit-negative">CRITICAL</span></div>
+                                    <p class="cockpit-alert-body">Exposure is 104% of the configured symbol cap. New entries are blocked until reviewed.</p>
+                                    <div class="cockpit-alert-meta"><span>14:31:42 · Impact: high</span><button class="cockpit-review-link" type="button" data-alert-action="risk">Review</button></div>
+                                </article>
+                                <article class="cockpit-alert warning">
+                                    <div class="cockpit-alert-head"><span class="cockpit-alert-title">Feed latency above threshold</span><span class="cockpit-warning">WARNING</span></div>
+                                    <p class="cockpit-alert-body">ICE feed reached 92ms for the last 30 seconds. Verify before execution.</p>
+                                    <div class="cockpit-alert-meta"><span>14:30:10 · Next check: 30s</span><button class="cockpit-review-link" type="button" data-alert-action="system">Review</button></div>
+                                </article>
+                                <article class="cockpit-alert warning">
+                                    <div class="cockpit-alert-head"><span class="cockpit-alert-title">2 orders pending review</span><span class="cockpit-warning">WARNING</span></div>
+                                    <p class="cockpit-alert-body">Orders on ES and NQ have been waiting for confirmation for more than 2 minutes.</p>
+                                    <div class="cockpit-alert-meta"><span>14:29:58 · Action: inspect</span><button class="cockpit-review-link" type="button" data-alert-action="execution">Review</button></div>
+                                </article>
+                            </div>
+                            <div class="cockpit-alert-legend" aria-label="Alert severity legend"><span class="cockpit-severity critical">Critical</span><span class="cockpit-severity warning">Warning</span><span class="cockpit-severity">Info</span></div>
+                        </section>
+                    </div>
+
+                    <div class="cockpit-bottom-grid">
+                        <section class="cockpit-surface" aria-labelledby="open-positions-title">
+                            <div class="cockpit-surface-head"><h3 class="cockpit-surface-title" id="open-positions-title">OPEN POSITIONS <span class="cockpit-surface-note">[4]</span></h3><span class="cockpit-surface-note">uPnL</span></div>
+                            <table class="cockpit-table"><thead><tr><th scope="col">Symbol</th><th scope="col">Side</th><th scope="col">Size</th><th scope="col">Entry</th><th scope="col">uPnL</th></tr></thead><tbody id="cockpitPositionsSummary"><tr><td class="cockpit-symbol">ES</td><td class="cockpit-positive">LONG</td><td>3</td><td>5842.25</td><td class="cockpit-positive">+$1,388</td></tr><tr><td class="cockpit-symbol">NQ</td><td class="cockpit-negative">SHORT</td><td>2</td><td>20155.00</td><td class="cockpit-positive">+$1,275</td></tr><tr><td class="cockpit-symbol">CL</td><td class="cockpit-positive">LONG</td><td>5</td><td>71.82</td><td class="cockpit-positive">+$2,950</td></tr><tr><td class="cockpit-symbol">GC</td><td class="cockpit-negative">SHORT</td><td>1</td><td>2658.40</td><td class="cockpit-positive">+$650</td></tr></tbody></table>
+                        </section>
+                        <section class="cockpit-surface" aria-labelledby="execution-status-title">
+                            <div class="cockpit-surface-head"><h3 class="cockpit-surface-title" id="execution-status-title">EXECUTION STATUS</h3><span class="cockpit-surface-note cockpit-positive">LIVE</span></div>
+                            <div class="cockpit-metric-list"><div class="cockpit-metric-row"><span>Fills / 5m</span><strong id="cockpitFills">12</strong></div><div class="cockpit-metric-row"><span>Pending review</span><strong class="cockpit-warning" id="cockpitPending">2</strong></div><div class="cockpit-metric-row"><span>Reject rate</span><strong id="cockpitRejectRate">0.8%</strong></div><div class="cockpit-metric-row"><span>Queue health</span><strong class="cockpit-positive">Stable</strong></div></div>
+                        </section>
+                        <section class="cockpit-surface" aria-labelledby="system-health-title">
+                            <div class="cockpit-surface-head"><h3 class="cockpit-surface-title" id="system-health-title">SYSTEM HEALTH</h3><span class="cockpit-surface-note cockpit-positive">3/3 ONLINE</span></div>
+                            <div class="cockpit-health-list"><div class="cockpit-health-row"><span><i class="cockpit-health-dot"></i>CME</span><span class="cockpit-health-meta">28ms</span></div><div class="cockpit-health-row"><span><i class="cockpit-health-dot"></i>ICE</span><span class="cockpit-health-meta" id="cockpitIceLatency">92ms · CHECK</span></div><div class="cockpit-health-row"><span><i class="cockpit-health-dot"></i>COMEX</span><span class="cockpit-health-meta">31ms</span></div><div class="cockpit-health-row"><span><span>API / database</span></span><span class="cockpit-health-meta cockpit-positive">4ms · healthy</span></div></div>
+                        </section>
+                    </div>
+                    <div class="cockpit-command-strip"><span><strong>F1</strong> BUY <span aria-hidden="true">·</span> <strong>F2</strong> SELL <span aria-hidden="true">·</span> <strong>F3</strong> FLATTEN <span aria-hidden="true">·</span> <strong>ESC</strong> CANCEL</span><span>Testnet only · verify before submitting</span></div>
+                </section>
+
+                <div id="cockpit-panel-system" class="cockpit-panel" role="tabpanel" aria-labelledby="cockpit-tab-system" hidden>
                 <section class="card perps-account-card">
                     <div class="card-header">
                         <h2>🦊 Account Perps · Hyperliquid</h2>
@@ -312,7 +419,9 @@
                         </div>
                     </div>
                 </section>
+                </div><!-- /cockpit-panel-system -->
 
+                <div id="cockpit-panel-execution" class="cockpit-panel" role="tabpanel" aria-labelledby="cockpit-tab-execution" hidden>
                 <!-- Ordine Manuale -->
                 <section class="card">
                     <div class="card-header"><h2>⚡ Ordine Manuale</h2></div>
@@ -353,7 +462,9 @@
                         </div>
                     </div>
                 </section>
+                </div><!-- /cockpit-panel-execution -->
 
+                <div id="cockpit-panel-positions" class="cockpit-panel" role="tabpanel" aria-labelledby="cockpit-tab-positions" hidden>
                 <!-- Posizioni & Storico -->
                 <section class="card">
                     <div class="card-header">
@@ -435,6 +546,39 @@
                                 <div class="no-data-text">Nessuna operazione nel periodo selezionato</div>
                                 <div class="no-data-subtitle">Le tue operazioni (manuali e dei bot) appariranno qui</div>
                             </div>
+                        </div>
+                    </div>
+                </section>
+                </div><!-- /cockpit-panel-positions -->
+
+                <div id="cockpit-panel-risk" class="cockpit-panel" role="tabpanel" aria-labelledby="cockpit-tab-risk" hidden>
+                <section class="cockpit-risk-live cockpit-surface" aria-labelledby="risk-live-title">
+                    <div class="cockpit-surface-head cockpit-risk-live-head">
+                        <div>
+                            <h2 class="cockpit-surface-title" id="risk-live-title">LIVE RISK SNAPSHOT</h2>
+                            <span class="cockpit-risk-updated" id="cockpitRiskUpdated">In attesa dei dati reali</span>
+                        </div>
+                        <div class="cockpit-risk-actions">
+                            <span class="cockpit-risk-status" id="cockpitRiskStatus">—</span>
+                            <button class="btn btn-sm btn-outline" id="cockpitRiskRefresh" type="button">↻ Aggiorna</button>
+                        </div>
+                    </div>
+                    <div class="cockpit-risk-metrics" aria-label="Riepilogo rischio live">
+                        <div class="cockpit-risk-metric"><span>Equity</span><strong id="cockpitRiskEquity">—</strong></div>
+                        <div class="cockpit-risk-metric"><span>Margine</span><strong id="cockpitRiskMargin">—</strong></div>
+                        <div class="cockpit-risk-metric"><span>Esposizione</span><strong id="cockpitRiskExposure">—</strong></div>
+                        <div class="cockpit-risk-metric"><span>Posizioni</span><strong id="cockpitRiskOpenPositions">—</strong></div>
+                        <div class="cockpit-risk-metric"><span>Drawdown max</span><strong id="cockpitRiskDrawdown">—</strong></div>
+                        <div class="cockpit-risk-metric"><span>Feed</span><strong id="cockpitRiskFeed">—</strong></div>
+                    </div>
+                    <div class="cockpit-risk-columns">
+                        <div>
+                            <div class="cockpit-risk-subhead">ALERT LIVE <span class="cockpit-tab-badge" id="cockpitRiskLiveCount">0</span></div>
+                            <div id="cockpitRiskAlerts" class="cockpit-alerts" aria-live="polite" aria-atomic="false"></div>
+                        </div>
+                        <div>
+                            <div class="cockpit-risk-subhead">CHECK DI CONTROLLO</div>
+                            <div id="cockpitRiskChecks" class="cockpit-risk-checks" aria-live="polite"></div>
                         </div>
                     </div>
                 </section>
@@ -582,6 +726,7 @@
                         </div>
                     </div>
                 </section>
+                </div><!-- /cockpit-panel-risk -->
             </div><!-- /view-perps -->
         </div>
     </main>
@@ -962,6 +1107,6 @@
     <!-- Scripts -->
     <script src="boot.js?v=2.0.0"></script>
     <script src="app.js?v=1.3.0"></script>
-    <script src="perps.js?v=2.0.0"></script>
+    <script src="perps.js?v=2.1.0"></script>
 </body>
 </html>

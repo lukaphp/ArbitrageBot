@@ -4,6 +4,7 @@
 
 // Switch tra vista Perps (principale) e Arbitraggio (demo)
 function switchView(view) {
+  document.body.classList.toggle('cockpit-mode', view === 'perps');
   document.getElementById('view-arbitrage').classList.toggle('hidden', view !== 'arbitrage');
   document.getElementById('view-perps').classList.toggle('hidden', view !== 'perps');
   document.querySelectorAll('.view-tab').forEach(t => {

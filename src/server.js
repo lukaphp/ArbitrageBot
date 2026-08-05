@@ -56,6 +56,7 @@ import analyst from './agents/analyst/analyst.js';
 import proposals from './agents/proposals.js';
 import riskAgent from './agents/riskAgent.js';
 import mlTrainer from './agents/mlTrainer.js';
+import { calculateDrawdown, deriveRiskAlerts, summarizeRisk } from './perps/riskSnapshot.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -83,6 +84,7 @@ class ArbitrageBotServer {
     this.bindHost = process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '127.0.0.1' : '0.0.0.0');
     this.isRunning = false;
     this.connectedClients = new Set();
+    this.riskEquityHistory = new Map();
     
     this.setupMiddleware();
     this.setupRoutes();
@@ -593,6 +595,146 @@ class ArbitrageBotServer {
       } catch (error) {
         res.status(500).json({ success: false, error: error.message });
       }
+    });
+
+    // Snapshot aggregato per Risk & Alerts: una sola fonte per dashboard e tab rischio.
+    app.get('/api/perps/risk', async (req, res) => {
+      const requestedAddress = typeof req.query.address === 'string' && req.query.address.trim()
+        ? req.query.address.trim()
+        : null;
+      const knownBotRows = db.listBots();
+      const address = requestedAddress || knownBotRows[0]?.master_address || null;
+      const now = Date.now();
+      const network = hyperliquid.getNetwork();
+      const sourceErrors = [];
+      let account = null;
+      let orders = [];
+      let fills = [];
+      let agent = null;
+
+      if (address) {
+        try {
+          account = await hyperliquid.getAccount(address, network);
+        } catch (error) {
+          sourceErrors.push('account');
+          logger.warn('Risk snapshot: account non disponibile', error.message);
+        }
+        try {
+          orders = await hyperliquid.getFrontendOpenOrders(address, network);
+        } catch (error) {
+          sourceErrors.push('ordini');
+          logger.warn('Risk snapshot: ordini non disponibili', error.message);
+        }
+        try {
+          fills = await hyperliquid.getUserFills(address, network);
+        } catch (error) {
+          logger.warn('Risk snapshot: fills non disponibili', error.message);
+        }
+        try {
+          agent = agentWallet.getStatus(address, network);
+        } catch (error) {
+          sourceErrors.push('agent');
+          logger.warn('Risk snapshot: stato agent non disponibile', error.message);
+        }
+      }
+
+      const limits = {
+        ...portfolio.getLimits(),
+        marginWarningPct: 60,
+        marginCriticalPct: 80,
+        drawdownWarningPct: 5,
+        drawdownCriticalPct: 10
+      };
+      const botRows = new Map(knownBotRows.map(row => [row.id, row]));
+      const allBots = botManager.listStates();
+      const scopedBots = address
+        ? allBots.filter(bot => botRows.get(bot.id)?.master_address?.toLowerCase() === address.toLowerCase())
+        : allBots;
+      const bots = scopedBots.map(bot => {
+        const loopInterval = bot.config?.loopInterval || config.HYPERLIQUID_CONFIG.botLoopInterval;
+        const stale = bot.status === 'running' && bot.lastTickAt > 0
+          && now - bot.lastTickAt > Math.max(3 * loopInterval, 60000);
+        return {
+          id: bot.id,
+          name: bot.name,
+          coin: bot.coin,
+          status: bot.status,
+          dailyPnl: Number(bot.dailyPnl || 0),
+          lastError: bot.lastError || null,
+          tickErrors: Number(bot.tickErrors || 0),
+          lastTickAt: bot.lastTickAt || null,
+          stale,
+          staleSeconds: stale ? Math.round((now - bot.lastTickAt) / 1000) : 0,
+          inPosition: !!bot.inPosition,
+          maxDailyLossUsd: Number(bot.config?.risk?.maxDailyLossUsd ?? config.HYPERLIQUID_CONFIG.risk.maxDailyLossUsd)
+        };
+      });
+      const marketStatus = marketData.getStatus();
+      const key = address ? `${network}:${address.toLowerCase()}` : null;
+      let equityHistory = key ? (this.riskEquityHistory.get(key) || []) : [];
+      if (account && Number.isFinite(Number(account.equity))) {
+        const point = { time: Math.floor(now / 1000), value: Number(account.equity) };
+        const last = equityHistory[equityHistory.length - 1];
+        equityHistory = last?.time === point.time
+          ? [...equityHistory.slice(0, -1), point]
+          : [...equityHistory, point];
+        equityHistory = equityHistory.slice(-180);
+        this.riskEquityHistory.set(key, equityHistory);
+      }
+      const drawdown = calculateDrawdown(equityHistory);
+      const unrealizedPnl = account?.positions?.reduce((sum, position) => sum + Number(position.unrealizedPnl || 0), 0) || 0;
+      const dayStart = new Date();
+      dayStart.setHours(0, 0, 0, 0);
+      const realizedPnl = fills
+        .filter(fill => Number(fill.time) >= dayStart.getTime())
+        .reduce((sum, fill) => sum + Number(fill.closedPnl || 0) - Number(fill.fee || 0), 0);
+      const killSwitch = riskAgent.isKillSwitchOn();
+      const alerts = deriveRiskAlerts({
+        now, address, account, orders, limits, bots, marketStatus, agent, killSwitch,
+        drawdown, sourceErrors,
+        defaultMaxDailyLossUsd: config.HYPERLIQUID_CONFIG.risk.maxDailyLossUsd
+      });
+
+      res.json({
+        success: true,
+        data: {
+          generatedAt: now,
+          network,
+          ownerAddress: address,
+          account,
+          limits,
+          orders: {
+            open: orders.length,
+            pending: orders.filter(order => !order.isTrigger).length,
+            trigger: orders.filter(order => order.isTrigger).length,
+            items: orders
+          },
+          bots: {
+            total: bots.length,
+            running: bots.filter(bot => bot.status === 'running').length,
+            errors: bots.filter(bot => bot.lastError || bot.tickErrors > 0).length,
+            stale: bots.filter(bot => bot.stale).length,
+            states: bots
+          },
+          system: {
+            marketData: marketStatus,
+            wsConnected: !!marketStatus.ws,
+            wsFresh: !!marketStatus.wsFresh
+          },
+          agent,
+          killSwitch,
+          drawdown,
+          equityHistory,
+          pnl: {
+            realized: realizedPnl,
+            unrealized: unrealizedPnl,
+            net: realizedPnl + unrealizedPnl
+          },
+          alerts,
+          summary: summarizeRisk(alerts, { killSwitch }),
+          sourceErrors
+        }
+      });
     });
 
     // --- Agent wallet ---

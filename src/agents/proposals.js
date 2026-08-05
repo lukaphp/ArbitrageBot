@@ -18,7 +18,17 @@ import executionAgent from './executionAgent.js';
 import bus, { EVENTS } from './bus.js';
 import notifier from '../perps/notifier.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
+import { runBacktest } from '../perps/backtester.js';
 import logger from '../utils/logger.js';
+
+/**
+ * Soglie per il riciclo di una strategia scaduta. Sono volutamente più severe
+ * del semplice "expectancy > 0" chiesto all'AI: qui non c'è un modello che
+ * ragiona sul contesto, solo numeri, quindi serve un margine più netto.
+ */
+const RECYCLE = { lookbackDays: 45, minTrades: 10, minProfitFactor: 1.1 };
+
+const n2 = v => (Number.isFinite(v) ? v.toFixed(2) : '—');
 
 class Proposals {
   /** Crea e accoda una proposta. */
@@ -155,8 +165,8 @@ class Proposals {
    * Storico delle strategie decise. Per quelle approvate e collegate a un bot,
    * allega l'ESITO live (win rate, trade, PnL) che evolve nel tempo.
    */
-  history() {
-    const rows = db.getStrategyHistory();
+  history({ status, limit } = {}) {
+    const rows = db.getStrategyHistory({ status, limit });
     return rows.map(p => {
       const out = {
         id: p.id, coin: p.coin, status: p.status, rationale: p.rationale,
@@ -172,6 +182,93 @@ class Proposals {
       }
       return out;
     });
+  }
+
+  /**
+   * Ricicla strategie SCADUTE: rilancia il loro backtest sui dati correnti e
+   * le ripropone solo se l'edge regge ancora. Non costa token — il backtest è
+   * codice locale, nessuna chiamata all'AI.
+   *
+   * Le rifiutate non passano di qui di proposito: riproporre ciò che l'utente
+   * ha scartato ne contraddirebbe la decisione. Vengono invece usate come
+   * contesto anti-ripetizione nel briefing dell'Analyst.
+   */
+  async recycle(ids = []) {
+    const results = [];
+    // Una proposta pendente per lo stesso mercato renderebbe il riciclo un doppione
+    const pendingKeys = new Set(
+      db.listProposals({ status: 'pending', limit: 100 }).map(p => `${p.type}:${p.coin}`)
+    );
+
+    for (const id of ids) {
+      const p = db.getProposal(id);
+      if (!p) { results.push({ id, ok: false, reason: 'proposta non trovata' }); continue; }
+      if (p.type !== 'new_strategy_candidate') {
+        results.push({ id, coin: p.coin, ok: false, reason: 'non è una strategia' }); continue;
+      }
+      if (p.status !== 'expired') {
+        results.push({ id, coin: p.coin, ok: false, reason: `è ${p.status}: si riciclano solo le scadute` }); continue;
+      }
+
+      const payload = safeParse(p.payload_json) || {};
+      const { coin, interval, config } = payload;
+      if (!coin || !config) {
+        results.push({ id, coin: p.coin, ok: false, reason: 'payload incompleto, backtest non ripetibile' }); continue;
+      }
+      if (pendingKeys.has(`${p.type}:${coin}`)) {
+        results.push({ id, coin, ok: false, reason: 'esiste già una proposta pendente per questo mercato' }); continue;
+      }
+
+      let r;
+      try {
+        r = await runBacktest(config, coin, { interval: interval || '1h', lookbackDays: RECYCLE.lookbackDays });
+      } catch (e) {
+        results.push({ id, coin, ok: false, reason: `backtest fallito: ${e.message}` }); continue;
+      }
+      if (!r || r.error) {
+        results.push({ id, coin, ok: false, reason: r?.error || 'backtest senza risultato' }); continue;
+      }
+
+      const s = r.stats || {};
+      const stats = { trades: s.trades, winRate: s.winRate, profitFactor: s.profitFactor, expectancy: s.expectancy };
+      const holds = s.expectancy > 0 && s.trades >= RECYCLE.minTrades && s.profitFactor >= RECYCLE.minProfitFactor;
+      if (!holds) {
+        results.push({
+          id, coin, ok: false, stats,
+          reason: `edge non più confermato (${s.trades ?? 0} operazioni, PF ${n2(s.profitFactor)}, expectancy ${n2(s.expectancy)})`
+        });
+        continue;
+      }
+
+      const created = this.create({
+        type: p.type, coin, payload, source: 'recycler',
+        // La confidence non può salire riciclando: al massimo resta, e comunque
+        // è limitata, perché l'idea era già stata ignorata una volta.
+        confidence: Math.min(p.confidence ?? 0.5, 0.6),
+        backtest: stats,
+        rationale: `♻️ Riciclata da una proposta scaduta il ${new Date(p.decided_at || p.created_at).toLocaleDateString('it-IT')}. `
+          + `Backtest rieseguito ora su ${RECYCLE.lookbackDays} giorni: ${s.trades} operazioni, `
+          + `win rate ${((s.winRate || 0) * 100).toFixed(0)}%, profit factor ${n2(s.profitFactor)}, expectancy ${n2(s.expectancy)}.`
+      });
+      pendingKeys.add(`${p.type}:${coin}`);
+      results.push({ id, coin, ok: true, newId: created?.id, stats });
+    }
+
+    const recycled = results.filter(x => x.ok).length;
+    if (recycled) db.insertAudit('human', 'proposals.recycled', { recycled, valutate: ids.length });
+    logger.info(`♻️ Riciclo strategie: ${recycled}/${ids.length} riproposte`);
+    return { recycled, evaluated: ids.length, results };
+  }
+
+  /**
+   * Elimina voci dallo storico strategie. Con `ids` cancella quelle indicate,
+   * con `status` svuota una categoria intera. Le proposte 'pending' non sono
+   * mai toccate.
+   */
+  deleteHistory({ ids, status } = {}) {
+    const count = db.deleteStrategyHistory({ ids, status });
+    if (count > 0) db.insertAudit('human', 'proposals.deleted', { count, status: status || null, ids: ids || null });
+    return count;
   }
 
   /** Collega un bot a una proposta approvata (per seguirne l'esito). */

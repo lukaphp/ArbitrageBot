@@ -718,7 +718,22 @@
                         <div id="agentProposals" class="agent-proposals"></div>
 
                         <h4 class="sub-h" style="margin-top:18px;">📜 Storico strategie</h4>
-                        <p class="simple-hint">Strategie approvate o rifiutate. Per quelle avviate, l'esito si aggiorna nel tempo man mano che il bot opera.</p>
+                        <p class="simple-hint">Strategie approvate, rifiutate o scadute. Per quelle avviate, l'esito si aggiorna nel tempo man mano che il bot opera.</p>
+
+                        <div class="sh-tabs" role="tablist">
+                            <button class="sh-tab active" data-shtab="approved" type="button" role="tab" onclick="perps.switchStrategyTab('approved')">✅ Approvate <span class="sh-count" id="shCountApproved">0</span></button>
+                            <button class="sh-tab" data-shtab="rejected" type="button" role="tab" onclick="perps.switchStrategyTab('rejected')">🚫 Rifiutate <span class="sh-count" id="shCountRejected">0</span></button>
+                            <button class="sh-tab" data-shtab="expired" type="button" role="tab" onclick="perps.switchStrategyTab('expired')">⌛ Scadute <span class="sh-count" id="shCountExpired">0</span></button>
+                        </div>
+
+                        <div class="sh-bulkbar">
+                            <label class="sh-selectall"><input type="checkbox" id="shSelectAll" onchange="perps.toggleSelectAllStrategies(this.checked)"> Seleziona tutte</label>
+                            <span id="shSelCount" class="muted"></span>
+                            <button class="btn btn-sm btn-primary hidden" id="shRecycleBtn" onclick="perps.recycleSelectedStrategies()" title="Rilancia il backtest sui dati correnti e ripropone solo quelle che hanno ancora edge (nessun costo AI)">♻️ Ricicla selezionate</button>
+                            <button class="btn btn-sm btn-outline" onclick="perps.deleteSelectedStrategies()">🗑️ Elimina selezionate</button>
+                            <button class="btn btn-sm btn-danger" onclick="perps.clearStrategyTab()">🧹 Svuota categoria</button>
+                        </div>
+
                         <div id="strategyHistory" class="strategy-history"></div>
 
                         <div class="agent-killswitch">
@@ -834,6 +849,40 @@
     </div>
 
     <!-- Modal grafico posizione -->
+    <!-- Preventivo costo analisi: sostituisce il confirm() nativo, che tronca il testo -->
+    <div id="estimateModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>💰 Preventivo analisi</h3>
+                <button class="modal-close" onclick="perps.resolveEstimate(false)">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="est-head">
+                    <span class="est-model" id="estModel">—</span>
+                    <span class="est-cache" id="estCache"></span>
+                </div>
+
+                <table class="est-table">
+                    <thead>
+                        <tr><th>Scenario</th><th>Iterazioni</th><th>Token</th><th>Costo</th></tr>
+                    </thead>
+                    <tbody id="estRows"></tbody>
+                </table>
+
+                <p class="est-note">
+                    Solo il primo input è misurato esattamente (<span id="estFirstInput">—</span> token).
+                    Il costo finale dipende da quante iterazioni il modello decide di fare
+                    (massimo <span id="estMaxIter">—</span>) e da quanto scrive.
+                </p>
+                <p class="est-spent">Totale già speso dall'Analyst: <b id="estSpent">—</b></p>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="perps.resolveEstimate(false)">Annulla</button>
+                <button class="btn btn-primary" onclick="perps.resolveEstimate(true)">▶️ Avvia analisi</button>
+            </div>
+        </div>
+    </div>
+
     <div id="chartModal" class="modal hidden">
         <div class="modal-content modal-wide">
             <div class="modal-header">

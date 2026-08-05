@@ -638,13 +638,70 @@ export class PerpsDatabase {
     return this.getProposal(id);
   }
 
-  /** Storico delle strategie decise (approvate/rifiutate/scadute), più recenti prima. */
-  getStrategyHistory(limit = 50) {
+  /**
+   * Storico delle strategie decise (approvate/rifiutate/scadute), più recenti prima.
+   * Il filtro per stato è applicato in SQL: filtrare dopo il LIMIT farebbe
+   * sparire intere categorie quando una sola satura il limite.
+   */
+  getStrategyHistory({ status, limit = 200 } = {}) {
+    this.ensure();
+    const where = [`type = 'new_strategy_candidate'`, `status != 'pending'`];
+    const params = [];
+    if (status) { where.push(`status = ?`); params.push(status); }
+    params.push(limit);
+    return this.db.prepare(
+      `SELECT * FROM proposals WHERE ${where.join(' AND ')}
+       ORDER BY COALESCE(decided_at, created_at) DESC LIMIT ?`
+    ).all(...params);
+  }
+
+  /**
+   * Strategie rifiutate di recente. Servono all'Analyst come contesto negativo:
+   * sapere cosa l'utente ha già scartato evita di riproporlo e di spendere
+   * token per idee destinate a essere bocciate di nuovo.
+   */
+  getRecentRejected(limit = 12) {
     this.ensure();
     return this.db.prepare(
-      `SELECT * FROM proposals WHERE type = 'new_strategy_candidate' AND status != 'pending'
+      `SELECT coin, payload_json FROM proposals
+       WHERE type = 'new_strategy_candidate' AND status = 'rejected'
        ORDER BY COALESCE(decided_at, created_at) DESC LIMIT ?`
     ).all(limit);
+  }
+
+  /** Conteggi esatti per stato, indipendenti dal LIMIT applicato alle righe. */
+  getStrategyCounts() {
+    this.ensure();
+    const rows = this.db.prepare(
+      `SELECT status, COUNT(*) n FROM proposals
+       WHERE type = 'new_strategy_candidate' AND status != 'pending' GROUP BY status`
+    ).all();
+    const out = { approved: 0, rejected: 0, expired: 0 };
+    for (const r of rows) if (out[r.status] !== undefined) out[r.status] = r.n;
+    return out;
+  }
+
+  /** Elimina una singola proposta. Ritorna true se esisteva. */
+  deleteProposal(id) {
+    this.ensure();
+    return this.db.prepare(`DELETE FROM proposals WHERE id = ?`).run(id).changes > 0;
+  }
+
+  /**
+   * Eliminazione massiva dallo storico strategie. Filtra per stato e/o per lista
+   * di id. Non tocca mai le proposte 'pending': quelle si decidono, non si
+   * cancellano dallo storico.
+   */
+  deleteStrategyHistory({ status, ids } = {}) {
+    this.ensure();
+    const where = [`type = 'new_strategy_candidate'`, `status != 'pending'`];
+    const params = [];
+    if (status) { where.push(`status = ?`); params.push(status); }
+    if (Array.isArray(ids) && ids.length) {
+      where.push(`id IN (${ids.map(() => '?').join(',')})`);
+      params.push(...ids);
+    }
+    return this.db.prepare(`DELETE FROM proposals WHERE ${where.join(' AND ')}`).run(...params).changes;
   }
 
   /** Marca come 'expired' le proposte pendenti scadute. Ritorna il numero aggiornato. */

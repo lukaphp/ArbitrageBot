@@ -1147,8 +1147,63 @@ class ArbitrageBotServer {
     });
 
     // Storico strategie (approvate/rifiutate) con esito live di quelle avviate
+    // Righe (filtrabili per stato) + conteggi esatti per stato. I conteggi sono
+    // calcolati in SQL, così i badge dei tab restano corretti anche quando le
+    // righe vengono troncate dal limite.
     app.get('/api/agents/strategy-history', (req, res) => {
-      res.json({ success: true, data: proposals.history() });
+      const { status } = req.query;
+      const limit = Math.min(parseInt(req.query.limit) || 200, 1000);
+      res.json({
+        success: true,
+        data: { items: proposals.history({ status, limit }), counts: db.getStrategyCounts() }
+      });
+    });
+
+    // Riciclo di strategie scadute: ri-backtest locale e riproposta se l'edge
+    // regge. Nessun costo AI. Le rifiutate non sono riciclabili per scelta.
+    app.post('/api/agents/strategy-history/recycle', async (req, res) => {
+      try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
+        if (!ids.length) return res.status(400).json({ success: false, error: 'Specificare ids[]' });
+        res.json({ success: true, data: await proposals.recycle(ids) });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Eliminazione dallo storico strategie: singola (ids) o massiva (status).
+    // Serve almeno un criterio: senza, si rischierebbe di svuotare tutto per errore.
+    app.delete('/api/agents/strategy-history', (req, res) => {
+      try {
+        const { ids, status } = req.body || {};
+        const idList = Array.isArray(ids) ? ids.filter(Boolean) : [];
+        if (!idList.length && !status) {
+          return res.status(400).json({ success: false, error: 'Specificare ids[] oppure status' });
+        }
+        if (status && !['approved', 'rejected', 'expired'].includes(status)) {
+          return res.status(400).json({ success: false, error: `Stato non valido: ${status}` });
+        }
+        const deleted = proposals.deleteHistory({ ids: idList.length ? idList : undefined, status });
+        res.json({ success: true, data: { deleted } });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Preventivo token/costo PRIMA di lanciare l'analisi (non consuma inferenza)
+    app.post('/api/agents/analyst/estimate', async (req, res) => {
+      try {
+        const { model, riskAppetite, focusMarkets, maxProposals, exploration, notes } = req.body || {};
+        const opts = {
+          model, riskAppetite, maxProposals, exploration, notes,
+          focusMarkets: Array.isArray(focusMarkets) ? focusMarkets
+            : (typeof focusMarkets === 'string' && focusMarkets.trim() ? focusMarkets.split(',').map(s => s.trim()).filter(Boolean) : undefined)
+        };
+        const r = await analyst.estimate(opts);
+        res.json({ success: !r?.error, data: r, error: r?.error, code: r?.code });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
     });
 
     // Esegue subito un ciclo dell'Analyst (on-demand), con parametri opzionali

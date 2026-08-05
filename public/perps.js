@@ -114,7 +114,11 @@ class PerpsApp {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.success === false) {
-      throw new Error(data.error || `Errore ${res.status}`);
+      const err = new Error(data.error || `Errore ${res.status}`);
+      // Codice applicativo opzionale: permette a chi chiama di distinguere gli
+      // errori senza dover interpretare il testo del messaggio.
+      if (data.code) err.code = data.code;
+      throw err;
     }
     return data.data ?? data;
   }
@@ -880,14 +884,59 @@ class PerpsApp {
     } catch (e) { /* ignore */ }
   }
 
-  /** Storico delle strategie AI approvate/rifiutate, con esito live di quelle avviate. */
+  /** Cambia la categoria dello storico strategie (approvate / rifiutate / scadute). */
+  switchStrategyTab(tab) {
+    this.strategyTab = tab;
+    this._selectedStrategies = new Set(); // la selezione non attraversa le categorie
+    document.querySelectorAll('.sh-tab').forEach(t =>
+      t.classList.toggle('active', t.dataset.shtab === tab));
+    this._renderStrategyHistory();
+  }
+
+  /** Storico delle strategie AI, diviso per esito, con selezione ed eliminazione. */
   async loadStrategyHistory() {
     const box = document.getElementById('strategyHistory');
     if (!box) return;
     try {
-      const hist = await this.api('/api/agents/strategy-history');
-      if (!hist.length) { box.innerHTML = '<div class="agent-empty">Nessuna strategia decisa finora.</div>'; return; }
-      box.innerHTML = hist.map(h => {
+      const r = await this.api('/api/agents/strategy-history');
+      this._strategyHistory = r.items || [];
+      this._strategyCounts = r.counts || null;
+      this._renderStrategyHistory();
+    } catch (e) { /* ignore */ }
+  }
+
+  _renderStrategyHistory() {
+    const box = document.getElementById('strategyHistory');
+    if (!box) return;
+    const all = this._strategyHistory || [];
+    const tab = this.strategyTab || 'approved';
+    this._selectedStrategies = this._selectedStrategies || new Set();
+
+    // Conteggi esatti dal server (indipendenti dal limite sulle righe); il
+    // calcolo locale è solo un fallback se il server non li fornisce.
+    let counts = this._strategyCounts;
+    if (!counts) {
+      counts = { approved: 0, rejected: 0, expired: 0 };
+      for (const h of all) if (counts[h.status] !== undefined) counts[h.status]++;
+    }
+    for (const [k, v] of Object.entries(counts)) {
+      const el = document.getElementById(`shCount${k[0].toUpperCase()}${k.slice(1)}`);
+      if (el) el.textContent = v;
+    }
+
+    const hist = all.filter(h => h.status === tab);
+    this._updateStrategySelectionUI(hist);
+
+    // Il riciclo ha senso solo sulle scadute: le rifiutate non si ripropongono.
+    document.getElementById('shRecycleBtn')?.classList.toggle('hidden', tab !== 'expired');
+
+    if (!hist.length) {
+      const empty = { approved: 'Nessuna strategia approvata.', rejected: 'Nessuna strategia rifiutata.', expired: 'Nessuna strategia scaduta.' }[tab];
+      box.innerHTML = `<div class="agent-empty">${empty}</div>`;
+      return;
+    }
+
+    box.innerHTML = hist.map(h => {
         const date = h.decidedAt ? new Date(h.decidedAt).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
         const badge = h.status === 'approved' ? '<span class="sh-badge ok">approvata</span>'
           : h.status === 'rejected' ? '<span class="sh-badge no">rifiutata</span>'
@@ -905,15 +954,119 @@ class PerpsApp {
           }
         }
         const costLine = h.model ? `<div class="sh-cost">🧠 ${h.model} · elaborazione ${this._fmtCost(h.costUsd)}</div>` : '';
+        const checked = this._selectedStrategies.has(h.id) ? 'checked' : '';
+        const recycle = h.status === 'expired'
+          ? `<button class="sh-recycle" title="Rilancia il backtest ora e riproponila se ha ancora edge (gratis)" onclick="perps.recycleStrategies(['${h.id}'])">♻️</button>`
+          : '';
         return `
         <div class="sh-row">
-          <div class="sh-line1">${badge} <b>${h.coin || ''}</b> <span class="muted">${date}</span></div>
+          <div class="sh-line1">
+            <input type="checkbox" class="sh-check" ${checked} onchange="perps.toggleStrategySelection('${h.id}', this.checked)">
+            ${badge} <b>${h.coin || ''}</b> <span class="muted">${date}</span>
+            ${recycle}
+            <button class="sh-del" title="Elimina questa strategia" onclick="perps.deleteStrategy('${h.id}')">🗑️</button>
+          </div>
           ${h.rationale ? `<div class="sh-rationale">${h.rationale}</div>` : ''}
           ${costLine}
           ${outcome ? `<div>${outcome}</div>` : ''}
         </div>`;
-      }).join('');
-    } catch (e) { /* ignore */ }
+    }).join('');
+  }
+
+  toggleStrategySelection(id, on) {
+    this._selectedStrategies = this._selectedStrategies || new Set();
+    if (on) this._selectedStrategies.add(id); else this._selectedStrategies.delete(id);
+    this._updateStrategySelectionUI();
+  }
+
+  toggleSelectAllStrategies(on) {
+    const tab = this.strategyTab || 'approved';
+    const visible = (this._strategyHistory || []).filter(h => h.status === tab);
+    this._selectedStrategies = new Set(on ? visible.map(h => h.id) : []);
+    this._renderStrategyHistory();
+  }
+
+  /** Tiene allineati contatore selezione e stato del "seleziona tutte". */
+  _updateStrategySelectionUI(visibleList) {
+    const tab = this.strategyTab || 'approved';
+    const visible = visibleList || (this._strategyHistory || []).filter(h => h.status === tab);
+    const sel = this._selectedStrategies || new Set();
+    const n = visible.filter(h => sel.has(h.id)).length;
+    const label = document.getElementById('shSelCount');
+    if (label) label.textContent = n ? `${n} selezionate` : '';
+    const all = document.getElementById('shSelectAll');
+    if (all) {
+      all.checked = n > 0 && n === visible.length;
+      all.indeterminate = n > 0 && n < visible.length;
+    }
+  }
+
+  async deleteStrategy(id) {
+    if (!confirm('Eliminare questa strategia dallo storico?')) return;
+    await this._deleteStrategies({ ids: [id] });
+  }
+
+  async deleteSelectedStrategies() {
+    const ids = [...(this._selectedStrategies || [])];
+    if (!ids.length) return this.toast('Nessuna strategia selezionata', 'warning');
+    if (!confirm(`Eliminare ${ids.length} strategie dallo storico?`)) return;
+    await this._deleteStrategies({ ids });
+  }
+
+  async recycleSelectedStrategies() {
+    const ids = [...(this._selectedStrategies || [])];
+    if (!ids.length) return this.toast('Nessuna strategia selezionata', 'warning');
+    await this.recycleStrategies(ids);
+  }
+
+  /**
+   * Ricicla strategie scadute: il server rilancia il backtest sui dati correnti
+   * e ripropone solo quelle che hanno ancora edge. Non costa token.
+   */
+  async recycleStrategies(ids) {
+    const box = document.getElementById('strategyHistory');
+    box?.classList.add('is-recycling');
+    this.toast(`Ribacktest di ${ids.length} strateg${ids.length === 1 ? 'ia' : 'ie'} in corso…`, 'info');
+    try {
+      const r = await this.api('/api/agents/strategy-history/recycle', {
+        method: 'POST', body: JSON.stringify({ ids })
+      });
+      this._selectedStrategies = new Set();
+
+      if (r.recycled) {
+        this.toast(`♻️ ${r.recycled} di ${r.evaluated} riproposte: le trovi tra le proposte in attesa`, 'success');
+      } else {
+        // Nessun riciclo non è un errore: significa che l'edge non regge più.
+        // Mostrare il motivo evita che sembri un malfunzionamento.
+        const why = (r.results || []).find(x => !x.ok)?.reason;
+        this.toast(`Nessuna strategia riproposta${why ? ` — ${why}` : ''}`, 'warning');
+      }
+      await this.loadStrategyHistory();
+      this.loadAgents();
+    } catch (e) {
+      this.toast(`Riciclo fallito: ${e.message}`, 'error');
+    } finally {
+      box?.classList.remove('is-recycling');
+    }
+  }
+
+  /** Svuota l'intera categoria attualmente visibile. */
+  async clearStrategyTab() {
+    const tab = this.strategyTab || 'approved';
+    const labels = { approved: 'approvate', rejected: 'rifiutate', expired: 'scadute' };
+    const n = (this._strategyHistory || []).filter(h => h.status === tab).length;
+    if (!n) return this.toast('Categoria già vuota', 'warning');
+    if (!confirm(`Eliminare TUTTE le ${n} strategie ${labels[tab]}?\n\nL'operazione non è reversibile.`)) return;
+    await this._deleteStrategies({ status: tab });
+  }
+
+  async _deleteStrategies(body) {
+    try {
+      const r = await this.api('/api/agents/strategy-history', { method: 'DELETE', body: JSON.stringify(body) });
+      this._selectedStrategies = new Set();
+      this.toast(`${r.deleted} strategie eliminate`, 'success');
+      await this.loadStrategyHistory();
+    } catch (e) { this.toast(`Eliminazione fallita: ${e.message}`, 'error'); }
   }
 
   _renderProposals(list) {
@@ -1002,13 +1155,104 @@ class PerpsApp {
     };
   }
 
+  /** Chiede il preventivo e fa confermare prima di spendere. */
   async runAnalyst() {
+    const st = document.getElementById('aiAgentStatus');
+    const params = this._analysisParams();
+
+    if (st) st.textContent = '⏳ calcolo preventivo…';
+    let est = null;
+    try {
+      est = await this.api('/api/agents/analyst/estimate', { method: 'POST', body: JSON.stringify(params) });
+    } catch (e) {
+      // Un errore di autenticazione è definitivo: l'analisi usa la stessa
+      // chiave, quindi non ha senso offrire di lanciarla comunque.
+      if (e.code === 'auth_error') {
+        if (st) st.textContent = '🔑 chiave API non valida';
+        this.toast(e.message, 'error');
+        return;
+      }
+      // Gli altri errori (rete, server) possono essere transitori: si chiede conferma.
+      if (!confirm(`Impossibile calcolare il preventivo:\n${e.message}\n\nLanciare comunque l'analisi?`)) {
+        if (st) st.textContent = '';
+        return;
+      }
+    }
+
+    if (est && !(await this._confirmEstimate(est))) {
+      if (st) st.textContent = '';
+      return;
+    }
+
+    return this._executeAnalyst(params);
+  }
+
+  /** Mostra il preventivo nel modale e risolve true/false alla scelta dell'utente. */
+  _confirmEstimate(est) {
+    // Se un preventivo precedente fosse rimasto appeso, lo annulla.
+    this.resolveEstimate(false);
+
+    const s = est.scenarios || {};
+    const labels = { min: 'Minimo', typical: 'Tipico', max: 'Tetto stimato' };
+    const tok = n => n.toLocaleString('it-IT');
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+
+    set('estModel', est.model);
+    set('estCache', est.cachingEnabled ? '⚡ prompt caching attivo' : '');
+    set('estFirstInput', tok(est.firstInput));
+    set('estMaxIter', est.maxIterations);
+    set('estSpent', this._fmtCost(est.spentTotal));
+
+    const rows = document.getElementById('estRows');
+    if (rows) {
+      rows.innerHTML = ['min', 'typical', 'max'].filter(k => s[k]).map(k => `
+        <tr class="est-${k}">
+          <td>${labels[k]}</td>
+          <td>${s[k].iterations}</td>
+          <td>${tok(s[k].promptTokens + s[k].tokensOut)}</td>
+          <td class="est-cost">${this._fmtCost(s[k].cost)}</td>
+        </tr>`).join('');
+    }
+
+    app.showModal('estimateModal');
+    return new Promise(resolve => {
+      this._estimateResolver = resolve;
+      // Il modale si chiude anche da backdrop o Escape (gestiti in app.js).
+      // Senza intercettarli la Promise resterebbe pendente all'infinito.
+      this._estimateDismiss = (e) => {
+        if (e.type === 'keydown' && e.key !== 'Escape') return;
+        if (e.type === 'click' && e.target?.id !== 'estimateModal') return;
+        this.resolveEstimate(false);
+      };
+      document.addEventListener('click', this._estimateDismiss);
+      document.addEventListener('keydown', this._estimateDismiss);
+    });
+  }
+
+  /** Chiude il modale del preventivo risolvendo la scelta. Idempotente. */
+  resolveEstimate(ok) {
+    if (this._estimateDismiss) {
+      document.removeEventListener('click', this._estimateDismiss);
+      document.removeEventListener('keydown', this._estimateDismiss);
+      this._estimateDismiss = null;
+    }
+    const resolve = this._estimateResolver;
+    this._estimateResolver = null;
+    if (!resolve) return;
+    app?.closeModal?.('estimateModal');
+    resolve(ok);
+  }
+
+  async _executeAnalyst(params) {
     const st = document.getElementById('aiAgentStatus');
     if (st) st.textContent = '⏳ analisi in corso… (può richiedere ~1 minuto)';
     try {
+      // Riusa gli stessi parametri su cui è stato calcolato il preventivo:
+      // rileggerli dal form rischierebbe di eseguire un'analisi diversa da
+      // quella preventivata se l'utente li modifica durante la conferma.
       const r = await this.api('/api/agents/analyst/run', {
         method: 'POST',
-        body: JSON.stringify(this._analysisParams())
+        body: JSON.stringify(params)
       });
       const cost = r?.cost ? ` · ${this._fmtCost(r.cost)}` : '';
       this.toast(`Analyst (${r?.model || 'AI'}): ${r?.proposals ?? 0} proposte${cost}`, 'success');

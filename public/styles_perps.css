@@ -351,6 +351,54 @@
 .sh-rationale { color: #4a5568; margin-top: 4px; font-size: 12px; line-height: 1.4; }
 .sh-outcome { display: inline-block; margin-top: 5px; font-size: 12px; }
 
+/* Preventivo costo analisi */
+.est-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.est-model { font-family: var(--mono, ui-monospace, monospace); font-size: 13px; font-weight: 600; }
+.est-cache { font-size: 11px; padding: 2px 8px; border-radius: 9px; background: rgba(56,161,105,0.15); color: #2f855a; }
+
+.est-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.est-table th {
+  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: #718096; font-weight: 600; padding: 5px 8px; border-bottom: 1px solid var(--border, #e2e8f0);
+}
+.est-table th:not(:first-child), .est-table td:not(:first-child) { text-align: right; }
+.est-table td { padding: 7px 8px; border-bottom: 1px solid rgba(128,128,128,0.15); color: #2d3748; }
+.est-table tr:last-child td { border-bottom: none; }
+.est-cost { font-family: var(--mono, ui-monospace, monospace); font-weight: 700; }
+/* Il tipico è lo scenario da leggere per primo; il tetto è solo un limite */
+.est-typical td { background: rgba(66,153,225,0.08); }
+.est-max td { color: #a0616a; }
+
+.est-note { font-size: 12px; color: #718096; line-height: 1.5; margin-top: 12px; }
+.est-spent { font-size: 12px; color: #4a5568; margin-top: 6px; }
+
+/* Storico strategie: tab per esito + barra azioni massive */
+.sh-tabs { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.sh-tab {
+  background: transparent; border: 1px solid var(--border, #e2e8f0); border-radius: 7px;
+  padding: 5px 11px; font-size: 12px; font-weight: 600; color: #4a5568; cursor: pointer;
+}
+.sh-tab:hover { background: rgba(0,0,0,0.04); }
+.sh-tab.active { background: rgba(66,153,225,0.12); border-color: #4299e1; color: #2b6cb0; }
+.sh-count {
+  display: inline-block; min-width: 17px; padding: 0 5px; margin-left: 4px;
+  border-radius: 9px; background: rgba(0,0,0,0.08); font-size: 11px; text-align: center;
+}
+.sh-tab.active .sh-count { background: rgba(66,153,225,0.25); }
+
+.sh-bulkbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 9px; }
+.sh-selectall { display: flex; gap: 5px; align-items: center; font-size: 12px; color: #4a5568; cursor: pointer; }
+.sh-check { cursor: pointer; }
+.sh-del, .sh-recycle {
+  margin-left: auto; background: transparent; border: none; cursor: pointer;
+  font-size: 13px; opacity: 0.5; padding: 2px 4px; border-radius: 5px;
+}
+.sh-del:hover { opacity: 1; background: rgba(229,62,62,0.12); }
+.sh-recycle:hover { opacity: 1; background: rgba(56,161,105,0.15); }
+/* Quando ci sono entrambi, è il riciclo a spingere il gruppo a destra */
+.sh-recycle + .sh-del { margin-left: 0; }
+.sh-row.is-recycling { opacity: 0.55; pointer-events: none; }
+
 /* ===== Bot: badge strategia AI d'origine ===== */
 .bot-strategy-badge { display:inline-block; font-size:11px; font-weight:600; color:#4f46e5;
   background:rgba(99,102,241,0.10); border-radius:6px; padding:2px 8px; margin-bottom:6px; cursor:help; }

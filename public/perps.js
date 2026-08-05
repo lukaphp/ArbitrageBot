@@ -103,7 +103,7 @@ class PerpsApp {
   }
 
   // ---- Helpers ----
-  get address() { return app?.walletAddress || null; }
+  get address() { return app?.walletAddress || '0x0000000000000000000000000000000000000000'; }
   get connected() { return !!app?.isConnected; }
   toast(msg, type = 'info') { app?.showToast ? app.showToast(msg, type) : alert(msg); }
 
@@ -676,7 +676,7 @@ class PerpsApp {
   }
 
   async enableAgent() {
-    if (!this.connected) return this.toast('Connetti prima MetaMask', 'warning');
+    if (this.network === 'mainnet' && !this.connected) return this.toast('Connetti MetaMask per abilitare l\'agent in Mainnet', 'warning');
     try {
       this.toast('Generazione agent...', 'info');
       // Firma sul chainId su cui MetaMask è attualmente connesso: MetaMask rifiuta
@@ -1377,7 +1377,7 @@ class PerpsApp {
 
   // ---- Manual order ----
   async submitOrder(side) {
-    if (!this.connected) return this.toast('Connetti prima MetaMask', 'warning');
+    if (this.network === 'mainnet' && !this.connected) return this.toast('Connetti MetaMask per operare in Mainnet', 'warning');
     const coin = document.getElementById('orderMarket').value;
     const leverage = parseFloat(document.getElementById('orderLeverage').value);
     const sizeUsd = parseFloat(document.getElementById('orderSizeUsd').value);
@@ -1478,10 +1478,13 @@ class PerpsApp {
   }
 
   async startBot(id) {
-    if (!this.connected) return this.toast('Connetti MetaMask', 'warning');
     try {
-      const s = await this.api(`/api/perps/agent/status?address=${this.address}`);
-      if (!s.approved) return this.toast('Abilita prima l\'auto-trading (agent)', 'warning');
+      const bot = this.bots.find(b => b.id === id);
+      if (bot && !bot.config?.paper && this.network === 'mainnet') {
+        if (!this.connected) return this.toast('Connetti MetaMask per operare in Mainnet', 'warning');
+        const s = await this.api(`/api/perps/agent/status?address=${this.address}`);
+        if (!s.approved) return this.toast('Abilita prima l\'auto-trading (agent)', 'warning');
+      }
       await this.api(`/api/perps/bots/${id}/start`, { method: 'POST' });
       this.toast('Bot avviato', 'success');
       await this.loadBots();
@@ -1551,7 +1554,7 @@ class PerpsApp {
     (c.exitRules || []).forEach(r => this.addRule('exit', r));
 
     // Modalità semplificata: ripristina selezioni se il bot è stato creato così
-    this.selStrategy = c.preset?.strategy || null;
+    this.selStrategy = c.preset?.strategy || 'rsi_reversal';
     this.selRisk = c.preset?.risk || 'moderato';
     this._renderStrategyCards();
     this._renderRiskProfiles();
@@ -2022,7 +2025,6 @@ class PerpsApp {
     const name = document.getElementById('botName').value.trim();
     const coin = document.getElementById('botMarket').value;
     if (!name) return this.toast('Inserisci un nome', 'warning');
-    if (!this.connected) return this.toast('Connetti MetaMask', 'warning');
 
     const config = this._buildBotConfig();
     if (!config) return;

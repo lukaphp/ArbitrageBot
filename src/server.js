@@ -107,12 +107,18 @@ class ArbitrageBotServer {
     // dalla UI (socket.io, ethers, lightweight-charts). Il 'unsafe-inline' resta
     // finché ci sono handler onclick inline nell'HTML: verrà rimosso con il build
     // step (Fase 3.5) passando a una CSP senza inline. Tutto il resto è bloccato.
+    // NB: helmet imposta di default anche `script-src-attr 'none'`, direttiva
+    // separata che NON eredita da script-src: senza l'override esplicito qui sotto
+    // il browser blocca *tutti* gli handler onclick inline della UI (i pulsanti
+    // smettono di rispondere). Va rimosso insieme agli onclick, non prima.
     this.app.use(helmet({
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
           scriptSrc: ["'self'", "'unsafe-inline'", 'https://cdn.socket.io', 'https://cdn.jsdelivr.net', 'https://unpkg.com'],
-          styleSrc: ["'self'", "'unsafe-inline'"],
+          scriptSrcAttr: ["'unsafe-inline'"],
+          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+          fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
           imgSrc: ["'self'", 'data:'],
           connectSrc: ["'self'", 'ws:', 'wss:', 'https:'],
           objectSrc: ["'none'"],

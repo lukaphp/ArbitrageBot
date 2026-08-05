@@ -1375,6 +1375,10 @@ function closeModal(modalId) {
     app.closeModal(modalId);
 }
 
+function showModal(modalId) {
+    app.showModal(modalId);
+}
+
 // Inizializza l'app quando il DOM è pronto
 let app;
 document.addEventListener('DOMContentLoaded', () => {

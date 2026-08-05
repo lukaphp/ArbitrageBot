@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calculateDrawdown, deriveRiskAlerts, summarizeRisk } from '../src/perps/riskSnapshot.js';
+import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk } from '../src/perps/riskSnapshot.js';
 
 test('calculateDrawdown: misura il picco e il drawdown massimo di sessione', () => {
   const result = calculateDrawdown([
@@ -13,6 +13,25 @@ test('calculateDrawdown: misura il picco e il drawdown massimo di sessione', () 
   assert.equal(result.maxUsd, 120);
   assert.equal(result.maxPct, 10);
   assert.ok(Math.abs(result.currentPct - 4.166666666666667) < 1e-12);
+});
+
+test('mergeDrawdownState: conserva il massimo storico persistito', () => {
+  const result = mergeDrawdownState(
+    calculateDrawdown([{ value: 1300 }]),
+    {
+      peakEquity: 1200,
+      currentEquity: 1080,
+      maxDrawdownUsd: 120,
+      maxDrawdownPct: 10,
+      currentDrawdownUsd: 120,
+      currentDrawdownPct: 10
+    }
+  );
+  assert.equal(result.peak, 1300);
+  assert.equal(result.maxUsd, 120);
+  assert.equal(result.maxPct, 10);
+  assert.equal(result.current, 1300);
+  assert.equal(result.currentUsd, 0);
 });
 
 test('deriveRiskAlerts: segnala esposizione, margine, ordini e feed', () => {

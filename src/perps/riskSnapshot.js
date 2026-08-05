@@ -53,6 +53,43 @@ export function calculateDrawdown(history = []) {
   };
 }
 
+/**
+ * Mantiene il drawdown massimo quando la curva esposta è limitata agli ultimi
+ * campioni, usando lo stato monotono persistito in SQLite.
+ */
+export function mergeDrawdownState(current = {}, persisted = null) {
+  if (!persisted) return { ...current, scope: 'session' };
+  const finite = value => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const peaks = [finite(current.peak), finite(persisted.peakEquity)]
+    .filter(value => value != null);
+  const peak = peaks.length ? Math.max(...peaks) : null;
+  const currentValue = finite(current.current) ?? finite(persisted.currentEquity);
+  const currentUsd = peak != null && currentValue != null
+    ? Math.max(0, peak - currentValue)
+    : Math.max(0, number(persisted.currentDrawdownUsd));
+  const maxUsd = Math.max(
+    number(current.maxUsd),
+    number(persisted.maxDrawdownUsd),
+    currentUsd
+  );
+  return {
+    peak,
+    current: currentValue,
+    maxUsd,
+    maxPct: Math.max(
+      number(current.maxPct),
+      number(persisted.maxDrawdownPct),
+      peak ? (maxUsd / peak) * 100 : 0
+    ),
+    currentUsd,
+    currentPct: peak ? (currentUsd / peak) * 100 : 0,
+    scope: 'session'
+  };
+}
+
 /** Deriva gli alert live dai dati già verificati dal backend. */
 export function deriveRiskAlerts({
   now = Date.now(),

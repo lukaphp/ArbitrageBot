@@ -22,9 +22,10 @@ import logger from '../utils/logger.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-class PerpsDatabase {
-  constructor() {
+export class PerpsDatabase {
+  constructor({ dbPath = null } = {}) {
     this.db = null;
+    this.dbPath = dbPath;
   }
 
   /**
@@ -33,17 +34,17 @@ class PerpsDatabase {
   init() {
     if (this.db) return this.db;
 
-    const dataDir = path.join(__dirname, '../../data');
+    const dbPath = this.dbPath || path.join(__dirname, '../../data/perps.db');
+    const dataDir = path.dirname(dbPath);
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
     }
 
-    const dbPath = path.join(dataDir, 'perps.db');
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.createSchema();
 
-    logger.info('🗄️  Database Perps inizializzato', { path: 'data/perps.db' });
+    logger.info('🗄️  Database Perps inizializzato', { path: dbPath });
     return this.db;
   }
 
@@ -150,10 +151,34 @@ class PerpsDatabase {
         samples   INTEGER
       );
 
+      -- Curva equity Perps per account/rete, usata dal Risk & Alerts cockpit.
+      CREATE TABLE IF NOT EXISTS risk_equity_history (
+        network  TEXT NOT NULL,
+        address  TEXT NOT NULL,
+        ts       INTEGER NOT NULL,
+        equity   REAL NOT NULL,
+        PRIMARY KEY (network, address, ts)
+      );
+
+      -- Ultimo stato drawdown derivato dalla curva persistita.
+      CREATE TABLE IF NOT EXISTS risk_drawdown_state (
+        network              TEXT NOT NULL,
+        address              TEXT NOT NULL,
+        peak_equity          REAL,
+        current_equity       REAL,
+        max_drawdown_usd     REAL NOT NULL DEFAULT 0,
+        max_drawdown_pct     REAL NOT NULL DEFAULT 0,
+        current_drawdown_usd REAL NOT NULL DEFAULT 0,
+        current_drawdown_pct REAL NOT NULL DEFAULT 0,
+        updated_at           INTEGER NOT NULL,
+        PRIMARY KEY (network, address)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_positions_bot ON positions(bot_id);
       CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id);
       CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
       CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
+      CREATE INDEX IF NOT EXISTS idx_risk_equity_scope_ts ON risk_equity_history(network, address, ts);
     `);
     this._migrate();
   }
@@ -203,6 +228,14 @@ class PerpsDatabase {
     if (row.version < migrations.length) {
       apply(row.version);
       logger.info(`🗄️  Schema DB migrato: v${row.version} → v${migrations.length}`);
+    }
+  }
+
+  /** Chiude la connessione, utile per shutdown controllato e test isolati. */
+  close() {
+    if (this.db) {
+      this.db.close();
+      this.db = null;
     }
   }
 
@@ -431,6 +464,118 @@ class PerpsDatabase {
     this.ensure();
     const row = this.db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key);
     return row ? row.value : fallback;
+  }
+
+  // ---- Storico equity e drawdown Risk & Alerts ----
+
+  _riskScope(network, address) {
+    const normalizedNetwork = String(network || '').trim();
+    const normalizedAddress = String(address || '').trim().toLowerCase();
+    if (!normalizedNetwork || !normalizedAddress) {
+      throw new Error('network e address sono richiesti per lo storico rischio');
+    }
+    return { network: normalizedNetwork, address: normalizedAddress };
+  }
+
+  /** Inserisce/aggiorna il campione equity per un account e una rete. */
+  insertRiskEquitySample(network, address, time, equity, limit = 180) {
+    this.ensure();
+    const scope = this._riskScope(network, address);
+    const ts = Math.floor(Number(time));
+    const value = Number(equity);
+    if (!Number.isFinite(ts) || !Number.isFinite(value)) return false;
+
+    this.db.prepare(`
+      INSERT INTO risk_equity_history (network, address, ts, equity)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(network, address, ts) DO UPDATE SET equity = excluded.equity
+    `).run(scope.network, scope.address, ts, value);
+
+    const keep = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 180)));
+    this.db.prepare(`
+      DELETE FROM risk_equity_history
+      WHERE network = ? AND address = ? AND ts NOT IN (
+        SELECT ts FROM risk_equity_history
+        WHERE network = ? AND address = ?
+        ORDER BY ts DESC LIMIT ?
+      )
+    `).run(scope.network, scope.address, scope.network, scope.address, keep);
+    return true;
+  }
+
+  /** Ritorna i campioni più recenti in ordine cronologico per il cockpit. */
+  listRiskEquityHistory(network, address, limit = 180) {
+    this.ensure();
+    const scope = this._riskScope(network, address);
+    const keep = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 180)));
+    return this.db.prepare(`
+      SELECT ts AS time, equity AS value
+      FROM risk_equity_history
+      WHERE network = ? AND address = ?
+      ORDER BY ts DESC LIMIT ?
+    `).all(scope.network, scope.address, keep).reverse();
+  }
+
+  /** Salva l'ultimo drawdown derivato dalla curva equity persistita. */
+  upsertRiskDrawdownState(network, address, drawdown, updatedAt = Date.now()) {
+    this.ensure();
+    const scope = this._riskScope(network, address);
+    const state = {
+      peakEquity: drawdown?.peak ?? null,
+      currentEquity: drawdown?.current ?? null,
+      maxDrawdownUsd: Number(drawdown?.maxUsd) || 0,
+      maxDrawdownPct: Number(drawdown?.maxPct) || 0,
+      currentDrawdownUsd: Number(drawdown?.currentUsd) || 0,
+      currentDrawdownPct: Number(drawdown?.currentPct) || 0,
+      updatedAt: Number(updatedAt) || Date.now()
+    };
+    this.db.prepare(`
+      INSERT INTO risk_drawdown_state (
+        network, address, peak_equity, current_equity,
+        max_drawdown_usd, max_drawdown_pct,
+        current_drawdown_usd, current_drawdown_pct, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(network, address) DO UPDATE SET
+        peak_equity = excluded.peak_equity,
+        current_equity = excluded.current_equity,
+        max_drawdown_usd = excluded.max_drawdown_usd,
+        max_drawdown_pct = excluded.max_drawdown_pct,
+        current_drawdown_usd = excluded.current_drawdown_usd,
+        current_drawdown_pct = excluded.current_drawdown_pct,
+        updated_at = excluded.updated_at
+    `).run(
+      scope.network,
+      scope.address,
+      state.peakEquity,
+      state.currentEquity,
+      state.maxDrawdownUsd,
+      state.maxDrawdownPct,
+      state.currentDrawdownUsd,
+      state.currentDrawdownPct,
+      state.updatedAt
+    );
+    return state;
+  }
+
+  getRiskDrawdownState(network, address) {
+    this.ensure();
+    const scope = this._riskScope(network, address);
+    const row = this.db.prepare(`
+      SELECT peak_equity AS peakEquity,
+             current_equity AS currentEquity,
+             max_drawdown_usd AS maxDrawdownUsd,
+             max_drawdown_pct AS maxDrawdownPct,
+             current_drawdown_usd AS currentDrawdownUsd,
+             current_drawdown_pct AS currentDrawdownPct,
+             updated_at AS updatedAt
+      FROM risk_drawdown_state
+      WHERE network = ? AND address = ?
+    `).get(scope.network, scope.address);
+    if (!row) return null;
+    return {
+      ...row,
+      scope: 'session'
+    };
   }
 
   // ---- Proposte (Analyst AI) ----

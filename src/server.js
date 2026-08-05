@@ -56,7 +56,7 @@ import analyst from './agents/analyst/analyst.js';
 import proposals from './agents/proposals.js';
 import riskAgent from './agents/riskAgent.js';
 import mlTrainer from './agents/mlTrainer.js';
-import { calculateDrawdown, deriveRiskAlerts, summarizeRisk } from './perps/riskSnapshot.js';
+import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk } from './perps/riskSnapshot.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -84,7 +84,6 @@ class ArbitrageBotServer {
     this.bindHost = process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '127.0.0.1' : '0.0.0.0');
     this.isRunning = false;
     this.connectedClients = new Set();
-    this.riskEquityHistory = new Map();
     
     this.setupMiddleware();
     this.setupRoutes();
@@ -670,18 +669,14 @@ class ArbitrageBotServer {
         };
       });
       const marketStatus = marketData.getStatus();
-      const key = address ? `${network}:${address.toLowerCase()}` : null;
-      let equityHistory = key ? (this.riskEquityHistory.get(key) || []) : [];
-      if (account && Number.isFinite(Number(account.equity))) {
-        const point = { time: Math.floor(now / 1000), value: Number(account.equity) };
-        const last = equityHistory[equityHistory.length - 1];
-        equityHistory = last?.time === point.time
-          ? [...equityHistory.slice(0, -1), point]
-          : [...equityHistory, point];
-        equityHistory = equityHistory.slice(-180);
-        this.riskEquityHistory.set(key, equityHistory);
+      let equityHistory = address ? db.listRiskEquityHistory(network, address, 180) : [];
+      const persistedDrawdown = address ? db.getRiskDrawdownState(network, address) : null;
+      if (account && Number.isFinite(Number(account.equity)) && address) {
+        db.insertRiskEquitySample(network, address, Math.floor(now / 1000), Number(account.equity), 180);
+        equityHistory = db.listRiskEquityHistory(network, address, 180);
       }
-      const drawdown = calculateDrawdown(equityHistory);
+      const drawdown = mergeDrawdownState(calculateDrawdown(equityHistory), persistedDrawdown);
+      if (address) db.upsertRiskDrawdownState(network, address, drawdown, now);
       const unrealizedPnl = account?.positions?.reduce((sum, position) => sum + Number(position.unrealizedPnl || 0), 0) || 0;
       const dayStart = new Date();
       dayStart.setHours(0, 0, 0, 0);

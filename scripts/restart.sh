@@ -14,6 +14,23 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Iniezione dei segreti da Infisical: attiva solo se il progetto è collegato
+# (.infisical.json presente) E la CLI è installata. Altrimenti si continua a
+# leggere il file locale, quindi l'aggiornamento non rompe nulla.
+# Disattivabile in qualsiasi momento con USE_INFISICAL=0.
+RUNNER=()
+SECRETS_SOURCE="file locale"
+if [ "${USE_INFISICAL:-1}" = "1" ] && [ -f .infisical.json ] && command -v infisical >/dev/null 2>&1; then
+  RUNNER=(infisical run --silent --)
+  SECRETS_SOURCE="Infisical"
+  SECRETS_SOURCE_INFISICAL=1
+fi
+
+# La porta serve PRIMA dell'avvio per il healthcheck: con Infisical va chiesta a
+# lui, perché il file locale potrebbe non esistere più.
+if [ -z "${PORT:-}" ] && [ -n "${SECRETS_SOURCE_INFISICAL:-}" ]; then
+  PORT="$(infisical run --silent -- printenv PORT 2>/dev/null || true)"
+fi
 PORT="${PORT:-$(grep -E '^PORT=' .env 2>/dev/null | cut -d= -f2 || true)}"
 PORT="${PORT:-3000}"
 LOG_DIR="logs"
@@ -61,10 +78,12 @@ status_app() {
 }
 
 start_app() {
-  echo "🚀 Avvio app sulla porta ${PORT}..."
+  echo "🚀 Avvio app sulla porta ${PORT}...  (segreti: ${SECRETS_SOURCE})"
   # Avvio in background, scollegato dal terminale; log accodato.
   export PORT
-  nohup node "$ENTRY" >> "$LOG_FILE" 2>&1 &
+  # `${RUNNER[@]+...}` è necessario: su bash 3.2 (quello di macOS) l'espansione
+  # di un array vuoto sotto `set -u` è un errore di variabile non definita.
+  nohup ${RUNNER[@]+"${RUNNER[@]}"} node "$ENTRY" >> "$LOG_FILE" 2>&1 &
   local pid=$!
   echo "$pid" > "$PID_FILE"
 

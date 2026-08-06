@@ -166,3 +166,124 @@ curl -X POST https://.../api/perps/killswitch -H 'Content-Type: application/json
 ```
 
 Oppure da Telegram: `/chiuditutto` (chiude le posizioni) e `/ferma <bot>`.
+
+---
+
+## 9. Segreti gestiti con Infisical self-hosted (VPS)
+
+Sostituisce il file di configurazione in chiaro sul server con un secret manager
+che ospiti tu. **In locale non serve**: lo sviluppo continua a leggere il file
+locale, senza dipendere da questa istanza.
+
+L'integrazione è opt-in: si attiva solo quando trova `.infisical.json` (locale) o
+`INFISICAL_TOKEN` (container). Senza, tutto funziona come prima.
+
+### Perché
+
+- Sul VPS non resta alcun segreto in chiaro su disco.
+- Da N segreti sparsi si passa a **1 solo** da proteggere (il token di macchina),
+  revocabile e a scadenza — a differenza di una chiave di cifratura.
+- Rotazione centralizzata senza redeploy, e traccia di chi legge cosa.
+
+> ⚠️ **Attenzione alla co-locazione.** Se Infisical gira sullo *stesso* VPS
+> dell'app e dei backup, chi compromette quella macchina ottiene di nuovo sia il
+> database sia la chiave che lo decifra: il beneficio "backup rubato = inutile"
+> svanisce. Per ottenerlo davvero, ospita Infisical su una macchina separata
+> (basta un VPS minimo raggiunto via Tailscale). Sullo stesso host resta comunque
+> un guadagno — rotazione, audit, nessun file in chiaro — ma non quello.
+
+### 9.1 Avvio dell'istanza
+
+```bash
+cd deploy/infisical
+../../scripts/infisical-bootstrap.sh     # genera infisical.env (0600), una tantum
+docker compose up -d
+docker compose logs -f backend           # attendi "Server started"
+```
+
+Lo script genera `ENCRYPTION_KEY`, `AUTH_SECRET` e la password di PostgreSQL
+senza stamparne i valori, ed è idempotente.
+
+> ⚠️ `ENCRYPTION_KEY` cifra i segreti **dentro** Infisical. Se la perdi, quei
+> segreti non sono recuperabili. Copiala in un password manager **prima** di
+> caricare qualcosa di importante.
+
+L'interfaccia è pubblicata solo su `127.0.0.1:8080`, quindi non è esposta su
+Internet. Per raggiungerla dal tuo portatile usa Tailscale (§3 opzione A) e
+cambia la pubblicazione della porta in `deploy/infisical/docker-compose.yml`:
+
+```yaml
+    ports:
+      - "100.x.y.z:8080:8080"     # IP del tailnet
+```
+
+Aggiorna di conseguenza `SITE_URL` in `infisical.env`.
+
+### 9.2 Configurazione iniziale
+
+1. Apri l'interfaccia e crea l'account amministratore.
+2. Crea un progetto e l'ambiente `prod`.
+3. Carica i valori: dashboard → Secrets → Import (accetta un file di
+   configurazione) oppure `infisical secrets set NOME=valore`.
+4. Crea una **machine identity** con accesso in **sola lettura** a `prod` e
+   generane il token.
+
+Dal tuo portatile la CLI punta all'istanza così:
+
+```bash
+infisical login --domain http://infisical.<tuo-tailnet>.ts.net:8080
+```
+
+### 9.3 Collegamento dell'app
+
+L'app raggiunge Infisical **per nome di container** sulla rete condivisa: dentro
+un container `localhost` è il container stesso, non l'host.
+
+In `docker-compose.yml` dell'app:
+
+```yaml
+services:
+  app:
+    build: .
+    # env_file: ...                 ← non serve più
+    environment:
+      - NODE_ENV=production
+      - BIND_HOST=0.0.0.0
+      - INFISICAL_TOKEN=${INFISICAL_TOKEN}          # unico segreto di bootstrap
+      - INFISICAL_DOMAIN=http://infisical-backend:8080
+      - INFISICAL_ENV=prod
+    networks: [web, infisical]
+
+networks:
+  web:
+  infisical:
+    external: true                  # creata da deploy/infisical/docker-compose.yml
+```
+
+`INFISICAL_TOKEN` va tenuto fuori dal repository: un `EnvironmentFile` di systemd
+con permessi `0600`, oppure Docker secrets.
+
+### 9.4 Verifica
+
+```bash
+docker compose run --rm app node scripts/check-secrets.js
+```
+
+Stampa nome, stato e lunghezza di ogni variabile, **mai un valore**. Quando è
+verde puoi eliminare il file di configurazione dal VPS.
+
+### 9.5 Ordine di avvio
+
+L'app è **fail-closed**: se Infisical non risponde, non parte. Non serve però
+orchestrare l'ordine: con `restart: unless-stopped` il container riprova finché
+Infisical non è pronto, quindi dopo un reboot il sistema converge da solo.
+
+Il rovescio della medaglia è che un disservizio di Infisical è un disservizio del
+bot. È il prezzo di non avere segreti in chiaro sul disco: preferibile a un'app
+che parte in stato degradato e opera senza le protezioni attese.
+
+### 9.6 Rotazione della chiave di cifratura
+
+Spostare la chiave di cifratura a riposo in Infisical ha senso proprio perché ora
+è ruotabile: vedi `scripts/rotate-encryption-key.js` e il file di esempio della
+configurazione.

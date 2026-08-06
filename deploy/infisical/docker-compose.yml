@@ -1,0 +1,69 @@
+# Infisical self-hosted — istanza per il VPS.
+#
+# Da usare SOLO sul server: in locale l'app continua a leggere il file di
+# configurazione, senza dipendere da questa istanza (vedi docs/DEPLOY.md §9).
+#
+# Avvio:
+#   cd deploy/infisical
+#   ../../scripts/infisical-bootstrap.sh      # genera infisical.env (una tantum)
+#   docker compose up -d
+#
+# L'app raggiunge questa istanza per NOME DI CONTAINER sulla rete condivisa
+# `infisical`, non via localhost: dentro un container `localhost` è il container
+# stesso. Vedi docs/DEPLOY.md §9 per il collegamento del compose dell'app.
+
+name: infisical
+
+services:
+  backend:
+    image: infisical/infisical:v0.162.16   # tag fissato: `latest` renderebbe gli aggiornamenti imprevedibili
+    container_name: infisical-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    env_file: infisical.env
+    environment:
+      - NODE_ENV=production
+    ports:
+      # Solo loopback: l'interfaccia web NON è esposta su Internet.
+      # Per raggiungerla dal tuo portatile usa Tailscale (vedi §3 opzione A) e
+      # sostituisci con l'IP del tailnet, es. "100.x.y.z:8080:8080".
+      - "127.0.0.1:8080:8080"
+    networks: [infisical]
+
+  redis:
+    image: redis:7-alpine
+    container_name: infisical-redis
+    restart: unless-stopped
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes   # raggiungibile solo sulla rete interna
+    volumes:
+      - redis_data:/data
+    networks: [infisical]
+
+  db:
+    image: postgres:14-alpine
+    container_name: infisical-db
+    restart: unless-stopped
+    env_file: infisical.env
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks: [infisical]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username=infisical"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+volumes:
+  pg_data:
+  redis_data:
+
+networks:
+  infisical:
+    # Nominata esplicitamente così il compose dell'app può agganciarsi
+    # dichiarandola `external`.
+    name: infisical

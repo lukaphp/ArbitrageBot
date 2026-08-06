@@ -71,3 +71,6 @@ tmp/
 temp/
 # Perps SQLite database
 data/
+
+# Segreti dell'istanza Infisical self-hosted (generati da scripts/infisical-bootstrap.sh)
+deploy/infisical/infisical.env

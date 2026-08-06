@@ -18,13 +18,11 @@
  *  - L'agent può SOLO fare trading, NON può prelevare fondi (garanzia Hyperliquid).
  */
 
-import crypto from 'crypto';
 import { ethers } from 'ethers';
 import db from '../db/database.js';
 import execQueue from './execQueue.js';
+import secretBox from './secretBox.js';
 import logger from '../utils/logger.js';
-
-const ALGO = 'aes-256-gcm';
 
 // signatureChainId / domain.chainId per rete (devono combaciare per la verifica EIP-712).
 const SIGN_CHAINS = {
@@ -47,30 +45,19 @@ class AgentWallet {
       logger.warn('⚠️  AGENT_ENCRYPTION_KEY non impostata/corta: uso una chiave di SVILUPPO (NON sicura). ' +
         'Imposta AGENT_ENCRYPTION_KEY (≥32 caratteri) in .env per la persistenza sicura delle chiavi agent.');
     }
-    // Deriva una chiave a 32 byte stabile dal segreto.
-    this.encKey = crypto.createHash('sha256')
-      .update(secret || 'arbitragebot-perps-dev-key')
-      .digest();
   }
 
   // ---- Cifratura ----
+  // Delegata a secretBox: unica implementazione, con versioning della chiave.
+  // Prima esistevano due copie identiche dello stesso schema AES-256-GCM, il che
+  // avrebbe richiesto di aggiornarle entrambe a ogni cambio di formato.
 
   encrypt(plaintext) {
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv(ALGO, this.encKey, iv);
-    const enc = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    return Buffer.concat([iv, tag, enc]).toString('base64');
+    return secretBox.encrypt(plaintext);
   }
 
   decrypt(payload) {
-    const buf = Buffer.from(payload, 'base64');
-    const iv = buf.subarray(0, 12);
-    const tag = buf.subarray(12, 28);
-    const enc = buf.subarray(28);
-    const decipher = crypto.createDecipheriv(ALGO, this.encKey, iv);
-    decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
+    return secretBox.decrypt(payload);
   }
 
   // ---- Lifecycle ----

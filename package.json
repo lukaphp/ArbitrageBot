@@ -15,7 +15,11 @@
     "lint": "node scripts/lint-syntax.js",
     "restart": "bash scripts/restart.sh",
     "stop": "bash scripts/restart.sh stop",
-    "web": "npm run build && npm start"
+    "web": "npm run build && npm start",
+    "start:infisical": "infisical run -- node src/server.js",
+    "dev:infisical": "infisical run -- nodemon src/server.js",
+    "secrets:check": "node scripts/check-secrets.js",
+    "secrets:rotate": "node scripts/rotate-encryption-key.js"
   },
   "keywords": [
     "arbitrage",

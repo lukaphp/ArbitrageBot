@@ -4,7 +4,13 @@ FROM node:20-bookworm-slim
 
 # Dipendenze di build per i moduli nativi (better-sqlite3)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 make g++ ca-certificates \
+      python3 make g++ ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# CLI Infisical: serve solo se il container riceve INFISICAL_TOKEN. Senza token
+# l'entrypoint la ignora, quindi la sua presenza non cambia il comportamento.
+RUN curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | bash \
+    && apt-get update && apt-get install -y --no-install-recommends infisical \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -29,4 +35,4 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["node", "src/server.js"]
+ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]

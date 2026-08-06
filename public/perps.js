@@ -365,13 +365,14 @@ class PerpsApp {
       const value = Number(this.riskSnapshot.account.equity ?? this.riskSnapshot.account.accountValue);
       if (Number.isFinite(value)) return [{ time: Math.floor((this.riskSnapshot.generatedAt || Date.now()) / 1000), value }];
     }
-    const base = Number(this.account?.equity ?? this.account?.accountValue) || 248412.5;
-    const points = [
-      -860, -620, -710, -360, -410, -120, 80, 30, 260, 190, 420, 610,
-      510, 760, 690, 980, 1140, 1060, 1320, 1580, 1490, 1760, 1920, 2367
-    ];
-    const start = Math.floor(Date.now() / 3600000) * 3600000 - (points.length - 1) * 3600000;
-    return points.map((offset, index) => ({ time: Math.floor((start + index * 3600000) / 1000), value: +(base + offset).toFixed(2) }));
+    // Senza storico reale il grafico resta VUOTO. In precedenza veniva
+    // sintetizzata una curva in salita da una serie di offset fissi: sembrava
+    // un andamento storico autentico ed era interamente inventata.
+    const value = Number(this.account?.equity ?? this.account?.accountValue);
+    if (Number.isFinite(value)) {
+      return [{ time: Math.floor(Date.now() / 1000), value }];
+    }
+    return [];
   }
 
   _refreshCockpitDashboard() {
@@ -381,20 +382,26 @@ class PerpsApp {
     const positions = liveAccount.positions || [];
     const equity = Number(liveAccount.equity ?? liveAccount.accountValue);
     const margin = Number(liveAccount.totalMarginUsed);
-    const equityValue = Number.isFinite(equity) && equity > 0 ? equity : 248412.5;
-    const marginPct = Number.isFinite(margin) && equityValue > 0 ? Math.min(100, Math.max(0, (margin / equityValue) * 100)) : 32;
+    // Nessun valore di ripiego inventato: su un pannello di trading un numero
+    // plausibile ma finto è peggio di un dato assente, perché è indistinguibile
+    // da uno reale. Quando il dato manca si mostra '—'.
+    const hasEquity = Number.isFinite(equity) && equity >= 0;
+    const equityValue = hasEquity ? equity : null;
+    const marginPct = (Number.isFinite(margin) && hasEquity && equity > 0)
+      ? Math.min(100, Math.max(0, (margin / equity) * 100))
+      : null;
     const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
     const usd = (value) => this.fmtUsd(value).replace('$-', '-$');
     const now = new Date();
     const timestamp = now.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) + ' EST';
 
-    setText('cockpitEquity', usd(equityValue));
-    setText('cockpitHeaderEquity', usd(equityValue));
+    setText('cockpitEquity', equityValue === null ? '—' : usd(equityValue));
+    setText('cockpitHeaderEquity', equityValue === null ? '—' : usd(equityValue));
     setText('cockpitUpdatedAt', timestamp);
-    setText('cockpitMarginUsed', `${Math.round(marginPct)}%`);
-    setText('cockpitMarginFree', `${Math.max(0, 100 - Math.round(marginPct))}% free`);
+    setText('cockpitMarginUsed', marginPct === null ? '—' : `${Math.round(marginPct)}%`);
+    setText('cockpitMarginFree', marginPct === null ? '' : `${Math.max(0, 100 - Math.round(marginPct))}% free`);
     const marginBar = document.getElementById('cockpitMarginBar');
-    if (marginBar) marginBar.style.width = `${marginPct}%`;
+    if (marginBar) marginBar.style.width = `${marginPct ?? 0}%`;
 
     if (risk.account && risk.pnl) {
       const net = Number(risk.pnl.net);

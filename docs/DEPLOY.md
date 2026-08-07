@@ -4,7 +4,25 @@ Guida per far girare ArbitrageBot **24/7** in sicurezza su un piccolo VPS, con
 denaro reale su Hyperliquid mainnet, accessibile **solo a te**.
 
 > ⚠️ Il server custodisce una **chiave agent** capace di **piazzare ordini reali**
-> (non può prelevare). Tratta `.env` e il volume `perps-data` come segreti critici.
+> (non può prelevare). Tratta i segreti e il volume `perps-data` come critici.
+
+**Indice**
+
+| § | Argomento |
+|:--|:---|
+| [0](#0-perché-non-serverless-vercel) | Perché non serverless |
+| [1](#1-provisioning-del-vps) | Provisioning del VPS |
+| [2](#2-segreti-inventario-e-modello-di-minaccia) | **Segreti: inventario e modello di minaccia** |
+| [3](#3-esposizione-due-opzioni) | Esposizione |
+| [4](#4-avvio) | Avvio |
+| [5](#5-backup-e-restore-verificato) | Backup e restore verificato |
+| [6](#6-monitoraggio-e-allerte) | Monitoraggio e allerte |
+| [7](#7-checklist-go-live-mainnet) | Checklist GO-LIVE |
+| [8](#8-kill-switch) | Kill-switch |
+| [9](#9-segreti-gestiti-con-infisical-self-hosted-vps) | Infisical self-hosted |
+| [10](#10-rotazione-della-chiave-di-cifratura--runbook) | **Rotazione della chiave — runbook** |
+| [11](#11-sicurezza-della-catena-di-fornitura-npm) | **Supply chain npm** |
+| [12](#12-risposta-a-un-sospetto-incidente) | **Risposta a un incidente** |
 
 ---
 
@@ -44,34 +62,117 @@ usermod -aG docker deploy
 
 ---
 
-## 2. Codice e segreti
+## 2. Segreti: inventario e modello di minaccia
+
+### 2.1 Cosa protegge cosa
+
+| Variabile | Livello | Cosa protegge | Se trapela |
+|:---|:---|:---|:---|
+| `AGENT_ENCRYPTION_KEY` | 🔴 critico | Cifra a riposo le chiavi agent e il token Telegram nel DB | Chi ha **anche** il DB o un backup ottiene le chiavi agent → può **piazzare ordini** |
+| `SESSION_SECRET` | 🔴 critico | Firma i token di sessione del pannello | Si forgiano sessioni valide → accesso completo al pannello |
+| `APP_PASSWORD_HASH` | 🔴 critico | Hash della password del pannello (scrypt) | È un hash, non la password: il rischio è l'attacco offline se debole |
+| `ANTHROPIC_API_KEY` | 🟠 importante | Chiave dell'Analyst AI | Abuso a tuo carico (costo economico), non accesso ai fondi |
+| `TELEGRAM_BOT_TOKEN` | 🟡 opzionale | Notifiche e comandi da chat | Chi lo ha può comandare i bot via Telegram (`/chiuditutto`, `/ferma`) |
+| `METRICS_TOKEN` | 🟡 opzionale | Protegge `/metrics` | Senza, `/metrics` è **pubblico** (vedi §2.5) |
+
+Le tre variabili **critiche** sono obbligatorie in `NODE_ENV=production`: se
+mancano o sono troppo corte, `validateConfig()` **rifiuta l'avvio** con
+`process.exit(1)`. È un fail-fast voluto — meglio un server che non parte di uno
+che opera senza le protezioni attese.
+
+> ⚠️ **Fallback di sviluppo.** Senza `AGENT_ENCRYPTION_KEY`, `secretBox` usa una
+> chiave di sviluppo **hardcoded nel sorgente**. Serve a far girare i test e lo
+> sviluppo locale senza configurazione, ma significa che qualsiasi dato cifrato in
+> quello stato è cifrato con una chiave pubblica. Non usare mai un DB nato così
+> come base per la produzione.
+
+### 2.2 Dove vivono i segreti
+
+Tre livelli, con proprietà di sicurezza diverse:
+
+| Livello | Contenuto | Protezione |
+|:---|:---|:---|
+| **Ambiente del processo** | `AGENT_ENCRYPTION_KEY`, `SESSION_SECRET`, `ANTHROPIC_API_KEY`… | In chiaro nella memoria del processo. Da `.env` (file su disco) oppure iniettati da Infisical (§9) |
+| **Database SQLite** | `agent_wallets.encrypted_key`, `settings.telegram_config.tokenEnc` | **AES-256-GCM** con chiave versionata (§2.3) |
+| **Backup** | Copia del DB | Eredita la cifratura del DB: un backup rubato è inutile **senza** la chiave (§5) |
+
+Tutto il resto del DB — bot, posizioni, trade, `risk_equity_history`,
+`risk_drawdown_state`, `ml_history`, proposte, audit — è **in chiaro**: non
+contiene segreti, ma è comunque storico operativo tuo.
+
+### 2.3 Cifratura a riposo con chiave versionata
+
+Formato del ciphertext prodotto da [`src/perps/secretBox.js`](../src/perps/secretBox.js):
+
+```
+v<id>:base64( iv[12] | authTag[16] | ciphertext )
+```
+
+Il prefisso `v<id>` marca **quale chiave** ha prodotto il valore. È ciò che rende
+la chiave **ruotabile**: le vecchie restano disponibili in sola decifratura mentre
+le nuove scritture usano già quella corrente. I valori scritti prima
+dell'introduzione del versioning non hanno prefisso e restano leggibili (vengono
+provate tutte le chiavi note; il tag GCM fa fallire in modo netto quelle sbagliate).
+
+Tre variabili governano il portachiavi:
+
+```bash
+AGENT_ENCRYPTION_KEY=...        # segreto corrente — cifra e decifra
+AGENT_ENCRYPTION_KEY_ID=1       # id del segreto corrente (default 1)
+AGENT_ENCRYPTION_KEYS_OLD=      # precedenti, SOLO decifratura: "1:vecchio;2:piuVecchio"
+```
+
+> ℹ️ **Correzione rispetto alle versioni precedenti di questa guida.** Prima si
+> leggeva *"non cambiare `AGENT_ENCRYPTION_KEY` dopo aver salvato chiavi agent"*.
+> Con il versioning **non è più vero**: la chiave si ruota, e la procedura è nel
+> runbook al §10.
+
+### 2.4 Generazione e file di configurazione
 
 ```bash
 git clone <repo> /home/deploy/arbitragebot && cd /home/deploy/arbitragebot
 cp .env.example .env && chmod 600 .env
 ```
 
-Genera i segreti e mettili in `.env`:
-
 ```bash
-# Password del pannello
 node scripts/hash-password.js 'una-password-lunga-e-robusta'   # -> APP_PASSWORD_HASH=...
 openssl rand -hex 32                                            # -> SESSION_SECRET=...
 openssl rand -hex 32                                            # -> AGENT_ENCRYPTION_KEY=...
+openssl rand -hex 32                                            # -> METRICS_TOKEN=... (se esponi /metrics)
 ```
 
-Imposta in `.env` almeno:
+Usa **sempre** `openssl rand`: la derivazione della chiave è uno SHA-256 diretto
+del segreto, adeguato per un valore ad alta entropia ma **non** per una passphrase
+scelta a mano (nessun KDF lento, nessun salt).
 
-```
+Contenuto minimo di `.env`:
+
+```bash
 NODE_ENV=production
 APP_PASSWORD_HASH=scrypt$...
-SESSION_SECRET=...
-AGENT_ENCRYPTION_KEY=...           # >=32 char; NON cambiarla dopo aver salvato chiavi agent
+SESSION_SECRET=...                 # ≥16 char imposti, ≥32 consigliati
 APP_ORIGIN=https://trading.tuodominio.it
+BIND_HOST=127.0.0.1                # dietro reverse proxy; in Docker lo forza il compose
+
+# --- Cifratura a riposo ---
+AGENT_ENCRYPTION_KEY=...           # ≥32 caratteri, obbligatoria in produzione
+AGENT_ENCRYPTION_KEY_ID=1
+AGENT_ENCRYPTION_KEYS_OLD=         # vuoto quando non c'è una rotazione in corso
+
+# --- Rete e cap di rischio ---
 HYPERLIQUID_NETWORK=testnet        # parti da testnet, poi mainnet
 ALLOW_MAINNET=false
 PERPS_MAX_POSITION_USD=500         # cap prudenti
 PERPS_MAX_DAILY_LOSS_USD=100
+PERPS_MAX_LEVERAGE=10
+PERPS_DEFAULT_LEVERAGE=3
+
+# --- Opzionali ---
+METRICS_TOKEN=                     # se vuoto, /metrics è pubblico (§2.5)
+AGENTS_ENABLED=false               # Analyst AI: advisory, non esegue mai
+ANTHROPIC_API_KEY=
+AGENT_MAX_CALLS_PER_HOUR=8         # tetto di spesa dell'Analyst
+
 DEMO_EVM_ENABLED=false             # in produzione tieni la demo EVM DISATTIVATA
 ```
 
@@ -79,8 +180,35 @@ DEMO_EVM_ENABLED=false             # in produzione tieni la demo EVM DISATTIVATA
 > reale). In produzione resta disattivata (`DEMO_EVM_ENABLED=false`, default): non vengono
 > registrate le sue route né avviati i suoi servizi. Il prodotto in produzione è **solo Perps**.
 
-> Se manca uno dei segreti obbligatori in `NODE_ENV=production`, **il server non parte**
-> (fail-fast voluto). La chiave agent senza `AGENT_ENCRYPTION_KEY` interrompe l'avvio.
+### 2.5 Verifica prima di avviare
+
+```bash
+npm run secrets:check                       # legge il file locale
+infisical run -- node scripts/check-secrets.js   # legge da Infisical (§9)
+```
+
+Stampa nome, stato e **lunghezza** di ogni variabile — **mai un valore**. Esce con
+codice ≠ 0 se manca un segreto critico in produzione, quindi è usabile in CI o in
+uno script di deploy.
+
+### 2.6 Regole operative
+
+- **`.env` a `600`** e mai committato (già in `.gitignore`, insieme a
+  `deploy/infisical/infisical.env` e a `data/`).
+- **Mai un segreto negli argomenti da riga di comando**: finiscono in `ps` e nella
+  history della shell. `hash-password.js` è l'eccezione consapevole — usa una
+  password che poi non riutilizzi altrove, oppure prefissa il comando con uno
+  spazio se la tua shell è configurata per non registrarlo.
+- **Attenzione a `docker inspect`.** Con `env_file: .env` nel compose, i segreti
+  sono visibili in `docker inspect` e a chiunque possa parlare col socket Docker.
+  Chi è nel gruppo `docker` è di fatto root. È una delle ragioni per passare a
+  Infisical (§9).
+- **`/metrics` è fuori dal gate di autenticazione** (per consentire lo scraping).
+  Senza `METRICS_TOKEN` è raggiungibile da chiunque arrivi al server: non espone
+  segreti, ma rivela attività dei bot ed errori. Con Tailscale (§3 opzione A) il
+  problema non si pone; con dominio pubblico **imposta il token**.
+- **Log**: `logger` filtra i campi sensibili, ma non fidarti mai ciecamente — se
+  incolli log in un issue o in una chat, rileggili.
 
 ---
 
@@ -102,7 +230,14 @@ mappando la porta dell'app in `docker-compose.yml` su `100.x.x.x:3000`.
 2. In `Caddyfile` sostituisci `trading.tuodominio.it` col tuo dominio.
 3. Caddy ottiene e rinnova il certificato Let's Encrypt da solo.
 
-In entrambi i casi la password app resta come secondo livello.
+In entrambi i casi la password app resta come secondo livello. Con l'opzione B
+imposta anche `METRICS_TOKEN` (§2.5).
+
+**Intestazioni e CSP.** L'app usa `helmet` con una CSP restrittiva:
+`defaultSrc 'self'`, `objectSrc 'none'`, `frameAncestors 'none'` (niente
+embedding in iframe), `formAction 'self'`. Se aggiungi risorse esterne al
+frontend devi aggiornare le direttive in [`src/server.js`](../src/server.js),
+altrimenti il browser le blocca — è il comportamento voluto.
 
 ---
 
@@ -116,9 +251,25 @@ docker compose logs -f app          # verifica il banner di avvio e l'auth ATTIV
 `restart: unless-stopped` riavvia i container dopo crash o reboot; i bot che erano
 `running` ripartono da soli (`botManager.loadFromDb`).
 
+L'immagine gira come **utente non-root** (`node`), installa le dipendenze con
+`npm ci --omit=dev` (§11) ed espone un `HEALTHCHECK` su `/health`. L'app **non è
+pubblicata sull'host**: solo Caddy espone 80/443, l'app resta sulla rete Docker interna.
+
+**Senza Docker** (sviluppo o VPS bare-metal) usa lo script di riavvio, che fa stop
+graceful, riavvio in background e verifica di `/health`:
+
+```bash
+npm run restart      # riavvia
+npm run stop         # ferma
+./scripts/restart.sh status
+```
+
+Lo script inietta automaticamente i segreti da Infisical se trova `.infisical.json`
+e la CLI installata; `USE_INFISICAL=0` lo disattiva.
+
 ---
 
-## 5. Backup off-box
+## 5. Backup e restore verificato
 
 Backup notturno via cron (sull'host):
 
@@ -128,8 +279,29 @@ Backup notturno via cron (sull'host):
            BACKUP_DIR=/home/deploy/backups /home/deploy/arbitragebot/scripts/backup.sh
 ```
 
+`backup.sh` usa l'API `.backup` di sqlite3 (consistente anche col WAL attivo),
+comprime e ruota i file (`RETENTION=14` di default).
+
+**Verifica il restore — un backup non verificato è un backup che non esiste:**
+
+```bash
+BACKUP_DIR=/home/deploy/backups ./scripts/restore-verify.sh
+```
+
+Ripristina l'ultimo backup su un DB temporaneo, ne controlla l'integrità e la
+presenza delle tabelle attese. **Non tocca il DB di produzione** ed esce con codice
+≠ 0 in caso di problemi, quindi puoi metterlo in cron subito dopo il backup.
+
 Poi sincronizza `/home/deploy/backups` **fuori dal VPS** (es. `rclone` verso object
-storage, o `restic`). Fai una prova di **restore** prima di andare live.
+storage, o `restic`).
+
+> 🔐 **Il punto di sicurezza che conta.** Le chiavi agent nel backup sono cifrate:
+> un backup rubato **senza** `AGENT_ENCRYPTION_KEY` è inservibile. Questa proprietà
+> vale **solo se chiave e backup stanno in posti diversi**. Se archivi il `.env`
+> accanto ai dump, o se Infisical gira sullo stesso host che ospita i backup, la
+> proprietà svanisce e torni ad avere un singolo punto di compromissione (vedi
+> anche l'avviso al §9). Conserva la chiave in un password manager, non nel
+> bucket dei backup.
 
 ---
 
@@ -138,20 +310,51 @@ storage, o `restic`). Fai una prova di **restore** prima di andare live.
 - **Uptime**: punta UptimeRobot / healthchecks.io su `https://.../health`.
 - **Telegram**: configura token + chat id nell'app → ricevi avvisi su entrate/uscite,
   errori e kill-switch, e puoi comandare i bot da chat (`/status`, `/chiuditutto`).
-- Log: `docker compose logs`.
+  Il token viene salvato **cifrato** sul DB (`tokenEnc`), non in chiaro.
+- **Metriche Prometheus** su `/metrics`, protette da `METRICS_TOKEN` se impostato:
+
+  ```bash
+  curl -H "Authorization: Bearer $METRICS_TOKEN" https://.../metrics
+  ```
+
+- Log: `docker compose logs` (Docker) o `logs/app.log` (script di riavvio).
 
 ---
 
 ## 7. Checklist GO-LIVE mainnet
 
-1. ✅ Segreti generati e `.env` a `600`; backup testato (restore ok).
-2. ✅ Auth attiva (login richiesto), pannello non raggiungibile in chiaro dall'esterno.
-3. ✅ **Dry-run su testnet** sul VPS: approva agent, 1 ordine manuale, 1 ciclo bot,
+**Segreti**
+
+1. ✅ `npm run secrets:check` verde con `NODE_ENV=production`.
+2. ✅ `.env` a `600` (o segreti già solo in Infisical, §9), `AGENT_ENCRYPTION_KEY`
+   copiata in un password manager **fuori dal VPS**.
+3. ✅ `AGENT_ENCRYPTION_KEY_ID` impostato e `AGENT_ENCRYPTION_KEYS_OLD` vuoto
+   (nessuna rotazione a metà).
+4. ✅ **Prova di rotazione fatta almeno una volta su testnet** (§10): è la
+   differenza tra avere una risposta all'incidente e non averla.
+
+**Dati**
+
+5. ✅ Backup automatico attivo **e** `restore-verify.sh` eseguito con esito ok.
+6. ✅ Backup sincronizzati off-box, in un posto diverso da dove tieni la chiave.
+
+**Accesso**
+
+7. ✅ Auth attiva (login richiesto), pannello non raggiungibile in chiaro dall'esterno.
+8. ✅ `METRICS_TOKEN` impostato se il dominio è pubblico.
+
+**Esercizio**
+
+9. ✅ **Dry-run su testnet** sul VPS: approva agent, 1 ordine manuale, 1 ciclo bot,
    kill-switch, `docker compose restart` → i bot ripartono, allerta Telegram arriva.
-4. ✅ Passa a mainnet: `HYPERLIQUID_NETWORK=mainnet` **e** `ALLOW_MAINNET=true`,
-   con **cap minimi**. Riavvia e rifai le verifiche con importi piccoli.
-5. ✅ Finanzia solo il capitale che puoi permetterti di perdere. L'agent **non può
-   prelevare**: tieni i fondi non operativi fuori dal conto di trading.
+10. ✅ Passa a mainnet: `HYPERLIQUID_NETWORK=mainnet` **e** `ALLOW_MAINNET=true`,
+    con **cap minimi**. All'avvio compare l'avviso rosso `MAINNET ATTIVO`; il
+    pannello richiede una connessione wallet valida per le operazioni mainnet.
+    Riavvia e rifai le verifiche con importi piccoli.
+11. ✅ Finanzia solo il capitale che puoi permetterti di perdere. L'agent **non può
+    prelevare**: tieni i fondi non operativi fuori dal conto di trading. È la
+    mitigazione strutturalmente più forte del sistema — vale più di ogni altra voce
+    di questa lista.
 
 ---
 
@@ -180,7 +383,7 @@ L'integrazione è opt-in: si attiva solo quando trova `.infisical.json` (locale)
 
 ### Perché
 
-- Sul VPS non resta alcun segreto in chiaro su disco.
+- Sul VPS non resta alcun segreto in chiaro su disco, né visibile in `docker inspect`.
 - Da N segreti sparsi si passa a **1 solo** da proteggere (il token di macchina),
   revocabile e a scadenza — a differenza di una chiave di cifratura.
 - Rotazione centralizzata senza redeploy, e traccia di chi legge cosa.
@@ -202,7 +405,9 @@ docker compose logs -f backend           # attendi "Server started"
 ```
 
 Lo script genera `ENCRYPTION_KEY`, `AUTH_SECRET` e la password di PostgreSQL
-senza stamparne i valori, ed è idempotente.
+senza stamparne i valori, ed è idempotente. Il tag dell'immagine è **fissato**
+(non `latest`): gli aggiornamenti sono una decisione esplicita, non un effetto
+collaterale di un `docker compose pull`.
 
 > ⚠️ `ENCRYPTION_KEY` cifra i segreti **dentro** Infisical. Se la perdi, quei
 > segreti non sono recuperabili. Copiala in un password manager **prima** di
@@ -263,6 +468,11 @@ networks:
 `INFISICAL_TOKEN` va tenuto fuori dal repository: un `EnvironmentFile` di systemd
 con permessi `0600`, oppure Docker secrets.
 
+L'entrypoint del container ([`scripts/docker-entrypoint.sh`](../scripts/docker-entrypoint.sh))
+riconosce il token e avvia il server sotto `infisical run --silent`. Se il token
+c'è ma la CLI manca nell'immagine, **fallisce esplicitamente** invece di ripiegare
+in silenzio su una configurazione senza segreti.
+
 ### 9.4 Verifica
 
 ```bash
@@ -282,8 +492,136 @@ Il rovescio della medaglia è che un disservizio di Infisical è un disservizio 
 bot. È il prezzo di non avere segreti in chiaro sul disco: preferibile a un'app
 che parte in stato degradato e opera senza le protezioni attese.
 
-### 9.6 Rotazione della chiave di cifratura
+---
 
-Spostare la chiave di cifratura a riposo in Infisical ha senso proprio perché ora
-è ruotabile: vedi `scripts/rotate-encryption-key.js` e il file di esempio della
-configurazione.
+## 10. Rotazione della chiave di cifratura — runbook
+
+Da eseguire **periodicamente** (es. ogni 6-12 mesi) e **immediatamente** in caso di
+sospetta esposizione della chiave o del backup (§12).
+
+Cosa viene ri-cifrato:
+
+- `agent_wallets.encrypted_key` — chiavi agent Hyperliquid
+- `settings.telegram_config.tokenEnc` — token del bot Telegram
+
+### Procedura
+
+**1. Backup, prima di tutto.**
+
+```bash
+./scripts/backup.sh && ./scripts/restore-verify.sh
+```
+
+**2. Aggiorna il portachiavi.** Sposta il segreto attuale tra le vecchie chiavi,
+metti il nuovo come corrente, incrementa l'id:
+
+```diff
+- AGENT_ENCRYPTION_KEY=vecchioSegreto
+- AGENT_ENCRYPTION_KEY_ID=1
+- AGENT_ENCRYPTION_KEYS_OLD=
++ AGENT_ENCRYPTION_KEY=nuovoSegreto        # openssl rand -hex 32
++ AGENT_ENCRYPTION_KEY_ID=2
++ AGENT_ENCRYPTION_KEYS_OLD=1:vecchioSegreto
+```
+
+L'id nella lista `KEYS_OLD` **deve** corrispondere a quello con cui i dati sono
+stati cifrati, altrimenti la decifratura fallisce.
+
+**3. Verifica a vuoto** — non scrive nulla, mostra solo cosa farebbe:
+
+```bash
+npm run secrets:rotate
+```
+
+**4. Applica:**
+
+```bash
+npm run secrets:rotate -- --apply     # via npm: nota il `--` che passa il flag
+# oppure: node scripts/rotate-encryption-key.js --apply
+```
+
+**5. Riavvia** (`docker compose restart app` o `npm run restart`) e verifica che i
+bot operino e che la notifica Telegram funzioni.
+
+**6. Dopo qualche giorno** di esercizio senza errori, svuota
+`AGENT_ENCRYPTION_KEYS_OLD` e riavvia.
+
+### Comportamento in caso di errore
+
+Lo script è **conservativo per costruzione**: se un valore non è decifrabile
+(chiave mancante nel portachiavi), lo **lascia intatto**, lo elenca in coda e esce
+con codice 1. Non sovrascrive mai un segreto che non è riuscito a leggere —
+sovrascriverlo significherebbe perderlo definitivamente.
+
+Se compaiono errori: aggiungi la chiave mancante ad `AGENT_ENCRYPTION_KEYS_OLD`
+col suo id e rilancia. Non forzare, non cancellare le righe.
+
+### Se la chiave è persa davvero
+
+Le chiavi agent nel DB non sono recuperabili. La via d'uscita esiste ed è
+indolore sul piano dei fondi: **revoca l'agent dall'interfaccia Hyperliquid** (il
+pannello dell'app sa solo *approvare* un agent, non revocarlo) e poi
+**riapprovane uno nuovo** dal pannello. L'agent non custodisce capitale — solo il
+permesso di firmare ordini — quindi il danno è operativo, non finanziario. Vale
+la pena rigenerare anche il token Telegram.
+
+---
+
+## 11. Sicurezza della catena di fornitura (npm)
+
+I segreti sono cifrati a riposo, ma **in esecuzione sono in chiaro nella memoria
+del processo e nell'ambiente**. Qualsiasi dipendenza npm gira con gli stessi
+privilegi dell'app: una libreria compromessa legge `.env` e le variabili
+d'ambiente senza dover forzare alcuna cifratura. Per un progetto Node.js che
+maneggia chiavi di trading, questa è la via d'attacco più realistica — vedi il
+caso documentato in
+[docs/KB/index/INDEX.md §D.1](KB/index/INDEX.md#d1--malicious-polymarket-bot-hides-in-hijacked-github-org),
+dove il bersaglio primario del malware era esattamente il file `.env`.
+
+**Già in atto**
+
+- `Dockerfile` usa `npm ci --omit=dev`: installazione riproducibile dal lockfile,
+  niente dipendenze di sviluppo in produzione.
+- Il container gira come utente non-root (`node`).
+- Immagini con tag fissati (`node:20-bookworm-slim`, `caddy:2`, Infisical su versione puntuale).
+
+**Da adottare**
+
+- **Rivedere il diff di `package-lock.json` a ogni aggiornamento.** È il punto di
+  ingresso di questa classe di attacco: un pacchetto typosquattato entra come
+  dipendenza transitiva e non compare mai in `package.json`.
+- **Verificare i pacchetti nuovi** prima di aggiungerli: download count, data di
+  pubblicazione, presenza di uno script `postinstall`, somiglianza sospetta col
+  nome di un pacchetto noto.
+- `npm audit signatures` e `npm audit` come step di CI.
+- Valutare `ignore-scripts=true` in `.npmrc` — attenzione: `better-sqlite3` è un
+  modulo nativo e **richiede** gli script di build, quindi va abilitato in modo
+  mirato, non disattivato in blocco.
+- Se il repo ha workflow GitHub Actions che installano dipendenze, aggiungere
+  `step-security/harden-runner` con `egress-policy: block`: rileva connessioni di
+  rete non previste durante `npm install`.
+
+---
+
+## 12. Risposta a un sospetto incidente
+
+Se sospetti che il VPS, un backup o la chiave siano stati esposti, in quest'ordine:
+
+1. **Ferma l'operatività.** Kill-switch (§8) con `closePositions: true`, oppure
+   `/chiuditutto` da Telegram.
+2. **Revoca l'agent dall'interfaccia Hyperliquid.** Toglie la capacità di piazzare
+   ordini anche a chi ha già la chiave. È l'azione che interrompe il danno — falla
+   per prima se hai un solo minuto. Va fatta su Hyperliquid, non dal pannello: qui
+   puoi solo approvare un agent nuovo.
+3. **Sposta i fondi** dal conto di trading. L'agent non può prelevare, quindi hai
+   margine: usa il wallet master.
+4. **Ruota tutti i segreti**: `AGENT_ENCRYPTION_KEY` (§10), `SESSION_SECRET` (invalida
+   tutte le sessioni), `APP_PASSWORD_HASH`, `METRICS_TOKEN`, token Telegram, chiave
+   Anthropic, e il token della machine identity Infisical.
+5. **Se il sospetto è la supply chain npm** (§11): cerca i pacchetti sospetti in
+   `node_modules/`, controlla `~/.ssh/authorized_keys` per chiavi che non riconosci
+   e `ufw status` per porte aperte inattese, ricostruisci l'immagine da lockfile
+   pulito.
+6. **Ricostruisci l'host** se hai motivo di credere che l'accesso sia stato a
+   livello di sistema. Ripristina i dati da un backup **precedente** alla finestra
+   di compromissione e riapprova un agent nuovo.

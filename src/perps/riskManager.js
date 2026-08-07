@@ -20,9 +20,30 @@ class RiskManager {
 
   /**
    * Calcola la size (in unità di coin) da aprire.
+   *
+   * IMPORTANTE: `equity` deve essere l'ACCOUNT VALUE TOTALE del conto
+   * (depositi + PnL non realizzato), MAI il solo margine libero/disponibile —
+   * la percentuale di sizing va applicata all'equity complessivo, altrimenti
+   * il sizing si riduce progressivamente man mano che il margine viene
+   * impegnato da altre posizioni.
+   *
+   * GUARD DIFENSIVO (SEC-05): un `equity`/`price` non finito o non positivo
+   * non è un caso limite normale — è quasi sempre sintomo di un bug a monte
+   * (account non ancora caricato, risposta di rete malformata, ecc.). Senza
+   * questo controllo un NaN si propagherebbe silenziosamente fino a
+   * `roundSize`, e il cap di sicurezza (`notionalUsd > maxPos`) non
+   * scatterebbe MAI perché ogni confronto con NaN è falso: l'ordine
+   * verrebbe comunque respinto dall'exchange, ma senza nessun segnale
+   * chiaro nei log fino a quel punto. Meglio fallire rumorosamente qui.
    * @returns { size, notionalUsd, marginUsd }
    */
   sizePosition(config, equity, price, szDecimals = 3) {
+    if (!Number.isFinite(equity) || equity <= 0) {
+      throw new Error(`sizePosition: equity non valido (${equity}) — deve essere l'account value totale (depositi + PnL non realizzato), non il margine libero`);
+    }
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error(`sizePosition: price non valido (${price})`);
+    }
     const leverage = Math.max(1, config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage);
     const sizing = config.sizing || { mode: 'percent', value: 10 };
 
@@ -71,6 +92,31 @@ class RiskManager {
     }
 
     return out;
+  }
+
+  /**
+   * SEC-01: aggiorna una posizione dopo un fill di aggiunta DCA (mediazione).
+   * Calcola il nuovo prezzo medio ponderato ed i nuovi TP/SL su quel prezzo,
+   * con la STESSA configurazione (percent/atr/absolute) usata all'apertura —
+   * mai valori "a occhio", altrimenti TP/SL post-DCA sarebbero incoerenti
+   * con la strategia configurata.
+   *
+   * Funzione pura (nessuna I/O): il chiamante (bot.js) si occupa di
+   * piazzare/cancellare i trigger e persistere lo stato; qui viene solo
+   * calcolato COSA piazzare. Separare il calcolo dall'orchestrazione I/O la
+   * rende testabile in isolamento, senza dover far girare un PerpsBot intero.
+   *
+   * @param position { side, entryPx, size } — posizione PRIMA di questo fill
+   * @param fillPx prezzo medio a cui è stato eseguito il fill di aggiunta
+   * @param addSize size aggiunta con questo fill (unità di coin)
+   * @returns { entryPx, size, tpPx, slPx }
+   */
+  applyDcaFill(position, fillPx, addSize, config, ctx = {}) {
+    const size = position.size + addSize;
+    // Media ponderata: nuovoEntry = (vecchioEntry×vecchiaSize + fillPx×addSize) / sizeTotale
+    const entryPx = (position.entryPx * position.size + fillPx * addSize) / size;
+    const { tpPx, slPx } = this.computeTpSl(entryPx, position.side, config, ctx);
+    return { entryPx, size, tpPx, slPx };
   }
 
   /**

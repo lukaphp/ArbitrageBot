@@ -15,9 +15,26 @@ RUN curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | bash \
 
 WORKDIR /app
 
-# Installa le dipendenze sfruttando la cache dei layer
-COPY package*.json ./
-RUN npm ci --omit=dev
+# Installa le dipendenze sfruttando la cache dei layer.
+# .npmrc (ignore-scripts=true) blocca gli script preinstall/install/postinstall/
+# prepare di TUTTE le dipendenze — vedi SEC-02. `npm ci` gira quindi senza
+# eseguire alcuno script di terze parti; riabilitiamo poi in modo MIRATO solo
+# quello che serve davvero per partire (better-sqlite3, modulo nativo: senza il
+# suo script di build l'app non si avvia), NON riabilitando gli script in blocco.
+#
+# fsevents (watcher dev-only per macOS) e hyperliquid (SDK dell'exchange) restano
+# bloccati di proposito: fsevents non serve in produzione (ed è comunque
+# un'optional dependency solo-macOS, inerte su Linux); lo script "prepare"/
+# "postinstall" di hyperliquid è stato ispezionato (node_modules/hyperliquid/
+# package.json) ed è una no-op fuori da un checkout git locale — controlla
+# `fs.existsSync('.git')`, cartella assente nel pacchetto scaricato da registry —
+# e il pacchetto pubblica già la build compilata in dist/, quindi non c'è nulla
+# da ricompilare: nessun bisogno di allowlist.
+# NOTA: `npm rebuild` eredita ignore-scripts da .npmrc, quindi va sbloccato
+# esplicitamente per questo solo pacchetto con --ignore-scripts=false — senza,
+# `npm rebuild better-sqlite3` non farebbe nulla e il binario nativo mancherebbe.
+COPY package*.json .npmrc ./
+RUN npm ci --omit=dev && npm rebuild better-sqlite3 --ignore-scripts=false
 
 # Copia il resto del codice
 COPY . .

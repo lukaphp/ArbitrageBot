@@ -25,6 +25,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { ethers } from 'ethers';
+import crypto from 'crypto';
 
 // Importa moduli bot
 import config from './config/config.js';
@@ -72,6 +73,20 @@ const __dirname = path.dirname(__filename);
 
 // Carica configurazione
 dotenv.config();
+
+/**
+ * Confronta due stringhe in tempo costante (evita che un attaccante deduca il secret
+ * misurando quanto ci mette il confronto a fallire, byte per byte). Ritorna `false`
+ * su qualunque input non valido o di lunghezza diversa, senza mai lanciare — un
+ * `timingSafeEqual` su buffer di lunghezza diversa lancerebbe invece un'eccezione.
+ */
+function constantTimeEquals(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
 
 class ArbitrageBotServer {
   constructor() {
@@ -1092,11 +1107,28 @@ class ArbitrageBotServer {
       }
     });
 
-    // Webhook segnali esterni (TradingView-style)
+    // Webhook segnali esterni (TradingView-style).
+    //
+    // Scelta deliberata (Sprint 1, SEC-04): questa rotta vive sotto '/api/*' e quindi
+    // dietro il gate `requireAuth` applicato in setupMiddleware() a tutte le API tranne
+    // login/logout/status. Di fatto non è raggiungibile da un servizio esterno come
+    // TradingView o TrendSpider, che non possiede un cookie di sessione autenticata:
+    // può chiamarla solo un client che ha già fatto login sull'app (es. uno script tuo).
+    // È voluto — vedi la sezione "Segnali esterni via webhook" in docs/MANUAL.md — non
+    // una svista: aprire l'endpoint a fonti realmente esterne è stato valutato (opzione A
+    // nel backlog Sprint 1) e scartato per questo sprint perché introdurrebbe un nuovo
+    // endpoint pubblico capace di scatenare ordini reali, cosa che non va decisa dentro
+    // uno sprint di hardening. Se in futuro serve davvero, va costruita come un progetto
+    // a sé con almeno: firma HMAC del corpo grezzo (es. header X-Signature, chiave da
+    // secret manager), un timestamp nel payload firmato con rifiuto oltre pochi minuti
+    // (anti-replay: il TTL di 5 minuti qui sotto è solo lato ricezione, non impedisce di
+    // re-inviare un payload catturato), whitelist esplicita di questo path fuori dal gate
+    // cookie (match esatto, con test di regressione che nessun'altra rotta resti aperta
+    // per errore), e un rate limit dedicato più stretto di quello globale su '/api'.
     app.post('/api/perps/webhook', (req, res) => {
       try {
         const { coin, signal, secret } = req.body;
-        if (process.env.PERPS_WEBHOOK_SECRET && secret !== process.env.PERPS_WEBHOOK_SECRET) {
+        if (process.env.PERPS_WEBHOOK_SECRET && !constantTimeEquals(secret, process.env.PERPS_WEBHOOK_SECRET)) {
           return res.status(401).json({ success: false, error: 'Secret non valido' });
         }
         if (!coin || !signal) return res.status(400).json({ success: false, error: 'coin e signal richiesti' });

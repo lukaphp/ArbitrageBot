@@ -56,13 +56,19 @@ export class PerpsBot {
     this.dailyPnl = db.getDailyPnl(this.id, this.dailyKey);
 
     // Stato posizione locale (riallineato da Hyperliquid a ogni tick)
-    this.position = null; // { id, side, size, entryPx, tpPx, slPx, slOid, openedAt }
+    this.position = null; // { id, side, size, entryPx, originalEntryPx, dcaCount, tpPx, slPx, slOid, openedAt }
     const open = db.getOpenPositionByBot(this.id);
     if (open) {
+      const trailing = open.trailing_json ? JSON.parse(open.trailing_json) : {};
       this.position = {
         id: open.id, side: open.side, size: open.size, entryPx: open.entry_px,
+        // originalEntryPx: retrocompat per posizioni aperte prima di SEC-01 (mai
+        // scritto in DB) → ripiega su entry_px, corretto finché non c'è stata
+        // ancora nessuna DCA (dopo la prima, il valore vero è persistito qui).
+        originalEntryPx: trailing.originalEntryPx ?? open.entry_px,
+        dcaCount: trailing.dcaCount || 0,
         tpPx: open.tp_px, slPx: open.sl_px, openedAt: open.opened_at,
-        slOid: open.trailing_json ? JSON.parse(open.trailing_json).slOid : null
+        slOid: trailing.slOid || null
       };
     }
   }
@@ -243,7 +249,12 @@ export class PerpsBot {
     });
     db.insertTrade({ botId: this.id, coin: this.coin, side, px: entryPx, sz: plan.size, hlOid: order.oid });
 
-    this.position = { id: posId, side, size: plan.size, entryPx, tpPx, slPx, slOid: null, openedAt: Date.now() };
+    this.position = {
+      id: posId, side, size: plan.size, entryPx,
+      originalEntryPx: entryPx, // immutabile: riferimento per le soglie progressive del DCA (mai il prezzo medio)
+      dcaCount: 0,
+      tpPx, slPx, slOid: null, openedAt: Date.now()
+    };
 
     // Piazza i trigger TP/SL (reduce-only). Ordine di chiusura: opposto al lato.
     await this._placeTpSl();
@@ -357,6 +368,13 @@ export class PerpsBot {
     return (orders || []).find(o => sameCoin(o) && o.isTrigger && /stop/i.test(o.orderType || '')) || null;
   }
 
+  /** Trova gli ordini TP (trigger reduce-only, non-stop) attivi per questa posizione — può essere più di uno con partialTp. */
+  async _findTpOrders() {
+    const orders = await this.broker.getFrontendOpenOrders(this.masterAddress, this.network);
+    const sameCoin = o => o.coin === this.coin || `${o.coin}-PERP` === this.coin || o.coin === this.coin.replace('-PERP', '');
+    return (orders || []).filter(o => sameCoin(o) && o.isTrigger && !/stop/i.test(o.orderType || ''));
+  }
+
   /**
    * GARANZIA DI PROTEZIONE: verifica che esista uno stop loss attivo sul book.
    * Se manca (ordine fallito, crash tra fill e trigger, cancellazione) prova a
@@ -440,9 +458,15 @@ export class PerpsBot {
     if (!dca || !dca.steps) return;
     const done = this.position.dcaCount || 0;
     if (done >= dca.steps) return;
+    // Soglia progressiva calcolata SEMPRE sull'ingresso ORIGINALE (immutabile),
+    // MAI sul prezzo medio aggiornato dopo una mediazione: se usassimo il
+    // prezzo medio, ogni aggiunta DCA sposterebbe in avanti il riferimento e
+    // gli step successivi scatterebbero sempre più vicini tra loro (si
+    // "comprimono"), invece di restare distanziati come da configurazione.
+    const originalEntry = this.position.originalEntryPx ?? this.position.entryPx;
     const adverse = this.position.side === 'long'
-      ? (this.position.entryPx - snapshot.price) / this.position.entryPx
-      : (snapshot.price - this.position.entryPx) / this.position.entryPx;
+      ? (originalEntry - snapshot.price) / originalEntry
+      : (snapshot.price - originalEntry) / originalEntry;
     // Soglia progressiva: step 1 a stepPercent, step 2 a 2×stepPercent, ...
     if (adverse * 100 < dca.stepPercent * (done + 1)) return;
     try {
@@ -455,13 +479,104 @@ export class PerpsBot {
         isBuy: this.position.side === 'long', size: addSize, slippage: this.config.slippage ?? 0.02
       }, this.network);
       if (order.error) return;
+
+      const fillPx = order.avgPx || snapshot.price;
+      // Prezzo medio ponderato + TP/SL ricalcolati sul nuovo entry (stessa
+      // modalità percent/atr già configurata) — calcolo puro, testato in
+      // isolamento in test/riskManager.test.js.
+      const atrVal = this._usesAtr() ? ind.atr(snapshot.candles, this.config.atrPeriod || 14) : null;
+      const updated = riskManager.applyDcaFill(this.position, fillPx, addSize, this.config, { atr: atrVal });
+
       this.position.dcaCount = done + 1;
-      this.position.size += addSize;
-      db.insertTrade({ botId: this.id, coin: this.coin, side: this.position.side, px: order.avgPx || snapshot.price, sz: addSize, hlOid: order.oid });
-      logger.info(`➕ Bot ${this.name}: DCA #${this.position.dcaCount} +${addSize} ${this.coin}`);
-      notifier.notify(`➕ <b>${this.name}</b>: DCA #${this.position.dcaCount} (+${addSize} ${this.coin})`);
+      this.position.entryPx = updated.entryPx;
+      this.position.size = updated.size;
+
+      db.insertTrade({ botId: this.id, coin: this.coin, side: this.position.side, px: fillPx, sz: addSize, hlOid: order.oid });
+      logger.info(`➕ Bot ${this.name}: DCA #${this.position.dcaCount} +${addSize} ${this.coin} → nuovo entry medio ${updated.entryPx.toFixed(4)}`);
+      notifier.notify(`➕ <b>${this.name}</b>: DCA #${this.position.dcaCount} (+${addSize} ${this.coin}) — entry medio ${updated.entryPx.toFixed(4)}`);
+
+      // TP/SL erano dimensionati sulla size PRECEDENTE: senza ri-piazzarli
+      // sulla size totale aggiornata, la parte aggiunta con questa DCA
+      // resterebbe scoperta da qualunque protezione.
+      await this._repriceTpSlAfterDca(updated.tpPx, updated.slPx);
     } catch (error) {
       logger.debug(`Bot ${this.name}: DCA fallito`, error.message);
+    }
+  }
+
+  /**
+   * Ri-piazza TP/SL con la size e i prezzi già ricalcolati (da
+   * riskManager.applyDcaFill) dopo un'aggiunta DCA. Segue la STESSA sequenza
+   * PLACE-THEN-CANCEL già usata dal trailing stop qui sotto: i nuovi trigger
+   * vengono piazzati PRIMA di cancellare i vecchi, così la posizione non
+   * resta mai scoperta nemmeno per un istante.
+   * Se il ri-piazzamento fallisce, i vecchi trigger (dimensionati sulla size
+   * precedente) restano intatti — meglio una protezione parziale che nessuna
+   * — e l'errore è loggato E notificato via Telegram, mai in silenzio.
+   */
+  async _repriceTpSlAfterDca(tpPx, slPx) {
+    if (!this.position) return;
+    const closeIsBuy = this.position.side === 'short';
+    try {
+      const oldTpOrders = await this._findTpOrders();
+      const oldSlOid = this.position.slOid;
+
+      // 1) PLACE: nuovi trigger sulla size totale aggiornata.
+      const ladder = this.config.partialTp;
+      if (Array.isArray(ladder) && ladder.length) {
+        const steps = riskManager.computeTpLadder(this.position.entryPx, this.position.side, ladder);
+        const market = marketData.getMarkets().find(m => m.coin === this.coin);
+        const szDec = market?.szDecimals ?? 3;
+        for (const st of steps) {
+          const sz = riskManager.roundSize(this.position.size * st.portion, szDec);
+          if (sz > 0) {
+            await this.broker.placeTriggerOrder({
+              masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
+              size: sz, triggerPx: st.px, tpsl: 'tp'
+            }, this.network);
+          }
+        }
+      } else if (tpPx) {
+        await this.broker.placeTriggerOrder({
+          masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
+          size: this.position.size, triggerPx: tpPx, tpsl: 'tp'
+        }, this.network);
+      }
+
+      let newSlOid = null;
+      if (slPx) {
+        const res = await this.broker.placeTriggerOrder({
+          masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
+          size: this.position.size, triggerPx: slPx, tpsl: 'sl'
+        }, this.network);
+        newSlOid = res.oid;
+      }
+
+      // 2) Stato/DB aggiornati SUBITO dopo il piazzamento (ancora prima di
+      // cancellare i vecchi trigger): da qui in poi la posizione è coperta
+      // dai nuovi trigger, non più da quelli vecchi.
+      this.position.tpPx = tpPx;
+      this.position.slPx = slPx;
+      this.position.slOid = newSlOid;
+      db.updatePosition(this.position.id, {
+        entry_px: this.position.entryPx, size: this.position.size, tp_px: tpPx, sl_px: slPx,
+        trailing_json: JSON.stringify({
+          slOid: newSlOid, originalEntryPx: this.position.originalEntryPx, dcaCount: this.position.dcaCount
+        })
+      });
+
+      // 3) CANCEL: solo ora rimuovo i vecchi trigger (mai prima del punto 1-2).
+      for (const o of oldTpOrders) {
+        await this.broker.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: o.oid }, this.network).catch(() => {});
+      }
+      if (oldSlOid && oldSlOid !== newSlOid) {
+        await this.broker.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: oldSlOid }, this.network).catch(() => {});
+      }
+
+      logger.info(`🎯 Bot ${this.name}: TP/SL ri-piazzati dopo DCA → size ${this.position.size} @ entry medio ${this.position.entryPx.toFixed(4)} (TP ${tpPx ?? '—'} · SL ${slPx ?? '—'})`);
+    } catch (error) {
+      logger.error(`Bot ${this.name}: ri-piazzamento TP/SL dopo DCA fallito`, error.message);
+      notifier.notify(`⚠️ <b>${this.name}</b>: ri-piazzamento TP/SL dopo DCA fallito su ${this.coin} — la size aggiunta potrebbe non essere protetta, verificare manualmente i trigger attivi.`);
     }
   }
 

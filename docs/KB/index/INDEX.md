@@ -173,9 +173,9 @@ coprono regimi di mercato che una strategia trend-following a regole non copre**
 
 **Perché è attinente.** [strategyEngine.js](../../../src/perps/strategyEngine.js) supporta oggi
 `indicator`, `price`, `funding`, `external` — tutte regole **a segnale singolo, posizione singola**.
-Non esiste alcun concetto di *scala di ordini*, *griglia*, o *mediazione del prezzo d'ingresso*: una
-verifica con `grep` su tutto `src/` conferma **zero occorrenze** di grid/DCA. È una famiglia di
-strategie interamente mancante, non un raffinamento.
+Il **DCA di base esiste già** ([bot.js](../../../src/perps/bot.js) `_maybeDca`: `steps`,
+`stepPercent` progressivo, `sizeMultiplier`, esposto nella UI del bot). Manca invece del tutto il
+**grid**, e mancano i raffinamenti del DCA descritti nel documento.
 
 **Spunti operativi**
 
@@ -183,8 +183,19 @@ strategie interamente mancante, non un raffinamento.
    range definito è terreno naturale per il grid. Richiede però un pezzo che oggi non c'è:
    la **gestione di ordini multipli aperti contemporaneamente per bot** (oggi 1 bot = 1 posizione).
    Prerequisito condiviso con l'AOLM (§A.1) — vale la pena progettarli insieme.
-2. **DCA / safety orders** — più semplice del grid e implementabile *dentro* l'attuale macchina a
-   stati: aggiunge scaling in su una posizione già aperta anziché ordini paralleli. Buon primo passo.
+2. **Raffinare il DCA esistente** ⚠️ — il documento descrive un DCA più strutturato: *base order*
+   distinto dai *safety order*, take profit **ricalcolato sul prezzo medio** dopo ogni aggiunta, e un
+   tetto esplicito al capitale impegnabile dalla scala. Il confronto ha fatto emergere un difetto
+   concreto nell'implementazione attuale, da verificare come primo intervento:
+
+   TP e SL sono piazzati come trigger order all'apertura con `size: this.position.size` e prezzi
+   calcolati sull'`entryPx` iniziale ([bot.js](../../../src/perps/bot.js) ~righe 238, 334-343).
+   `_maybeDca` incrementa `this.position.size` ma **non ricalcola i prezzi né ri-piazza i trigger con
+   la size aggiornata**. Dopo un'aggiunta la posizione è più grande dei trigger che dovrebbero
+   chiuderla: **lo stop copre solo la size originale**, il resto resta scoperto. Il trailing stop
+   maschera in parte il problema (ri-piazza l'SL con la size corrente), ma il TP no — e senza
+   trailing non lo maschera nulla. È la combinazione DCA + leva descritta al §B.1 come rischiosa,
+   qui però per un motivo implementativo, non strategico.
 3. **Regime detection come selettore** — il pattern `determineOptimalMode(volatility, trend)` del
    combo bot è direttamente riusabile, e **le fondamenta ci sono già**: ADX è un indicatore
    utilizzabile nelle regole ([strategyEngine.js](../../../src/perps/strategyEngine.js)) e ATR guida
@@ -474,17 +485,23 @@ d'interesse — **webhook JSON** che spara segnali al proprio bot, con esecuzion
 **Il modello proposto è interessante:** TrendSpider fa da "cervello" analitico, il bot proprietario si
 occupa **solo** di risk management ed esecuzione. È una divisione del lavoro sensata.
 
-**Attinenza — il gancio esiste già.** Il progetto ha `POST /api/perps/webhook`
+**Attinenza — il gancio esiste, ma è deliberatamente interno.** Il progetto ha `POST /api/perps/webhook`
 ([server.js:1096](../../../src/server.js#L1096)) e il tipo di regola `external` in
-[strategyEngine.js](../../../src/perps/strategyEngine.js), con scadenza dei segnali a 5 minuti. La
-strada è aperta: manca solo di percorrerla.
+[strategyEngine.js](../../../src/perps/strategyEngine.js), con scadenza dei segnali a 5 minuti.
+
+> ℹ️ **Aggiornamento (Sprint 1, SEC-04).** L'endpoint è dietro `requireAuth` + rate limit + secret a
+> confronto costante — **non raggiungibile da TrendSpider/TradingView così com'è**, per scelta
+> esplicita (opzione B, vedi [sprint1.md](../BACKLOG/sprint1.md)), non per svista. Aprirlo davvero
+> (HMAC, whitelist del path, anti-replay) resta un'opzione futura, non un debito di sicurezza attuale.
 
 **Spunti operativi**
 
-1. **Documentare e irrobustire il webhook** ⭐ — è il punto d'integrazione con *qualsiasi* fonte di
-   segnali esterna (TrendSpider, TradingView, script propri). Serve: formato del payload documentato,
-   autenticazione/HMAC del webhook, rate limiting, log dei segnali ricevuti. Attenzione: un webhook
-   che può scatenare ordini è **superficie d'attacco** — vale la §D.1.
+1. **Aprire il webhook a fonti esterne** ⭐ — oggi è raggiungibile solo da sessioni autenticate del
+   pannello stesso. Per collegarci davvero TrendSpider/TradingView servirebbe: whitelist esplicita
+   del path fuori dal gate cookie, HMAC-SHA256 sul corpo, timestamp anti-replay, rate limiting
+   dedicato — è la "opzione A" già scartata per lo Sprint 1 perché nessuna integrazione esterna era
+   in esercizio. Da riprendere quando (e se) serve davvero: un webhook che scatena ordini reali è
+   **superficie d'attacco** — vale la §D.1.
 2. **Analisi tecnica automatizzata come feature** — trendline automatiche e cluster di S/R sono
    implementabili in [indicators.js](../../../src/perps/indicators.js) (pivot detection + clustering
    dei livelli). Nuovi tipi di regola: "prezzo rompe la trendline", "prezzo entro X% da un cluster S/R".
@@ -573,9 +590,10 @@ Ordinato per **rapporto valore/sforzo**, non per tema. Ogni voce cita il documen
 
 | # | Azione | File coinvolti | Fonte |
 |:--|:---|:---|:---|
+| 0 | **TP/SL non ri-piazzati dopo un'aggiunta DCA**: dopo lo step la posizione supera la size dei trigger → stop parzialmente scoperto | [bot.js](../../../src/perps/bot.js) `_maybeDca` | §B.1 |
 | 1 | Audit supply chain npm: `npm ci`, `ignore-scripts`, audit in CI, lockfile diff in review | [package.json](../../../package.json), `.github/`, [Dockerfile](../../../Dockerfile) | §D.1 |
 | 2 | Infisical da opzionale a **default** → niente `.env` sul disco | [package.json](../../../package.json), [DEPLOY.md](../../DEPLOY.md) | §D.1 |
-| 3 | **Verificare che TP/SL siano trigger order lato exchange**, non solo loop locale | [hyperliquidClient.js](../../../src/perps/hyperliquidClient.js), [bot.js](../../../src/perps/bot.js) | §E.1 |
+| 3 | ✅ ~~Verificare che TP/SL siano trigger order lato exchange~~ — **verificato: lo sono** (`placeTriggerOrder`), sopravvivono a un crash. Resta aperto il caso DCA (riga 0) | [bot.js](../../../src/perps/bot.js) | §E.1 |
 | 4 | **Verificare la base di calcolo del sizing** (account value totale, non margine libero) | [riskManager.js](../../../src/perps/riskManager.js) | §C.2 |
 | 5 | Auth/HMAC + rate limit sul webhook che può scatenare ordini | [server.js:1096](../../../src/server.js#L1096) | §F.1 + §D.1 |
 
@@ -600,7 +618,7 @@ Ordinato per **rapporto valore/sforzo**, non per tema. Ogni voce cita il documen
 | # | Azione | File coinvolti | Fonte |
 |:--|:---|:---|:---|
 | 13 | **AOLM**: stato `pending_entry`, ordini limit con re-quote, cancel su decadimento segnale | [bot.js](../../../src/perps/bot.js), [strategyEngine.js](../../../src/perps/strategyEngine.js) | §A.1 |
-| 14 | **Strategie Grid / DCA** (richiede ordini multipli per bot — prerequisito condiviso con #13) | nuovo modulo + [strategyEngine.js](../../../src/perps/strategyEngine.js) | §B.1 |
+| 14 | **Strategia Grid** (il DCA esiste già; il grid richiede ordini multipli per bot — prerequisito condiviso con #13) | nuovo modulo + [strategyEngine.js](../../../src/perps/strategyEngine.js) | §B.1 |
 | 15 | Agent **`strategy-tuner`**: auto-tuning periodico che propone parametri via coda proposte | [runtime.js](../../../src/agents/runtime.js) + [optimizer.js](../../../src/perps/optimizer.js) | §C.1 |
 | 16 | **SLO di latenza** in metrics (istogrammi, non solo contatori) | [metrics.js](../../../src/perps/metrics.js) | §A.2 |
 | 17 | Tick **event-driven** su chiusura candela invece che su timer | [bot.js](../../../src/perps/bot.js), [marketData.js](../../../src/perps/marketData.js) | §A.2 |

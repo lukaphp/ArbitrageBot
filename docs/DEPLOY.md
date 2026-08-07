@@ -381,6 +381,9 @@ locale, senza dipendere da questa istanza.
 L'integrazione è opt-in: si attiva solo quando trova `.infisical.json` (locale) o
 `INFISICAL_TOKEN` (container). Senza, tutto funziona come prima.
 
+> Se parti in produzione senza `INFISICAL_TOKEN`, l'app stampa un banner di
+> avviso (non bloccante) all'avvio — vedi `validateConfig` in `src/config/config.js`.
+
 ### Perché
 
 - Sul VPS non resta alcun segreto in chiaro su disco, né visibile in `docker inspect`.

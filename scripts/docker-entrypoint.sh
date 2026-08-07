@@ -10,6 +10,10 @@
 #   INFISICAL_TOKEN       token della machine identity (unico segreto di bootstrap)
 #   INFISICAL_PROJECT_ID  id progetto (se non desumibile da .infisical.json)
 #   INFISICAL_ENV         ambiente Infisical, es. "prod"
+#
+# SEC-06: la stessa condizione (NODE_ENV=production + INFISICAL_TOKEN assente)
+# viene rilevata anche da src/config/config.js (validateConfig), che stampa un
+# banner ben visibile all'avvio del processo Node — informativo, non bloccante.
 set -e
 
 if [ -n "${INFISICAL_TOKEN:-}" ]; then

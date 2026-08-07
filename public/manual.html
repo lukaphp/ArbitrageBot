@@ -117,6 +117,14 @@
             opacity: 0.6;
         }
 
+        .search-empty {
+            display: none;
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            padding: 24px;
+            text-align: center;
+        }
+
         .nav-menu {
             list-style: none;
             display: flex;
@@ -243,11 +251,26 @@
             gap: 8px;
         }
 
+        .card h4 {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #e2e8f0;
+            margin-bottom: 6px;
+        }
+
         .card p {
             color: var(--text-secondary);
             font-size: 0.95rem;
             margin-bottom: 14px;
         }
+
+        .card ul, .card ol {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin: 0 0 14px 20px;
+        }
+
+        .card li { margin-bottom: 6px; }
 
         /* Feature Grid */
         .grid-2 {
@@ -262,7 +285,18 @@
             gap: 16px;
         }
 
+        .subcard {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .subcard p { font-size: 0.88rem; margin: 0; }
+
         /* Key-Value Tables & Lists */
+        .table-wrap { overflow-x: auto; }
+
         .feature-table {
             width: 100%;
             border-collapse: collapse;
@@ -277,6 +311,7 @@
             color: var(--text-muted);
             font-weight: 600;
             border-bottom: 1px solid var(--border-color);
+            white-space: nowrap;
         }
 
         .feature-table td {
@@ -331,6 +366,8 @@
         .alert-warning { background: var(--accent-amber-glow); border: 1px solid rgba(245, 158, 11, 0.3); color: #fde68a; }
         .alert-danger { background: var(--accent-red-glow); border: 1px solid rgba(244, 63, 94, 0.3); color: #fecdd3; }
 
+        .alert ul { margin: 4px 0 0 20px; }
+
         .alert-icon { font-size: 1.2rem; flex-shrink: 0; }
 
         code {
@@ -342,6 +379,28 @@
             color: #f472b6;
         }
 
+        pre {
+            background: rgba(0,0,0,0.35);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 14px 16px;
+            overflow-x: auto;
+            margin: 12px 0;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+            color: #cbd5e1;
+            font-size: 0.84rem;
+            line-height: 1.6;
+        }
+
+        .faq-item { margin-bottom: 22px; }
+        .faq-item:last-child { margin-bottom: 0; }
+        .faq-item h4 { color: var(--text-primary); margin-bottom: 6px; }
+        .faq-item p { font-size: 0.9rem; margin-bottom: 0; }
+
         /* Footer */
         footer.doc-footer {
             margin-top: 60px;
@@ -352,7 +411,12 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
         }
+
+        footer.doc-footer a { color: var(--accent-indigo); text-decoration: none; }
+        footer.doc-footer a:hover { text-decoration: underline; }
 
         @media (max-width: 900px) {
             .sidebar {
@@ -371,32 +435,42 @@
     <nav class="sidebar" aria-label="Sommario della guida">
         <div class="sidebar-brand">
             <h2>🤖 ArbitrageBot</h2>
-            <span>v2.5</span>
+            <span>v2.6</span>
         </div>
 
         <div class="search-box">
-            <input type="text" id="manualSearch" placeholder="Cerca funzioni, pulsanti, errori..." oninput="filterManual()">
+            <input type="text" id="manualSearch" placeholder="Cerca funzioni, pulsanti, errori..." oninput="filterManual()" aria-label="Cerca nel manuale">
         </div>
 
         <ul class="nav-menu">
             <li class="nav-section-title">Panoramica</li>
-            <li class="nav-item"><a href="#intro" class="active">🚀 Introduzione & Architettura</a></li>
-            <li class="nav-item"><a href="#wallet">🦊 MetaMask & Agent Wallet</a></li>
+            <li class="nav-item"><a href="#intro" class="active">🚀 Introduzione &amp; Architettura</a></li>
+            <li class="nav-item"><a href="#wallet">🦊 MetaMask &amp; Agent Wallet</a></li>
 
             <li class="nav-section-title">Interfaccia Cockpit</li>
             <li class="nav-item"><a href="#tab-dashboard">📊 Tab Dashboard</a></li>
             <li class="nav-item"><a href="#tab-execution">⚡ Tab Execution (Ordini)</a></li>
             <li class="nav-item"><a href="#tab-positions">📈 Tab Positions (Posizioni)</a></li>
-            <li class="nav-item"><a href="#tab-risk">🛡️ Tab Risk & Alerts</a></li>
-            <li class="nav-item"><a href="#tab-system">⚙️ Tab System & AI Agent</a></li>
+            <li class="nav-item"><a href="#tab-risk">🛡️ Tab Risk &amp; Alerts</a></li>
+            <li class="nav-item"><a href="#tab-system">⚙️ Tab System (Bot)</a></li>
 
-            <li class="nav-section-title">Strategie & AI</li>
-            <li class="nav-item"><a href="#indicators">📐 Indicatori Tecnici (RSI, EMA, ATR)</a></li>
-            <li class="nav-item"><a href="#analyst-ai">🧠 Analyst AI & Auto-Pilot</a></li>
+            <li class="nav-section-title">Bot &amp; Strategie</li>
+            <li class="nav-item"><a href="#bot-advanced">🎛️ Configurazione Avanzata</a></li>
+            <li class="nav-item"><a href="#paper">🧪 Paper Trading</a></li>
+            <li class="nav-item"><a href="#backtest">📉 Backtest &amp; Ottimizzazione</a></li>
+            <li class="nav-item"><a href="#ml">🔬 Modello ML &amp; Gate</a></li>
+            <li class="nav-item"><a href="#indicators">📐 Indicatori Tecnici</a></li>
 
-            <li class="nav-section-title">Integrazioni & FAQ</li>
+            <li class="nav-section-title">Intelligenza Artificiale</li>
+            <li class="nav-item"><a href="#analyst-ai">🧠 Analyst AI &amp; Proposte</a></li>
+            <li class="nav-item"><a href="#strategy-history">🗂️ Storico Strategie</a></li>
+
+            <li class="nav-section-title">Integrazioni &amp; Sicurezza</li>
+            <li class="nav-item"><a href="#webhook">🔗 Segnali Esterni (Webhook)</a></li>
             <li class="nav-item"><a href="#telegram">📱 Controllo Telegram</a></li>
-            <li class="nav-item"><a href="#faq">❓ domande Frequenti & Troubleshooting</a></li>
+            <li class="nav-item"><a href="#security">🔐 Sicurezza &amp; Segreti</a></li>
+            <li class="nav-item"><a href="#monitoring">📡 Monitoraggio &amp; Metriche</a></li>
+            <li class="nav-item"><a href="#faq">❓ FAQ &amp; Troubleshooting</a></li>
         </ul>
     </nav>
 
@@ -405,32 +479,41 @@
 
         <header class="doc-header">
             <h1>📖 Manuale Utente Completo</h1>
-            <p>Guida interattiva all'uso di ArbitrageBot Perps Trading Platform: spiegazione dettagliata di ogni interfaccia, pulsante, indicatore di rischio e automazione AI.</p>
+            <p>Guida all'uso di ArbitrageBot Perps: interfaccia, bot automatici, motore di rischio, agenti AI e integrazioni.</p>
             <div class="badge-row">
                 <span class="badge badge-green">🟢 Hyperliquid DEX Live</span>
                 <span class="badge badge-indigo">⚡ Auto-Pilot 24/7 EIP-712</span>
-                <span class="badge badge-amber">🛡️ Risk Engine & Protection</span>
+                <span class="badge badge-amber">🛡️ Risk Engine &amp; Kill-Switch</span>
             </div>
         </header>
+
+        <p class="search-empty" id="searchEmpty">Nessun risultato per questa ricerca.</p>
 
         <!-- INTRODUZIONE -->
         <section id="intro" class="doc-section">
             <div class="section-header">
-                <h2>🚀 Introduzione & Architettura</h2>
+                <h2>🚀 Introduzione &amp; Architettura</h2>
             </div>
-            
+
             <div class="card">
                 <h3>Cos'è ArbitrageBot Perps?</h3>
-                <p><strong>ArbitrageBot</strong> è una piattaforma avanzata per il trading autonomo e manuale di contratti Futures Perpetui (Perps) integrata con il protocollo decentralizzato <strong>Hyperliquid DEX</strong>. Consente di monitorare in tempo reale i prezzi di mercato, calcolare ed eseguire posizioni Long/Short con leva finanziaria, impostare stop automatici dinamici (ATR Trailing Stop) e sfruttare agenti di Intelligenza Artificiale per l'ottimizzazione e l'auto-pilotaggio 24/7.</p>
-                
+                <p><strong>ArbitrageBot</strong> è una piattaforma per il trading — manuale e automatico — di contratti Futures Perpetui (Perps) sul protocollo decentralizzato <strong>Hyperliquid</strong>. Permette di monitorare prezzi in tempo reale, aprire posizioni Long/Short con leva, impostare stop dinamici e delegare l'operatività a bot a regole, con supervisione di agenti AI.</p>
+
                 <div class="grid-2">
-                    <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-                        <h4 style="color: var(--accent-green); margin-bottom: 6px;">🌐 Dati di Mercato Reali (Live)</h4>
-                        <p style="font-size: 0.88rem; margin: 0;">I dati di ordine, book, prezzi Mid, candele storiche e tassi di funding sono integrati in tempo reale con le API trasparenti di Hyperliquid (Testnet o Mainnet).</p>
+                    <div class="subcard">
+                        <h4 style="color: var(--accent-green);">🌐 Dati di Mercato Reali (Live)</h4>
+                        <p>Prezzi mid, order book, candele storiche e funding rate arrivano dalle API Hyperliquid (testnet o mainnet). I prezzi live viaggiano su <strong>WebSocket</strong>, con polling REST come fallback automatico se la connessione cade.</p>
                     </div>
-                    <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-                        <h4 style="color: var(--accent-indigo); margin-bottom: 6px;">🔒 Sicurezza Non-Custodial</h4>
-                        <p style="font-size: 0.88rem; margin: 0;">Le tue chiavi private principali non lasciano mai MetaMask. Il trading 24/7 utilizza un <em>Agent Wallet</em> dedicato con permessi di solo trading (impossibilitato a prelevare fondi).</p>
+                    <div class="subcard">
+                        <h4 style="color: var(--accent-indigo);">🔒 Sicurezza Non-Custodial</h4>
+                        <p>La chiave privata del wallet principale non lascia mai MetaMask. Il trading 24/7 usa un <em>Agent Wallet</em> dedicato con permessi di solo trading: <strong>non può prelevare né trasferire fondi all'esterno</strong>.</p>
+                    </div>
+                </div>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">ℹ️</span>
+                    <div>
+                        <strong>Sul modulo "Arbitrage".</strong> La seconda vista dell'app è una <em>demo educativa a prezzi simulati</em>, non arbitraggio reale. È disattivata di default (<code>DEMO_EVM_ENABLED=false</code>) e va tenuta spenta in produzione. Il prodotto operativo è <strong>solo Perps</strong>.
                     </div>
                 </div>
             </div>
@@ -439,49 +522,58 @@
         <!-- WALLET & ACCOUNT -->
         <section id="wallet" class="doc-section">
             <div class="section-header">
-                <h2>🦊 MetaMask & Agent Wallet</h2>
+                <h2>🦊 MetaMask &amp; Agent Wallet</h2>
             </div>
 
             <div class="card">
                 <h3>Connessione e Autenticazione EIP-712</h3>
-                <p>Per interagire con la piattaforma occorre connettere il proprio wallet Web3 e abilitare l'Agent Wallet per il trading automatico.</p>
+                <p>Per operare occorre connettere il wallet Web3 e abilitare l'Agent Wallet per il trading automatico.</p>
 
+                <div class="table-wrap">
                 <table class="feature-table">
                     <thead>
                         <tr>
                             <th>Elemento UI</th>
                             <th>Azione / Funzione</th>
-                            <th>Descrizione Dettagliata</th>
+                            <th>Descrizione</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
                             <td><span class="btn-demo btn-demo-primary">🦊 Connetti MetaMask</span></td>
-                            <td>Connessione Wallet Master</td>
-                            <td>Stabilisce la connessione con l'estensione MetaMask per identificare il wallet titolare dei fondi.</td>
+                            <td>Connessione wallet master</td>
+                            <td>Identifica il wallet titolare dei fondi. <strong>Su mainnet è obbligatoria</strong>: senza wallet connesso le operazioni sono bloccate.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">⚡ Abilita Trading Autonomo</span></td>
-                            <td>Firma EIP-712 Agent Wallet</td>
-                            <td>Genera una coppia di chiavi agent e richiede una singola firma EIP-712 (<code>approveAgent</code>). Questa autorizza l'Agent Wallet a inviare ordini in background senza richiedere un popup MetaMask per ogni operazione.</td>
+                            <td>Firma EIP-712 <code>approveAgent</code></td>
+                            <td>Genera una coppia di chiavi agent e richiede <strong>una sola</strong> firma. Da quel momento il server invia ordini in background senza popup MetaMask per ogni operazione.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">ACCOUNT UNIFICATO (USDC)</span></td>
-                            <td>Collaterale Flessibile</td>
-                            <td>Hyperliquid supporta l'account unificato: gli USDC presenti nel tuo portafoglio Spot fungono direttamente da margine per il trading dei Perps.</td>
+                            <td>Collaterale flessibile</td>
+                            <td>Hyperliquid usa un account unificato: gli USDC nel saldo Spot fanno da margine per i Perps.</td>
                         </tr>
                         <tr>
                             <td><span class="btn-demo btn-demo-outline">🔄 Trasferisci USDC a Perp</span></td>
-                            <td>Trasferimento Interno</td>
-                            <td>Permette di spostare USDC dal saldo Spot al saldo Perp (e viceversa) tramite firma typed data.</td>
+                            <td>Trasferimento interno</td>
+                            <td>Sposta USDC tra saldo Spot e saldo Perp tramite firma typed data.</td>
                         </tr>
                     </tbody>
                 </table>
+                </div>
 
                 <div class="alert alert-info">
                     <span class="alert-icon">💡</span>
                     <div>
-                        <strong>Garanzia di Sicurezza Hyperliquid:</strong> La firma <code>approveAgent</code> concede l'autorizzazione ESCLUSIVAMENTE ad aprire, modificare o chiudere posizioni. L'Agent Wallet non possiede il permesso di ritirare o trasferire fondi all'esterno.
+                        <strong>Garanzia strutturale.</strong> La firma <code>approveAgent</code> autorizza <strong>esclusivamente</strong> ad aprire, modificare e chiudere posizioni. L'agent non ha il permesso di ritirare fondi: anche in caso di compromissione totale del server, il capitale non può uscire dal tuo conto.
+                    </div>
+                </div>
+
+                <div class="alert alert-warning">
+                    <span class="alert-icon">⚠️</span>
+                    <div>
+                        <strong>Revoca di un agent.</strong> Se sospetti una compromissione, la revoca si effettua <strong>dall'interfaccia Hyperliquid</strong>: il pannello dell'app sa solo approvare un agent nuovo, non revocare quello esistente.
                     </div>
                 </div>
             </div>
@@ -494,20 +586,9 @@
             </div>
 
             <div class="card">
-                <h3>Panoramica Generale delle Performance e dello Stato</h3>
-                <p>La vista Dashboard offre un quadro immediato dell'andamento del capitale, delle posizioni aperte e degli indicatori sintetici.</p>
+                <h3>Panoramica di capitale, posizioni e stato</h3>
 
-                <div class="grid-2" style="margin-bottom: 16px;">
-                    <div style="background: rgba(255,255,255,0.02); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-                        <h4>📈 Grafico Equity & Performance</h4>
-                        <p style="font-size: 0.88rem;">Mostra l'evoluzione temporale del valore del tuo conto (Equity in USD) aggiornato in tempo reale tramite campionamenti periodici.</p>
-                    </div>
-                    <div style="background: rgba(255,255,255,0.02); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-                        <h4>⚠️ Indicatori Sintetici di Rischio</h4>
-                        <p style="font-size: 0.88rem;">Visualizza il Livello di Rischio attuale, la percentuale di Margine Utilizzato e gli Alert attivi sul portafoglio.</p>
-                    </div>
-                </div>
-
+                <div class="table-wrap">
                 <table class="feature-table">
                     <thead>
                         <tr>
@@ -518,354 +599,729 @@
                     <tbody>
                         <tr>
                             <td><span class="ui-element">EQUITY</span></td>
-                            <td>Valore totale del conto (Capitale depositato + PnL non realizzato delle posizioni aperte).</td>
+                            <td>Valore totale del conto: capitale depositato + PnL non realizzato delle posizioni aperte.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">UNREALIZED PnL</span></td>
-                            <td>Profitto o perdita potenziale complessiva sulle posizioni attualmente aperte in mercato.</td>
+                            <td>Profitto o perdita potenziale sulle posizioni attualmente aperte.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">MARGIN USED</span></td>
-                            <td>Ammontare di capitale attualmente bloccato a garanzia delle posizioni attive.</td>
+                            <td>Capitale bloccato a garanzia delle posizioni attive.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">ALERTS BADGE</span></td>
-                            <td>Contatore in tempo reale delle avvertenze di rischio (es. margine elevato, perdita giornaliera, feed disconnessi). Cliccando sul badge si viene reindirizzati al tab Risk.</td>
+                            <td>Contatore in tempo reale delle avvertenze di rischio (margine elevato, perdita giornaliera, feed disconnessi). Cliccandolo si passa al tab Risk.</td>
                         </tr>
                     </tbody>
                 </table>
+                </div>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">📈</span>
+                    <div>
+                        <strong>Grafico Equity persistente.</strong> I campioni dell'equity sono salvati su database, quindi la curva e il calcolo del <em>drawdown</em> <strong>sopravvivono ai riavvii</strong> dell'applicazione: non ripartono da zero a ogni restart.
+                    </div>
+                </div>
             </div>
         </section>
 
         <!-- COCKPIT EXECUTION -->
         <section id="tab-execution" class="doc-section">
             <div class="section-header">
-                <h2>⚡ Tab Execution (Impostazione ed Esecuzione Ordini)</h2>
+                <h2>⚡ Tab Execution (Ordini Manuali)</h2>
             </div>
 
             <div class="card">
-                <h3>Form Ordine Manuale & Parametri Avanzati</h3>
-                <p>Nel tab Execution puoi inserire manualmente ordini di acquisto/vendita sui contratti perp supportati (es. SOL-PERP, BTC-PERP, ETH-PERP).</p>
+                <h3>Form ordine e parametri</h3>
 
+                <div class="table-wrap">
                 <table class="feature-table">
                     <thead>
                         <tr>
-                            <th>Campo / Controllo UI</th>
-                            <th>Tipo Input</th>
-                            <th>Descrizione & Utilizzo</th>
+                            <th>Campo / Controllo</th>
+                            <th>Tipo</th>
+                            <th>Descrizione</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
                             <td><span class="ui-element">Order Market</span></td>
-                            <td>Dropdown Select</td>
-                            <td>Seleziona l'asset su cui fare trading (es. SOL-PERP). Mostra accanto il prezzo <em>MID</em> attuale di mercato.</td>
-                        </tr>
-                        <tr>
-                            <td><span class="ui-element">Order Type</span></td>
                             <td>Select</td>
-                            <td>Scegli tra <strong>Market</strong> (esecuzione immediata al prezzo corrente) o <strong>Limit</strong> (ordine pendente a un prezzo specifico).</td>
+                            <td>Asset su cui operare (es. SOL, BTC, ETH). Mostra accanto il prezzo <em>MID</em> corrente.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">Leverage (Leva)</span></td>
-                            <td>Slider / Number</td>
-                            <td>Imposta la leva finanziaria da 1x a 20x. La leva moltiplica la dimensione del notionale a parità di margine.</td>
+                            <td>Slider / Numero</td>
+                            <td>Leva finanziaria. Il tetto è <code>PERPS_MAX_LEVERAGE</code> (default 20x), il valore iniziale è <code>PERPS_DEFAULT_LEVERAGE</code> (default 3x).</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">Margin (USD)</span></td>
-                            <td>Number Input</td>
-                            <td>Importo in dollari da allocare per la singola operazione. Il notionale finale equivale a: <code>Margine × Leva</code>.</td>
+                            <td>Numero</td>
+                            <td>Capitale allocato all'operazione. Notionale finale = <code>Margine × Leva</code>.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">Take Profit (TP)</span></td>
-                            <td>Number Input</td>
-                            <td>Prezzo obiettivo al raggiungimento del quale la posizione verrà automaticamente chiusa in guadagno.</td>
+                            <td>Numero</td>
+                            <td>Prezzo obiettivo al raggiungimento del quale la posizione viene chiusa in guadagno.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">Stop Loss (SL)</span></td>
-                            <td>Number Input</td>
-                            <td>Prezzo limite di sicurezza oltre il quale la posizione viene liquidata in perdita per salvaguardare il saldo.</td>
-                        </tr>
-                        <tr>
-                            <td><span class="ui-element">ATR Trailing Stop</span></td>
-                            <td>Checkbox + Multiplier</td>
-                            <td>Abilita uno Stop Loss dinamico basato sull'Average True Range. Lo stop si sposta automaticamente a favore del trend mantenendo una distanza proporzionale alla volatilità.</td>
+                            <td>Numero</td>
+                            <td>Prezzo di chiusura in perdita, a protezione del saldo.</td>
                         </tr>
                         <tr>
                             <td><span class="btn-demo btn-demo-success">🟢 LONG (BUY)</span></td>
-                            <td>Button Action</td>
-                            <td>Apre una posizione rialzista: ottieni un profitto se il prezzo dell'asset aumenta.</td>
+                            <td>Azione</td>
+                            <td>Apre una posizione rialzista: profitto se il prezzo sale.</td>
                         </tr>
                         <tr>
                             <td><span class="btn-demo btn-demo-danger">🔴 SHORT (SELL)</span></td>
-                            <td>Button Action</td>
-                            <td>Apre una posizione ribassista: ottieni un profitto se il prezzo dell'asset diminuisce.</td>
+                            <td>Azione</td>
+                            <td>Apre una posizione ribassista: profitto se il prezzo scende.</td>
                         </tr>
                     </tbody>
                 </table>
+                </div>
+
+                <div class="alert alert-warning">
+                    <span class="alert-icon">⚠️</span>
+                    <div>
+                        <strong>Gli ordini manuali sono eseguiti a mercato.</strong> Non esiste (ancora) un tipo d'ordine <em>limit</em> per l'inserimento manuale: l'ordine entra al prezzo corrente con una tolleranza di slippage (default 2%). Tienine conto sui mercati poco liquidi.
+                    </div>
+                </div>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">🛡️</span>
+                    <div>
+                        <strong>TP e SL vivono sull'exchange.</strong> Vengono registrati come <em>trigger order</em> lato Hyperliquid, non come controlli nel loop locale: se il server si spegne o va in crash, gli stop restano attivi e proteggono la posizione.
+                    </div>
+                </div>
+
+                <p style="margin-bottom:0"><strong>Prima dell'invio</strong> ogni ordine passa dal motore di rischio: leva, notionale e limiti di portafoglio sono verificati lato server. Un ordine che viola un limite viene <strong>rifiutato con la motivazione</strong>, non ridimensionato in silenzio.</p>
             </div>
         </section>
 
         <!-- COCKPIT POSITIONS -->
         <section id="tab-positions" class="doc-section">
             <div class="section-header">
-                <h2>📈 Tab Positions (Gestione Posizioni Attive)</h2>
+                <h2>📈 Tab Positions (Posizioni Attive)</h2>
             </div>
 
             <div class="card">
-                <h3>Monitoraggio e Chiusura delle Posizioni Aperte</h3>
-                <p>Elenca tutte le posizioni attualmente aperte nel tuo account Hyperliquid, evidenziando PnL percentuale, prezzo d'ingresso e opzioni di chiusura rapida.</p>
+                <h3>Monitoraggio e chiusura</h3>
 
+                <div class="table-wrap">
                 <table class="feature-table">
                     <thead>
                         <tr>
-                            <th>Colonna / Elemento</th>
+                            <th>Colonna</th>
                             <th>Descrizione</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
-                            <td><span class="ui-element">Coin & Direction</span></td>
-                            <td>Simbolo dell'asset e direzione (LONG o SHORT con badge colorato verde/rosso).</td>
+                            <td><span class="ui-element">Coin &amp; Direction</span></td>
+                            <td>Asset e direzione (LONG o SHORT, con badge colorato).</td>
                         </tr>
                         <tr>
-                            <td><span class="ui-element">Size & Notional</span></td>
-                            <td>Dimensione della posizione espressa in numero di token e valore equivalente in USD.</td>
+                            <td><span class="ui-element">Size &amp; Notional</span></td>
+                            <td>Dimensione in token e controvalore in USD.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">Entry Price</span></td>
-                            <td>Prezzo medio di carico a cui è stata aperta la posizione.</td>
+                            <td>Prezzo medio di carico della posizione.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">Mark Price</span></td>
-                            <td>Prezzo corrente stimato del contratto per il calcolo del PnL non realizzato.</td>
+                            <td>Prezzo corrente usato per il calcolo del PnL non realizzato.</td>
                         </tr>
                         <tr>
-                            <td><span class="ui-element">PnL (USD & %)</span></td>
-                            <td>Rendimento attuale in dollari e percentuale sul margine investito.</td>
+                            <td><span class="ui-element">PnL (USD &amp; %)</span></td>
+                            <td>Rendimento in dollari e in percentuale sul margine investito.</td>
                         </tr>
                         <tr>
                             <td><span class="btn-demo btn-demo-danger">Chiudi Posizione</span></td>
-                            <td>Invia un ordine Market contrario della medesima dimensione per chiudere istantaneamente la posizione ed azzerare l'esposizione.</td>
+                            <td>Invia un ordine market contrario di pari dimensione, azzerando l'esposizione.</td>
                         </tr>
                     </tbody>
                 </table>
+                </div>
             </div>
         </section>
 
         <!-- COCKPIT RISK & ALERTS -->
         <section id="tab-risk" class="doc-section">
             <div class="section-header">
-                <h2>🛡️ Tab Risk & Alerts (Protezione Capitale e Gestione Rischio)</h2>
+                <h2>🛡️ Tab Risk &amp; Alerts</h2>
             </div>
 
             <div class="card">
-                <h3>Motore di Controllo del Rischio Integrato</h3>
-                <p>ArbitrageBot è dotato di un sistema multilivello per preservare il saldo da perdite incontrollate, drawdown severi o malfunzionamenti di rete.</p>
+                <h3>Tre livelli di controllo indipendenti</h3>
+                <p>Tutti applicati <strong>lato server</strong>, prima di ogni esecuzione.</p>
 
-                <div class="alert alert-warning">
-                    <span class="alert-icon">⚠️</span>
-                    <div>
-                        <strong>Regole di Protezione Attive:</strong>
-                        <ul style="margin-left: 20px; margin-top: 4px;">
-                            <li><strong>Max Daily Loss (Perdita Massima Giornaliera):</strong> Raggiunto il limite stabilito (es. $50/giorno), il sistema blocca automaticamente l'apertura di nuovi bot o ordini manuali per 24 ore.</li>
-                            <li><strong>Max Drawdown Peak:</strong> Monitora la distanza dal picco massimo di equity raggiunto nella sessione.</li>
-                        </ul>
-                    </div>
-                </div>
+                <h4>1 · Limiti per singolo bot</h4>
+                <p>Configurabili nel form del bot: <em>Max Daily Loss</em> e <em>Max Position</em> propri di quel bot.</p>
 
+                <h4>2 · Limiti globali di portafoglio</h4>
+                <p>Validi per <strong>tutti</strong> i bot e per gli ordini manuali:</p>
+
+                <div class="table-wrap">
                 <table class="feature-table">
                     <thead>
                         <tr>
-                            <th>Controllo UI / Azione</th>
+                            <th>Limite</th>
+                            <th>Default</th>
+                            <th>Effetto</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><strong>Max posizioni concorrenti</strong></td><td>3</td><td>Blocca nuove aperture oltre la soglia.</td></tr>
+                        <tr><td><strong>Max esposizione totale</strong></td><td>2× max position</td><td>Somma dei notionali aperti.</td></tr>
+                        <tr><td><strong>Max perdite consecutive</strong></td><td>3</td><td>Oltre la soglia scatta un cooldown.</td></tr>
+                        <tr><td><strong>Cooldown</strong></td><td>60 min</td><td>Durata dello stop forzato dopo le perdite consecutive.</td></tr>
+                    </tbody>
+                </table>
+                </div>
+
+                <h4 style="margin-top:20px">3 · Gate deterministico unico</h4>
+                <div class="alert alert-info">
+                    <span class="alert-icon">🔒</span>
+                    <div>
+                        <strong>Ogni</strong> esecuzione — che venga da un bot a regole o da una proposta approvata dell'Analyst AI — attraversa lo <strong>stesso</strong> gate di rischio. È deterministico: stesse condizioni, stesso esito. <strong>L'AI non lo può aggirare.</strong> Le azioni che <em>riducono</em> il rischio (chiusure, pausa, stop più stretti) non vengono bloccate dai cap.
+                    </div>
+                </div>
+
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Controllo UI</th>
                             <th>Funzione</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
                             <td><span class="ui-element">Risk Score Gauge</span></td>
-                            <td>Valutazione sintetica del livello di rischio complessivo da 0 (Basso) a 100 (Critico).</td>
+                            <td>Valutazione sintetica del rischio complessivo da 0 (basso) a 100 (critico).</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">Limiti di Portafoglio</span></td>
-                            <td>Pannello di configurazione dove impostare <em>Max Position Size</em>, <em>Max Combined Leverage</em> e <em>Max Daily Loss</em>.</td>
+                            <td>Pannello di configurazione dei limiti globali sopra elencati.</td>
                         </tr>
                         <tr>
-                            <td><span class="btn-demo btn-demo-danger">🛑 KILL-SWITCH DI EMERGENZA</span></td>
-                            <td>Interruttore prioritario che arresta istantaneamente tutti i bot automatici e blocca qualsiasi nuova operazione. Opzionalmente può chiudere a mercato tutte le posizioni aperte.</td>
+                            <td><span class="btn-demo btn-demo-danger">🛑 KILL-SWITCH</span></td>
+                            <td>Ferma istantaneamente tutti i bot e blocca ogni nuova operazione. Opzionalmente chiude a mercato tutte le posizioni aperte.</td>
                         </tr>
                     </tbody>
                 </table>
+                </div>
+
+                <p style="margin:14px 0 0"><strong>Il kill-switch è raggiungibile anche da Telegram</strong> (<code>/chiuditutto</code>) e via API <code>POST /api/perps/killswitch</code>: utile per averlo a portata di mano da fuori dall'interfaccia.</p>
             </div>
         </section>
 
         <!-- SYSTEM & BOTS -->
         <section id="tab-system" class="doc-section">
             <div class="section-header">
-                <h2>⚙️ Tab System, Auto-Pilot & AI Agent</h2>
+                <h2>⚙️ Tab System (Bot Automatici)</h2>
             </div>
 
             <div class="card">
-                <h3>Bot Automatici e Integrazione Analyst AI</h3>
-                <p>Questa sezione consente di creare, configurare ed avviare Bot di Trading autonomi basati su strategie tecniche o guidati dall'Analyst AI.</p>
+                <h3>Come funziona un bot</h3>
+                <p>Un bot = <strong>un mercato + una strategia</strong>. Esegue un ciclo periodico:</p>
+                <pre><code>snapshot mercato → valutazione regole → ingresso / gestione / uscita → persistenza</code></pre>
+                <p>La macchina a stati è <code>idle</code> → <code>in_position</code> → <code>idle</code>. Ogni ciclo è isolato in try/catch: un errore non ferma il bot né il processo. I bot in stato <em>running</em> <strong>ripartono da soli</strong> dopo un riavvio del server.</p>
 
-                <div class="grid-2">
-                    <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-                        <h4>🤖 Bot di Trading Custom</h4>
-                        <p style="font-size: 0.88rem;">Puoi creare un bot personalizzato combinando regole di ingresso (es. RSI &lt; 30, EMA Cross) e regole di uscita collegate a Stop Loss e Take Profit.</p>
-                    </div>
-                    <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 8px; border: 1px solid var(--border-color);">
-                        <h4>🧠 Analyst AI (Proposte Strategiche)</h4>
-                        <p style="font-size: 0.88rem;">L'agente AI analizza la struttura del mercato e propone strategie complete corredate di backtest, Sharpe ratio, win rate e stima dei costi.</p>
-                    </div>
-                </div>
-
-                <table class="feature-table" style="margin-top: 16px;">
+                <div class="table-wrap">
+                <table class="feature-table">
                     <thead>
                         <tr>
-                            <th>Azione Bot</th>
+                            <th>Azione</th>
                             <th>Descrizione</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
                             <td><span class="btn-demo btn-demo-success">▶️ Avvia Bot</span></td>
-                            <td>Mette in esecuzione il bot: l'agente monitorerà le candele a ogni intervallo ed eseguirà automaticamente ordini in base alle regole definite.</td>
+                            <td>Il bot inizia a valutare le candele a ogni intervallo ed esegue secondo le regole definite.</td>
                         </tr>
                         <tr>
                             <td><span class="btn-demo btn-demo-outline">⏸️ Pausa / Stop</span></td>
-                            <td>Sospende il monitoraggio del bot senza cancellarne la configurazione.</td>
+                            <td>Sospende il monitoraggio senza cancellare la configurazione.</td>
                         </tr>
                         <tr>
                             <td><span class="btn-demo btn-demo-primary">⚙️ Ottimizza Parametri</span></td>
-                            <td>Esegue uno studio Walk-Forward Optimization (In-Sample / Out-of-Sample) per trovare i parametri di indicatori più performanti ed evitare l'overfitting.</td>
+                            <td>Lancia una Walk-Forward Optimization per trovare i parametri migliori evitando l'overfitting.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-outline">📊 Monitor</span></td>
+                            <td>Apre il dettaglio live: ultima valutazione, <strong>motivo della decisione</strong> e gate attivi. È il primo posto dove guardare se un bot non opera.</td>
                         </tr>
                     </tbody>
                 </table>
+                </div>
+
+                <h4 style="margin-top:20px">Regole di ingresso e uscita</h4>
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Tipo di regola</th>
+                            <th>Cosa valuta</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>indicator</code></td><td>RSI, EMA, SMA, MACD, Bollinger, ADX — con periodo, operatore e soglia.</td></tr>
+                        <tr><td><code>price</code></td><td>Confronto diretto sul prezzo (<code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code>).</td></tr>
+                        <tr><td><code>funding</code></td><td>Confronto sul funding rate previsto. Utile per strategie carry o contrarian.</td></tr>
+                        <tr><td><code>external</code></td><td>Soddisfatta da un segnale ricevuto via webhook (vedi sezione dedicata).</td></tr>
+                    </tbody>
+                </table>
+                </div>
+                <p style="margin-top:12px;margin-bottom:0">Le regole d'ingresso si combinano con <code>logic: any</code> (default — basta una) oppure <code>logic: all</code> (devono valere tutte).</p>
+            </div>
+        </section>
+
+        <!-- CONFIGURAZIONE AVANZATA -->
+        <section id="bot-advanced" class="doc-section">
+            <div class="section-header">
+                <h2>🎛️ Configurazione Avanzata dei Bot</h2>
+            </div>
+
+            <div class="card">
+                <h3>Sizing e cadenza</h3>
+                <ul>
+                    <li><strong>Sizing mode</strong>: <code>percent</code> (percentuale dell'equity) o <code>fixed</code> (importo in USD).</li>
+                    <li><strong>Interval</strong>: timeframe delle candele valutate (1m, 5m, 15m, 1h, 4h, 1d).</li>
+                    <li><strong>Direction</strong>: long, short o entrambe.</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>Uscite</h3>
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr><th>Modulo</th><th>Descrizione</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="ui-element">Take Profit / Stop Loss</span></td>
+                            <td>Modalità <code>percent</code> (percentuale dall'ingresso) oppure <strong><code>atr</code></strong> (multiplo dell'Average True Range: lo stop si adatta alla volatilità reale del mercato).</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Trailing Stop</span></td>
+                            <td>Stop che segue il prezzo a favore del trend, in modalità <code>percent</code> o <code>atr</code>. Aggiornato sull'exchange: il vecchio trigger viene rimosso <em>solo dopo</em> che il nuovo è stato accettato, così la posizione non resta mai scoperta.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Partial Take Profit</span></td>
+                            <td>Scala di prese di profitto parziali: chiude frazioni della posizione a livelli successivi invece di uscire tutto in una volta.</td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>Ingressi condizionati</h3>
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr><th>Modulo</th><th>Descrizione</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="ui-element">Conferma multi-timeframe (MTF)</span></td>
+                            <td>Prima di aprire, verifica che un timeframe superiore concordi (confronto con una EMA, periodo default 50). Se non concorda il bot resta fermo e lo scrive nella motivazione.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Gate ML</span></td>
+                            <td>Apre solo se il modello statistico stima una probabilità superiore a <code>minProb</code> (default 0.55).</td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>DCA — mediazione del prezzo d'ingresso</h3>
+                <p>Se il prezzo va <strong>contro</strong> la posizione, il bot può aggiungere size a soglie progressive.</p>
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr><th>Parametro</th><th>Significato</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>steps</code></td><td>Numero massimo di aggiunte.</td></tr>
+                        <tr><td><code>stepPercent</code></td><td>Soglia della prima aggiunta. Le successive scattano a multipli: step 2 a <code>2 × stepPercent</code>, step 3 a <code>3 × stepPercent</code>…</td></tr>
+                        <tr><td><code>sizeMultiplier</code></td><td>Dimensione dell'aggiunta come multiplo della size corrente.</td></tr>
+                    </tbody>
+                </table>
+                </div>
+
+                <div class="alert alert-danger">
+                    <span class="alert-icon">🚨</span>
+                    <div>
+                        <strong>Il DCA aumenta l'esposizione mentre sei in perdita.</strong> È l'esatto opposto di uno stop loss e va usato con cognizione: su un mercato con leva, mediare un trend avverso è il modo più diretto per trasformare una perdita gestibile in una liquidazione. Usalo con <code>steps</code> bassi, e <strong>mai senza uno stop loss finale</strong>.
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- PAPER TRADING -->
+        <section id="paper" class="doc-section">
+            <div class="section-header">
+                <h2>🧪 Paper Trading (Forward-Test)</h2>
+            </div>
+
+            <div class="card">
+                <p>Ogni bot ha un flag <span class="ui-element">PAPER</span>. Attivandolo:</p>
+                <ul>
+                    <li><strong>prezzi, candele e segnali restano reali e live</strong>;</li>
+                    <li><strong>solo l'esecuzione è simulata</strong> da un broker interno.</li>
+                </ul>
+                <p style="margin-bottom:0">È il modo corretto di validare una strategia dopo il backtest e prima del denaro reale: il backtest ti dice come <em>sarebbe</em> andata sui dati passati, il paper trading ti dice come <em>sta</em> andando sul mercato di adesso, senza rischio. I bot in paper mode mostrano un badge <strong>PAPER</strong> nella lista.</p>
+            </div>
+        </section>
+
+        <!-- BACKTEST & OPTIMIZER -->
+        <section id="backtest" class="doc-section">
+            <div class="section-header">
+                <h2>📉 Backtest &amp; Ottimizzazione Walk-Forward</h2>
+            </div>
+
+            <div class="card">
+                <h3>Backtest</h3>
+                <p>Rigioca la strategia sulle candele storiche di Hyperliquid e ne misura l'edge: win rate, profit factor, expectancy, max drawdown e return.</p>
+                <p>Il backtester <strong>riusa gli stessi moduli dei bot live</strong> — strategy engine e risk manager — quindi riflette il comportamento reale invece di approssimarlo. <strong>Niente look-ahead</strong>: il segnale a ogni candela usa solo le candele chiuse fino a quel punto, l'entrata avviene alla chiusura della candela di segnale, e TP/SL sono verificati sui massimi/minimi delle candele successive.</p>
+            </div>
+
+            <div class="card">
+                <h3>Ottimizzazione (Hyperopt walk-forward)</h3>
+                <p>Cerca la combinazione di parametri migliore eseguendo molti backtest e classificandoli per obiettivo (expectancy, profit factor, SQN…).</p>
+                <p>La difesa contro l'overfitting è la <strong>validazione walk-forward</strong>: l'ottimizzazione gira sulla prima parte del periodo (<em>in-sample</em>), poi il vincitore viene verificato sull'ultima parte, <strong>mai vista durante la ricerca</strong> (<em>out-of-sample</em>). Se l'edge regge anche fuori campione è più credibile; se crolla, i parametri erano sovra-ottimizzati.</p>
+
+                <div class="alert alert-warning">
+                    <span class="alert-icon">⚠️</span>
+                    <div>I risultati sono <strong>storici e statistici</strong>. Non garantiscono rendimenti futuri. Guarda sempre il risultato <em>out-of-sample</em>, non quello in-sample.</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ML PREDICTOR -->
+        <section id="ml" class="doc-section">
+            <div class="section-header">
+                <h2>🔬 Modello ML &amp; Gate Probabilistico</h2>
+            </div>
+
+            <div class="card">
+                <p>Un modello statistico leggero — regressione logistica, senza dipendenze pesanti — stima la probabilità che il prezzo salga nelle prossime candele a partire da feature tecniche: RSI, distanza dalle EMA, istogramma MACD, %b di Bollinger, ritorni recenti e volatilità.</p>
+
+                <h4>Come si usa</h4>
+                <p>Non decide le operazioni: fa da <strong>gate</strong>. Il bot apre solo se la probabilità stimata supera <code>minProb</code>. Le decisioni restano delle regole.</p>
+
+                <div class="alert alert-warning">
+                    <span class="alert-icon">📊</span>
+                    <div>
+                        <strong>Onestà sui numeri.</strong> Con dati di mercato reali l'accuratezza realistica è del <strong>50-56%</strong>. Il modello riporta sempre l'accuratezza in validazione <strong>e la baseline</strong> (la classe maggioritaria). Se l'accuratezza è vicina alla baseline, il modello <strong>non ha edge</strong> e non va usato da solo — il pannello lo dice esplicitamente, invece di mostrare solo una percentuale lusinghiera.
+                    </div>
+                </div>
+
+                <h4>Decadimento nel tempo</h4>
+                <p style="margin-bottom:0">Un agente dedicato riaddestra periodicamente i modelli (default ogni 6 ore) e traccia l'andamento dell'accuratezza contro la baseline, così il modello non invecchia in silenzio nella cache. Se l'edge scende sotto soglia il gate smette di filtrare e ricevi un avviso Telegram.</p>
             </div>
         </section>
 
         <!-- INDICATORI TECNICI -->
         <section id="indicators" class="doc-section">
             <div class="section-header">
-                <h2>📐 Indicatori Tecnici Spiegati</h2>
+                <h2>📐 Indicatori Tecnici</h2>
             </div>
 
             <div class="card">
                 <div class="grid-2">
                     <div>
                         <h4 style="color: var(--accent-indigo);">RSI (Relative Strength Index)</h4>
-                        <p style="font-size: 0.88rem;">Oscillatore di momentum tra 0 e 100. Valori sotto 30 indicano zona di <em>Ipervenduto</em> (opportunità di acquisto/Long), mentre valori sopra 70 indicano <em>Ipercomprato</em> (opportunità di vendita/Short).</p>
+                        <p style="font-size: 0.88rem;">Oscillatore di momentum tra 0 e 100. Sotto 30 = <em>ipervenduto</em> (spunto long); sopra 70 = <em>ipercomprato</em> (spunto short).</p>
                     </div>
                     <div>
                         <h4 style="color: var(--accent-green);">EMA / SMA (Medie Mobili)</h4>
-                        <p style="font-size: 0.88rem;">Calcolano la media ponderata o semplice dei prezzi su N periodi. Il crossover di una media veloce (es. EMA 9) sopra una lenta (es. EMA 21) genera un segnale di trend rialzista.</p>
+                        <p style="font-size: 0.88rem;">Media ponderata o semplice su N periodi. Il crossover di una media veloce (EMA 9) sopra una lenta (EMA 21) segnala un trend rialzista.</p>
+                    </div>
+                    <div>
+                        <h4 style="color: var(--accent-indigo);">MACD</h4>
+                        <p style="font-size: 0.88rem;">Differenza tra due EMA più istogramma. Istogramma &gt; 0 = fase rialzista, &lt; 0 = ribassista.</p>
+                    </div>
+                    <div>
+                        <h4 style="color: var(--accent-green);">Bollinger Bands</h4>
+                        <p style="font-size: 0.88rem;">Banda di volatilità attorno a una media. Prezzo oltre la banda superiore o inferiore = estensione o breakout.</p>
                     </div>
                     <div>
                         <h4 style="color: var(--accent-amber);">ADX (Average Directional Index)</h4>
-                        <p style="font-size: 0.88rem;">Misura la forza di un trend indipendentemente dalla sua direzione. Un ADX superiore a 25 indica un trend solido in corso, utile per filtrare i falsi segnali in fasi laterali.</p>
+                        <p style="font-size: 0.88rem;">Misura la <strong>forza</strong> del trend a prescindere dalla direzione. Sopra 25 = trend solido; sotto = fase laterale, utile per filtrare i falsi segnali.</p>
                     </div>
                     <div>
                         <h4 style="color: var(--accent-red);">ATR (Average True Range)</h4>
-                        <p style="font-size: 0.88rem;">Misura la volatilità assoluta del mercato. Utilizzato dal bot per adattare la ampiezza dello Stop Loss e del Trailing Stop in modo proporzionale ai movimenti dell'asset.</p>
+                        <p style="font-size: 0.88rem;">Volatilità assoluta del mercato. Adatta l'ampiezza di Stop Loss e Trailing Stop ai movimenti reali dell'asset.</p>
                     </div>
                 </div>
+            </div>
+        </section>
+
+        <!-- ANALYST AI -->
+        <section id="analyst-ai" class="doc-section">
+            <div class="section-header">
+                <h2>🧠 Analyst AI &amp; Coda delle Proposte</h2>
+            </div>
+
+            <div class="card">
+                <h3>Advisory, mai esecutivo</h3>
+                <p>L'agente Analyst (basato su Claude) gira periodicamente, raccoglie evidenze con strumenti <strong>read-only</strong> e produce <strong>proposte</strong>.</p>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">🔒</span>
+                    <div>
+                        <strong>Non esegue mai nulla.</strong> Ogni proposta finisce in una coda di approvazione e diventa operativa solo dopo il tuo consenso esplicito — e comunque dopo essere passata dal gate di rischio deterministico.
+                    </div>
+                </div>
+
+                <p>Tipi di proposta ammessi: <code>pause_bot</code>, <code>close</code>, <code>tighten_sl</code>, <code>open</code>, <code>new_strategy_candidate</code>.</p>
+
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr><th>Azione</th><th>Effetto</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><span class="btn-demo btn-demo-success">Approva</span></td><td>Esegue la proposta, previa validazione del gate di rischio.</td></tr>
+                        <tr><td><span class="btn-demo btn-demo-danger">Rifiuta</span></td><td>Scarta la proposta.</td></tr>
+                        <tr><td><span class="btn-demo btn-demo-outline">Collega a bot</span></td><td>Associa la proposta a un bot esistente.</td></tr>
+                    </tbody>
+                </table>
+                </div>
+
+                <p style="margin-top:14px">Le proposte non approvate <strong>scadono</strong> (default 30 minuti): un suggerimento basato su un mercato di mezz'ora fa non deve poter essere eseguito ore dopo.</p>
+            </div>
+
+            <div class="card">
+                <h3>💰 Controllo dei costi</h3>
+                <p>L'Analyst consuma token a pagamento. Due protezioni:</p>
+                <ul>
+                    <li><strong>Cap di chiamate/ora</strong> (<code>AGENT_MAX_CALLS_PER_HOUR</code>, default 8).</li>
+                    <li><strong>Modale di stima costo</strong>: prima di lanciare un'analisi on-demand ricevi un preventivo in dollari. Solo il primo input è misurato esattamente; il resto è un <em>intervallo</em>, perché il numero di iterazioni del loop agentico non è noto in anticipo. La stima tiene conto del <em>prompt caching</em> (scrivere in cache costa 1,25×, rileggere 0,1×).</li>
+                </ul>
+                <p style="margin-bottom:0">I prezzi per milione di token sono configurabili (<code>PRICE_SONNET_IN</code>, <code>PRICE_SONNET_OUT</code>…) e vanno aggiornati se i listini cambiano. Con <code>AGENTS_ENABLED=false</code> il costo è zero e la piattaforma resta pienamente funzionante.</p>
+            </div>
+        </section>
+
+        <!-- STRATEGY HISTORY -->
+        <section id="strategy-history" class="doc-section">
+            <div class="section-header">
+                <h2>🗂️ Storico Strategie</h2>
+            </div>
+
+            <div class="card">
+                <p>Ogni strategia proposta o testata viene archiviata, con:</p>
+                <ul>
+                    <li><strong>Categorizzazione</strong> per esito e tipo;</li>
+                    <li><strong>Riciclo</strong>: recupera una strategia archiviata e la ripropone come candidata, senza doverla riscrivere;</li>
+                    <li><strong>Eliminazione in blocco</strong> per fare pulizia.</li>
+                </ul>
+                <p style="margin-bottom:0">È la memoria di lungo periodo del sistema: serve a non ri-testare per la terza volta una strategia che era già stata scartata.</p>
+            </div>
+        </section>
+
+        <!-- WEBHOOK -->
+        <section id="webhook" class="doc-section">
+            <div class="section-header">
+                <h2>🔗 Segnali Esterni (Webhook)</h2>
+            </div>
+
+            <div class="card">
+                <p>Il tipo di regola <code>external</code> è pensato per innescare l'operatività da un segnale ricevuto via HTTP:</p>
+                <pre><code>POST /api/perps/webhook
+{ "coin": "ETH", "signal": "open_long" }</code></pre>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">🔒</span>
+                    <div>
+                        <strong>Stato attuale: endpoint interno, non raggiungibile da servizi esterni.</strong> Come tutte le rotte <code>/api/*</code> (eccetto login/logout/status), il webhook è dietro il gate di autenticazione dell'app: richiede il cookie di sessione emesso al login. Un servizio come <strong>TradingView o TrendSpider non può chiamarlo così com'è</strong>, perché non ha modo di ottenere quel cookie — e questo vale a prescindere dal secret opzionale (<code>PERPS_WEBHOOK_SECRET</code>), che è un controllo aggiuntivo, non un sostituto dell'autenticazione. Oggi puoi usarlo solo da un client che ha già una sessione autenticata (es. uno script tuo che fa login e poi POST). È una scelta deliberata di questo sprint, non una svista: aprirlo davvero a fonti esterne è un progetto a sé (firma HMAC del corpo, timestamp anti-replay, whitelist del path, rate limit dedicato), non ancora pianificato.
+                    </div>
+                </div>
+
+                <p>Il segnale resta valido <strong>5 minuti</strong>, poi scade: un webhook arrivato durante un disservizio non deve poter aprire una posizione mezz'ora dopo, su un mercato che nel frattempo è cambiato. Questo TTL protegge solo dai segnali "vecchi" rimasti in coda: non è una difesa anti-replay (un payload catturato e re-inviato entro i 5 minuti verrebbe comunque accettato come nuovo).</p>
             </div>
         </section>
 
         <!-- TELEGRAM -->
         <section id="telegram" class="doc-section">
             <div class="section-header">
-                <h2>📱 Integrazione & Controllo via Telegram</h2>
+                <h2>📱 Controllo via Telegram</h2>
             </div>
 
             <div class="card">
-                <h3>Ricevi Notifiche e Controlla il Bot via Chat</h3>
-                <p>Impostando il <code>TELEGRAM_BOT_TOKEN</code> e <code>TELEGRAM_CHAT_ID</code> nel file di configurazione, il bot invierà notifiche istantanee per ogni operazione eseguita e risponderà ai tuoi comandi.</p>
+                <h3>Notifiche e comandi da chat</h3>
+                <p>Configura token e chat id <strong>dal pannello</strong> (vengono salvati <strong>cifrati</strong> sul database) oppure via <code>TELEGRAM_BOT_TOKEN</code> / <code>TELEGRAM_CHAT_ID</code>. Ricevi notifiche su entrate, uscite, errori, limiti raggiunti e kill-switch.</p>
 
+                <div class="table-wrap">
                 <table class="feature-table">
                     <thead>
-                        <tr>
-                            <th>Comando Telegram</th>
-                            <th>Risposta del Bot</th>
-                        </tr>
+                        <tr><th>Comando</th><th>Effetto</th></tr>
                     </thead>
                     <tbody>
-                        <tr>
-                            <td><code>/status</code></td>
-                            <td>Restituisce lo stato corrente del server, l'equity aggiornata e l'elenco dei bot attivi.</td>
-                        </tr>
-                        <tr>
-                            <td><code>/positions</code></td>
-                            <td>Elenca le posizioni aperte in tempo reale con i relativi PnL non realizzati.</td>
-                        </tr>
-                        <tr>
-                            <td><code>/stopall</code></td>
-                            <td>Attiva istantaneamente il Kill-Switch fermando tutte le automazioni.</td>
-                        </tr>
-                        <tr>
-                            <td><code>/help</code></td>
-                            <td>Mostra il menu di aiuto con tutti i comandi supportati.</td>
-                        </tr>
+                        <tr><td><code>/start</code>, <code>/help</code></td><td>Menu di aiuto con i comandi supportati.</td></tr>
+                        <tr><td><code>/status</code></td><td>Stato del server, equity e bot attivi.</td></tr>
+                        <tr><td><code>/saldo</code></td><td>Saldo e margine del conto.</td></tr>
+                        <tr><td><code>/posizioni</code></td><td>Posizioni aperte con PnL non realizzato.</td></tr>
+                        <tr><td><code>/bot</code>, <code>/bots</code></td><td>Elenco dei bot configurati e loro stato.</td></tr>
+                        <tr><td><code>/avvia &lt;bot&gt;</code></td><td>Avvia un bot.</td></tr>
+                        <tr><td><code>/ferma &lt;bot&gt;</code></td><td>Ferma un bot.</td></tr>
+                        <tr><td><code>/chiuditutto</code></td><td><strong>Kill-switch</strong>: ferma tutto e chiude le posizioni.</td></tr>
+                        <tr><td><code>/proposte</code></td><td>Elenca le proposte dell'Analyst AI in attesa.</td></tr>
+                        <tr><td><code>/approva &lt;id&gt;</code></td><td>Approva una proposta.</td></tr>
+                        <tr><td><code>/rifiuta &lt;id&gt;</code></td><td>Rifiuta una proposta.</td></tr>
                     </tbody>
                 </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- SECURITY -->
+        <section id="security" class="doc-section">
+            <div class="section-header">
+                <h2>🔐 Sicurezza &amp; Gestione dei Segreti</h2>
+            </div>
+
+            <div class="card">
+                <p>Quattro punti che vale la pena conoscere anche come semplice utente.</p>
+
+                <h4>1 · L'agent non può prelevare</h4>
+                <p>È la garanzia strutturale: nessun bug software e nessuna compromissione del server può far uscire i fondi dal tuo conto Hyperliquid.</p>
+
+                <h4>2 · I segreti sono cifrati a riposo</h4>
+                <p>Chiavi agent e token Telegram sono salvati sul database con <strong>AES-256-GCM</strong>. La chiave di cifratura è <strong>versionata</strong>, quindi <strong>ruotabile</strong>: se sospetti un'esposizione puoi cambiarla senza perdere l'accesso ai dati esistenti.</p>
+
+                <h4>3 · Il pannello è protetto</h4>
+                <p>Password con hash scrypt e sessione firmata. In produzione l'app <strong>si rifiuta di partire</strong> se mancano i segreti critici: meglio un server fermo di uno che opera senza le protezioni attese.</p>
+
+                <h4>4 · Mainnet richiede due conferme esplicite</h4>
+                <p style="margin-bottom:0">Servono <code>HYPERLIQUID_NETWORK=mainnet</code> <strong>e</strong> <code>ALLOW_MAINNET=true</code>. All'avvio compare un avviso rosso, e nell'interfaccia le operazioni mainnet richiedono un wallet connesso.</p>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">📄</span>
+                    <div>Backup, esposizione di rete, <strong>runbook di rotazione della chiave</strong> e risposta a un incidente sono trattati in <code>docs/DEPLOY.md</code>.</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- MONITORAGGIO -->
+        <section id="monitoring" class="doc-section">
+            <div class="section-header">
+                <h2>📡 Monitoraggio &amp; Metriche</h2>
+            </div>
+
+            <div class="card">
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr><th>Endpoint / Fonte</th><th>Contenuto</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>/health</code></td><td>Stato del servizio, da collegare a un servizio di uptime monitoring.</td></tr>
+                        <tr><td><code>/metrics</code></td><td>Metriche in formato Prometheus: errori API, errori nei tick dei bot, ordini inviati, riconnessioni WebSocket. Se <code>METRICS_TOKEN</code> è impostato richiede il token; <strong>altrimenti è pubblico</strong>.</td></tr>
+                        <tr><td>Log</td><td><code>docker compose logs</code> in produzione, <code>logs/app.log</code> con lo script di riavvio.</td></tr>
+                    </tbody>
+                </table>
+                </div>
             </div>
         </section>
 
         <!-- FAQ & TROUBLESHOOTING -->
         <section id="faq" class="doc-section">
             <div class="section-header">
-                <h2>❓ Domande Frequenti (FAQ) & Troubleshooting</h2>
+                <h2>❓ FAQ &amp; Troubleshooting</h2>
             </div>
 
             <div class="card">
-                <div style="margin-bottom: 20px;">
-                    <h4 style="color: var(--text-primary); margin-bottom: 6px;">Q: Perché vedo "Connetti MetaMask" se ho aperto l'applicazione?</h4>
-                    <p style="font-size: 0.9rem;">R: Fai clic sul pulsante <span class="btn-demo btn-demo-primary">🦊 Connetti MetaMask</span> in alto a destra. Per visualizzare saldi ed effettuare operazioni è necessario collegare il tuo indirizzo Ethereum/Arbitrum.</p>
+                <div class="faq-item">
+                    <h4>Perché vedo ancora "Connetti MetaMask"?</h4>
+                    <p>Il wallet non è collegato. Clicca <span class="btn-demo btn-demo-primary">🦊 Connetti MetaMask</span> in alto a destra. Su mainnet la connessione è obbligatoria per operare.</p>
                 </div>
 
-                <div style="margin-bottom: 20px;">
-                    <h4 style="color: var(--text-primary); margin-bottom: 6px;">Q: Cosa significa "Agent Wallet pending approvazione"?</h4>
-                    <p style="font-size: 0.9rem;">R: Significa che la chiave agent è stata generata in locale ma richiede la tua firma EIP-712 in MetaMask per consentire all'agente di inviare ordini in background per conto tuo.</p>
+                <div class="faq-item">
+                    <h4>Cosa significa "Agent Wallet pending approvazione"?</h4>
+                    <p>La coppia di chiavi agent è stata generata sul server, ma manca la tua firma EIP-712 in MetaMask. Finché non firmi, l'agent non può inviare ordini.</p>
                 </div>
 
-                <div>
-                    <h4 style="color: var(--text-primary); margin-bottom: 6px;">Q: I miei fondi sono al sicuro in modalità Testnet / Mainnet?</h4>
-                    <p style="font-size: 0.9rem;">R: In modalità Testnet le operazioni avvengono su rete di prova senza l'uso di denaro reale. In modalità Mainnet viene utilizzato l'exchange reale Hyperliquid con fondi USDC depositati da te; l'agent wallet possiede permessi limitati esclusivamente all'apertura/chiusura delle posizioni.</p>
+                <div class="faq-item">
+                    <h4>I miei fondi sono al sicuro in Testnet / Mainnet?</h4>
+                    <p>In testnet si opera su rete di prova, senza denaro reale. In mainnet si usa l'exchange reale con i tuoi USDC; l'agent ha permessi limitati ad aprire e chiudere posizioni e <strong>non può prelevare</strong>.</p>
+                </div>
+
+                <div class="faq-item">
+                    <h4>Il bot non apre mai una posizione. Perché?</h4>
+                    <p>Apri il <strong>Monitor</strong> del bot: mostra l'ultima valutazione e la motivazione. Le cause più frequenti, in ordine: (1) candele insufficienti a scaldare gli indicatori — su timeframe lunghi serve tempo; (2) conferma multi-timeframe non concorde; (3) gate ML sotto la soglia <code>minProb</code>; (4) un limite di portafoglio raggiunto o un cooldown attivo; (5) kill-switch inserito.</p>
+                </div>
+
+                <div class="faq-item">
+                    <h4>Ho impostato TP/SL: restano attivi se il server si spegne?</h4>
+                    <p>Sì. Sono registrati come <em>trigger order</em> su Hyperliquid, non gestiti in memoria dal bot. È il motivo per cui vale la pena impostarli sempre.</p>
+                </div>
+
+                <div class="faq-item">
+                    <h4>Il backtest è ottimo ma in reale va male.</h4>
+                    <p>È il caso classico dell'overfitting. Verifica che l'ottimizzazione sia stata walk-forward e guarda il risultato <strong>out-of-sample</strong>, non quello in-sample. Poi passa dal <strong>paper trading</strong> prima del denaro reale: è lo stadio che separa una strategia che ha funzionato sul passato da una che funziona adesso.</p>
+                </div>
+
+                <div class="faq-item">
+                    <h4>L'Analyst AI ha proposto un'operazione ma non è stata eseguita.</h4>
+                    <p>Le proposte richiedono approvazione esplicita e scadono dopo <code>AGENT_PROPOSAL_TTL_MIN</code> minuti. Se l'hai approvata e comunque non è passata, è stato il <strong>gate di rischio</strong> a bloccarla: la motivazione compare nel log di audit.</p>
+                </div>
+
+                <div class="faq-item">
+                    <h4>Quanto mi costa l'Analyst AI?</h4>
+                    <p>Dipende da modello e frequenza. Usa la modale di stima prima di lanciare un'analisi on-demand e tieni <code>AGENT_MAX_CALLS_PER_HOUR</code> basso. Con <code>AGENTS_ENABLED=false</code> il costo è zero e la piattaforma resta pienamente funzionante: gli agenti sono un supporto, non un requisito.</p>
                 </div>
             </div>
         </section>
 
         <footer class="doc-footer">
-            <div>🤖 <strong>ArbitrageBot Platform</strong> — Documentazione e Manuale Utente Ufficiale</div>
-            <div>Aggiornato: Agosto 2026 · Versione 2.5</div>
+            <div>🤖 <strong>ArbitrageBot Platform</strong> — Manuale Utente · versione testuale in <code>docs/MANUAL.md</code></div>
+            <div>Aggiornato: 7 agosto 2026 · Versione 2.6</div>
         </footer>
 
     </main>
 
     <script>
         function filterManual() {
-            const query = document.getElementById('manualSearch').value.toLowerCase();
-            const cards = document.querySelectorAll('.card, .doc-section');
-            cards.forEach(el => {
-                const text = el.textContent.toLowerCase();
-                if (text.includes(query)) {
-                    el.style.display = '';
-                } else {
-                    el.style.display = 'none';
-                }
+            const query = document.getElementById('manualSearch').value.trim().toLowerCase();
+            const sections = document.querySelectorAll('section.doc-section');
+            const empty = document.getElementById('searchEmpty');
+            let visible = 0;
+
+            sections.forEach(section => {
+                // Le card vengono sempre ripristinate: il filtro agisce per sezione,
+                // altrimenti una card nascosta da una ricerca precedente resterebbe tale.
+                section.querySelectorAll('.card').forEach(card => { card.style.display = ''; });
+
+                const match = !query || section.textContent.toLowerCase().includes(query);
+                section.style.display = match ? '' : 'none';
+                if (match) visible++;
             });
+
+            empty.style.display = visible === 0 ? 'block' : 'none';
         }
 
-        // Active link highlight on scroll
+        // Evidenziazione della voce di menu attiva durante lo scroll
         window.addEventListener('scroll', () => {
             const sections = document.querySelectorAll('section.doc-section');
             const navItems = document.querySelectorAll('.nav-item a');
             let current = '';
 
             sections.forEach(section => {
-                const sectionTop = section.offsetTop - 100;
-                if (pageYOffset >= sectionTop) {
+                if (section.style.display === 'none') return;
+                if (window.scrollY >= section.offsetTop - 100) {
                     current = section.getAttribute('id');
                 }
             });

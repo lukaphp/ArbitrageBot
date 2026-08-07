@@ -241,6 +241,11 @@ export const API_CONFIG = {
   }
 };
 
+// SEC-06: garantisce che il banner "nessun secret manager" sia stampato al
+// massimo una volta per processo, anche se validateConfig() viene richiamata
+// più volte (es. in test).
+let secretManagerWarningShown = false;
+
 /**
  * Validazione configurazione critica
  */
@@ -248,6 +253,27 @@ export function validateConfig() {
   const errors = [];
   const isProd = process.env.NODE_ENV === 'production';
   const hlNetwork = HYPERLIQUID_CONFIG.defaultNetwork;
+
+  // --- SEC-06: avviso (non bloccante) se la produzione parte senza secret
+  // manager. Stessa condizione già usata da scripts/docker-entrypoint.sh per
+  // decidere se iniettare i segreti da Infisical: assenza di INFISICAL_TOKEN.
+  // Un deploy con variabili Docker dirette resta legittimo — l'avvio NON deve
+  // fermarsi — ma merita un banner ben visibile, non una riga persa nel log.
+  if (isProd && !process.env.INFISICAL_TOKEN && !secretManagerWarningShown) {
+    secretManagerWarningShown = true;
+    console.warn([
+      '',
+      '⚠️⚠️⚠️  AVVISO: nessun secret manager rilevato  ⚠️⚠️⚠️',
+      '───────────────────────────────────────────────────────────────',
+      'NODE_ENV=production ma INFISICAL_TOKEN non è impostato: i segreti',
+      'provengono da variabili d\'ambiente Docker "in chiaro", non da un',
+      'secret manager. Resta un modo di operare legittimo, ma meno protetto',
+      '(nessuna rotazione centralizzata, valori visibili con `docker inspect`).',
+      'Per attivare Infisical vedi docs/DEPLOY.md §9.',
+      '───────────────────────────────────────────────────────────────',
+      ''
+    ].join('\n'));
+  }
 
   // --- Sicurezza di produzione (segreti obbligatori) ---
   // NOTA: NETWORK_MODE riguarda l'arbitraggio EVM (resta testnet); la rete

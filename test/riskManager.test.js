@@ -45,6 +45,63 @@ test('checkLimits: ok entro i limiti', () => {
   assert.equal(r.ok, true);
 });
 
+// SEC-05: guard difensivo su sizePosition — equity/price non validi devono
+// sollevare un errore esplicito, mai propagare NaN in silenzio.
+test('sizePosition: rifiuta equity undefined', () => {
+  assert.throws(() => riskManager.sizePosition({}, undefined, 50, 3), /equity non valido/);
+});
+
+test('sizePosition: rifiuta equity NaN', () => {
+  assert.throws(() => riskManager.sizePosition({}, NaN, 50, 3), /equity non valido/);
+});
+
+test('sizePosition: rifiuta equity zero', () => {
+  assert.throws(() => riskManager.sizePosition({}, 0, 50, 3), /equity non valido/);
+});
+
+test('sizePosition: rifiuta equity negativo', () => {
+  assert.throws(() => riskManager.sizePosition({}, -500, 50, 3), /equity non valido/);
+});
+
+test('sizePosition: rifiuta price non valido', () => {
+  assert.throws(() => riskManager.sizePosition({}, 10000, 0, 3), /price non valido/);
+  assert.throws(() => riskManager.sizePosition({}, 10000, NaN, 3), /price non valido/);
+});
+
+// SEC-01: applyDcaFill — media ponderata + ricalcolo TP/SL sul nuovo entry.
+test('applyDcaFill: media ponderata corretta e size sommata', () => {
+  const position = { side: 'long', entryPx: 100, size: 1 };
+  const r = riskManager.applyDcaFill(position, 90, 1, {
+    tp: { enabled: true, mode: 'percent', value: 10 },
+    sl: { enabled: true, mode: 'percent', value: 5 }
+  });
+  assert.equal(r.size, 2);
+  assert.equal(r.entryPx, 95); // (100*1 + 90*1) / 2
+  assert.equal(r.tpPx, 95 * 1.10);
+  assert.equal(r.slPx, 95 * 0.95);
+});
+
+test('applyDcaFill: pesi diversi tra size vecchia e size aggiunta', () => {
+  const position = { side: 'short', entryPx: 200, size: 3 };
+  const r = riskManager.applyDcaFill(position, 220, 1, {
+    tp: { enabled: true, mode: 'percent', value: 5 },
+    sl: { enabled: true, mode: 'percent', value: 5 }
+  });
+  assert.equal(r.size, 4);
+  assert.equal(r.entryPx, (200 * 3 + 220 * 1) / 4);
+});
+
+test('applyDcaFill: modalità atr rispettata (non percent)', () => {
+  const position = { side: 'long', entryPx: 100, size: 1 };
+  const r = riskManager.applyDcaFill(position, 90, 1, {
+    tp: { enabled: true, mode: 'atr', value: 2 },
+    sl: { enabled: true, mode: 'atr', value: 1 }
+  }, { atr: 3 });
+  assert.equal(r.entryPx, 95);
+  assert.equal(r.tpPx, 95 + 2 * 3);
+  assert.equal(r.slPx, 95 - 1 * 3);
+});
+
 test('computeTrailing long: alza lo stop solo a favore', () => {
   const cfg = { trailing: { enabled: true, mode: 'percent', value: 1 } };
   const up = riskManager.computeTrailing({ side: 'long', slPx: 95 }, 100, cfg); // candidate 99 > 95

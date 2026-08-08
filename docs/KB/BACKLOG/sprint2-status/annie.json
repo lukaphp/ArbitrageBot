@@ -1,0 +1,9 @@
+{
+  "agent": "annie",
+  "updatedAt": null,
+  "reviews": {
+    "TEST-01": { "status": "not_started", "notes": "" },
+    "CI-01": { "status": "not_started", "notes": "" }
+  },
+  "refinementCandidates": []
+}

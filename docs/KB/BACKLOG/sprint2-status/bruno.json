@@ -1,0 +1,8 @@
+{
+  "agent": "bruno",
+  "updatedAt": null,
+  "tasks": {
+    "WS-01": { "status": "not_started", "criteriaChecked": [false, false, false, false, false, false, false, false], "notes": "" },
+    "TEST-01": { "status": "not_started", "criteriaChecked": [false, false, false, false, false], "notes": "" }
+  }
+}

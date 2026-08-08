@@ -1,0 +1,9 @@
+{
+  "agent": "joshua",
+  "updatedAt": null,
+  "tasks": {
+    "DEP-01": { "status": "not_started", "criteriaChecked": [false, false, false, false, false, false], "notes": "" },
+    "CI-01": { "status": "not_started", "criteriaChecked": [false, false, false, false], "notes": "" },
+    "OPS-01": { "status": "not_started", "criteriaChecked": [false, false, false], "notes": "" }
+  }
+}

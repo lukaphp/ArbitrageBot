@@ -1,0 +1,68 @@
+{
+  "sprint": "Sprint 2",
+  "source": "docs/KB/BACKLOG/sprint2.md",
+  "generatedAt": "2026-08-08",
+  "tasks": [
+    {
+      "id": "DEP-01",
+      "title": "Aggiornamento delle dipendenze vulnerabili",
+      "owner": "joshua",
+      "reviewer": null,
+      "sp": 5,
+      "priority": "P0",
+      "criteriaCount": 6
+    },
+    {
+      "id": "WS-01",
+      "title": "Watchdog di riconnessione per il WebSocket Hyperliquid",
+      "owner": "bruno",
+      "reviewer": null,
+      "sp": 3,
+      "priority": "P1",
+      "criteriaCount": 8
+    },
+    {
+      "id": "TEST-01",
+      "title": "Copertura test per gli script di rotazione chiavi/segreti",
+      "owner": "bruno",
+      "reviewer": "annie",
+      "sp": 3,
+      "priority": "P1",
+      "criteriaCount": 5,
+      "note": "Nato da una scoperta di Annie in SEC-03; assegnato a Bruno per l'implementazione perché Annie non ha accesso a Edit/Write. Annie rivede prima della review col PO."
+    },
+    {
+      "id": "CI-01",
+      "title": "harden-runner da audit a block",
+      "owner": "joshua",
+      "reviewer": "annie",
+      "sp": 2,
+      "priority": "P2",
+      "criteriaCount": 4,
+      "note": "Continuazione tecnica di SEC-03. Annie definisce l'allowlist dai log osservati, Joshua la applica a ci.yml."
+    },
+    {
+      "id": "OPS-01",
+      "title": "Rinnovo automatico degli SHA pinnati (GitHub Actions)",
+      "owner": "joshua",
+      "reviewer": null,
+      "sp": 2,
+      "priority": "P2",
+      "criteriaCount": 3
+    },
+    {
+      "id": "CHORE-01",
+      "title": "Verifica igiene .npmrc",
+      "owner": "po",
+      "reviewer": null,
+      "sp": 1,
+      "priority": "P2",
+      "criteriaCount": 3,
+      "note": "Esplicitamente NON delegato a un agente: .npmrc è protetto dal sandbox anche per gli agenti (verificato empiricamente), va ispezionato da un umano."
+    }
+  ],
+  "notOwned": {
+    "maya": "Nessun task Sprint 2 di sua competenza diretta (nessuna superficie frontend in questo backlog). Resta disponibile per affiancamento.",
+    "roger": "Non possiede task di implementazione — produce l'aggregato in aggregate.json."
+  }
+}

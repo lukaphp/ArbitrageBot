@@ -356,6 +356,9 @@ class PerpsApp {
     const checksEl = document.getElementById('cockpitRiskChecks');
     if (checksEl) checksEl.innerHTML = checks.map((check) => `
       <div class="cockpit-risk-check"><span><i class="cockpit-risk-check-dot ${check.state}"></i>${this._escapeHtml(check.label)}</span><strong class="cockpit-${check.state === 'critical' ? 'negative' : check.state === 'warning' ? 'warning' : 'positive'}">${this._escapeHtml(check.value)}</strong></div>`).join('');
+    // Lo snapshot di rischio è la fonte che si aggiorna più spesso: allinea anche il
+    // bottone di riattivazione, così non dipende dal solo refresh del pannello agenti.
+    this._setKillSwitchUi(snapshot.killSwitch);
   }
 
   _dashboardEquityData() {
@@ -884,11 +887,23 @@ class PerpsApp {
         st.textContent = base + cost;
         if (st.title !== undefined) st.title = a.model ? `Modello: ${a.model}` : '';
       }
-      const ks = document.getElementById('killswitchState');
-      if (ks) ks.textContent = status.killSwitch ? '🔴 ATTIVO — aperture bloccate' : '';
+      this._setKillSwitchUi(status.killSwitch);
       this._renderProposals(props || []);
       await this.loadStrategyHistory();
     } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * Allinea l'interfaccia allo stato del kill-switch: etichetta e visibilità del
+   * bottone di riattivazione. Sta in un metodo unico perché lo stato arriva da due
+   * fonti distinte (`/api/agents/status` in loadAgents e `/api/perps/risk` nello
+   * snapshot del cockpit): duplicare la logica le farebbe divergere.
+   */
+  _setKillSwitchUi(on) {
+    const active = on === true;
+    const ks = document.getElementById('killswitchState');
+    if (ks) ks.textContent = active ? '🔴 ATTIVO — aperture bloccate' : '';
+    document.getElementById('killswitchResumeBtn')?.classList.toggle('hidden', !active);
   }
 
   /** Cambia la categoria dello storico strategie (approvate / rifiutate / scadute). */
@@ -1274,6 +1289,27 @@ class PerpsApp {
     try {
       await this.api('/api/perps/killswitch', { method: 'POST', body: JSON.stringify({ closePositions: false }) });
       this.toast('🛑 Kill-switch attivato: bot fermati, aperture bloccate', 'warning');
+    } catch (e) { this.toast(e.message, 'error'); }
+    this.loadAgents();
+    this.loadBots();
+  }
+
+  /**
+   * Disattiva il kill-switch (flag persistito sul DB): da qui in poi il RiskAgent
+   * smette di respingere le aperture. NON riavvia i bot che il kill-switch aveva
+   * fermato — `riskAgent.setKillSwitch(false)` scrive solo il setting e l'audit, e
+   * questo è voluto: riprendere a operare resta una decisione esplicita dell'operatore.
+   * Per questo il messaggio di conferma e il toast lo dicono, invece di lasciar
+   * credere che il bot sia tornato attivo da solo.
+   */
+  async resumeFromKillSwitch() {
+    if (!confirm('Disattivare il kill-switch e sbloccare le nuove aperture?\n\nI bot fermati NON ripartono da soli: dovrai riavviarli tu dalla tab System.')) return;
+    try {
+      await this.api('/api/agents/killswitch', { method: 'POST', body: JSON.stringify({ on: false }) });
+      // Stato aggiornato subito, senza attendere il prossimo poll: il bottone deve
+      // sparire nel momento in cui la chiamata è andata a buon fine.
+      this._setKillSwitchUi(false);
+      this.toast('✅ Kill-switch disattivato: aperture sbloccate. I bot fermati vanno riavviati a mano.', 'success');
     } catch (e) { this.toast(e.message, 'error'); }
     this.loadAgents();
     this.loadBots();

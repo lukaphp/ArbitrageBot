@@ -171,10 +171,26 @@ rischio (chiusure, pausa, stop più stretti) non vengono bloccate dai cap.
 | **Risk Score Gauge** | Valutazione sintetica da 0 (basso) a 100 (critico). |
 | **Limiti di Portafoglio** | Pannello di configurazione dei limiti del §6.2. |
 | **🛑 KILL-SWITCH** | Ferma istantaneamente tutti i bot e blocca ogni nuova operazione. Opzionalmente chiude a mercato tutte le posizioni. |
+| **✅ Riattiva le aperture** | Toglie il blocco: le nuove aperture sono di nuovo consentite. Compare **solo quando il kill-switch è attivo**. |
 
-Il kill-switch è raggiungibile anche da **Telegram** (`/chiuditutto`) e via API
-`POST /api/perps/killswitch` — utile per averlo a portata di mano da fuori
-dall'interfaccia.
+**Come si spegne.** Il kill-switch è un interruttore **persistente**: lo stato è salvato
+sul database, quindi resta attivo anche dopo un riavvio del server e finché non lo
+disattivi esplicitamente. Per farlo, nel pannello Risk premi **✅ Riattiva le aperture**
+(il bottone appare accanto al kill-switch solo quando questo è attivo) e confermi.
+
+**Riattivare non riavvia i bot.** Disattivare il kill-switch rimuove *solo* il blocco
+sulle nuove aperture. I bot che il kill-switch aveva fermato restano fermi — il loro
+stato è stato persistito come `stopped`, quindi non ripartono nemmeno dopo un riavvio
+del server. Riavviarli è una scelta separata, da fare bot per bot nella tab **System**
+(§7). È voluto: dopo un arresto d'emergenza si riprende a operare deliberatamente, non
+per effetto collaterale di un click.
+
+**Da fuori dall'interfaccia.** L'attivazione è disponibile via API
+`POST /api/perps/killswitch`, la disattivazione via `POST /api/agents/killswitch` con
+body `{"on": false}`. Entrambe richiedono una **sessione autenticata** (cookie di login):
+non sono chiamabili da uno script esterno senza prima fare login. **Da Telegram il
+kill-switch non è raggiungibile**, né per attivarlo né per spegnerlo: `/chiuditutto`
+chiude le posizioni aperte ma non tocca il kill-switch e non ferma i bot (§16).
 
 ---
 
@@ -430,7 +446,7 @@ comandare il bot dalla chat.
 | `/bot`, `/bots` | Elenco dei bot configurati e loro stato. |
 | `/avvia <bot>` | Avvia un bot. |
 | `/ferma <bot>` | Ferma un bot. |
-| `/chiuditutto` | **Kill-switch**: ferma tutto e chiude le posizioni. |
+| `/chiuditutto` | Chiude a mercato tutte le posizioni aperte. **Non è il kill-switch**: non ferma i bot e non blocca le nuove aperture — quello si fa dal pannello Risk (§6.4). |
 | `/proposte` | Elenca le proposte dell'Analyst AI in attesa. |
 | `/approva <id>` | Approva una proposta. |
 | `/rifiuta <id>` | Rifiuta una proposta. |
@@ -495,7 +511,7 @@ più frequenti sono, in ordine:
 2. conferma multi-timeframe non concorde;
 3. gate ML sotto la soglia `minProb`;
 4. un limite di portafoglio raggiunto o un cooldown attivo;
-5. kill-switch inserito.
+5. kill-switch inserito — resta attivo finché non lo spegni: vedi §6.4 per come farlo.
 
 **Ho impostato TP/SL: restano attivi se il server si spegne?**
 Sì. Sono registrati come trigger order **su Hyperliquid**, non gestiti in memoria dal

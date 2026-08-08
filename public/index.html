@@ -738,6 +738,12 @@
 
                         <div class="agent-killswitch">
                             <button class="btn btn-sm btn-danger" onclick="perps.killSwitch()">🛑 Kill-switch (ferma tutto)</button>
+                            <!-- Visibile SOLO a kill-switch attivo (perps._setKillSwitchUi): senza questo
+                                 bottone il flag, che persiste sul DB, era spegnibile solo chiamando
+                                 POST /api/agents/killswitch {on:false} dalla console. -->
+                            <button class="btn btn-sm btn-success hidden" id="killswitchResumeBtn"
+                                    onclick="perps.resumeFromKillSwitch()"
+                                    title="Sblocca le nuove aperture. Non riavvia i bot fermati dal kill-switch: quello resta una tua scelta, dalla tab System.">✅ Riattiva le aperture</button>
                             <span id="killswitchState" class="muted"></span>
                         </div>
                     </div>

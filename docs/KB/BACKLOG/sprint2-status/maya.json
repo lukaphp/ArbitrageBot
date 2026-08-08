@@ -7,9 +7,63 @@
       "criteriaChecked": [true, true],
       "poApproval": "2026-08-08 — approvato in review, nessuna riserva.",
       "notes": "Aggiunta in planning 8 agosto. Chiusa l'8 agosto. Riga 59 di docs/KB/index/INDEX.md: 'Il webhook esiste già → estenderlo' → 'Webhook interno per scelta (SEC-04) → estenderlo solo su decisione esplicita'. Criterio 2 (nessun'altra menzione contraddittoria nello stesso file) ha richiesto due correzioni ulteriori nello stesso file: §3 Priorità 1 riga 5 ('Auth/HMAC + rate limit sul webhook') era elencata come debito di sicurezza da fare subito, in contraddizione diretta col riquadro §F.1 che dichiara 'non un debito di sicurezza attuale' — barrata con nota di chiusura SEC-04 nello stesso stile della riga 3; e rimossa la ⭐ da §F.1 spunto 1 ('Aprire il webhook a fonti esterne'), che marcava come idea prioritaria l'opzione A esplicitamente scartata e dichiarata non-goal dello Sprint 2. Aggiornati anche i due link stantii server.js#L1096 → #L1128 (la rotta si è spostata, L1096 ora punta ad altro endpoint). Verificato sul sorgente: requireAuth su tutte le /api/* tranne login/logout/auth-status, rate limit globale /api 300/min, secret via constantTimeEquals; nessun HMAC né anti-replay. docs/MANUAL.md e public/manual.html verificati: ancora corretti da SEC-04, nessuna regressione. npm test 66/66 verde, npm run lint verde (nessun file di codice toccato)."
+    },
+    "UI-01": {
+      "status": "done",
+      "poApproval": "2026-08-08 — approvato in review, nessuna riserva.",
+      "type": "bug",
+      "storyPoints": 1,
+      "priority": "P1",
+      "origin": "PO, fuori dal ciclo di planning — segnalato dopo la chiusura della review dello Sprint 2, chiuso subito come attività extra su sua richiesta diretta.",
+      "files": [
+        "public/index.html",
+        "public/perps.js",
+        "docs/MANUAL.md",
+        "public/manual.html",
+        "docs/KB/BACKLOG/sprint2.md",
+        "test/killSwitchUi.test.js"
+      ],
+      "criteria": [
+        {
+          "criterion": "Bottone di riattivazione accanto al kill-switch in public/index.html, visibile solo a kill-switch attivo",
+          "checked": true,
+          "evidence": "Bottone '✅ Riattiva le aperture' (#killswitchResumeBtn, classe .hidden di default) accanto a '🛑 Kill-switch (ferma tutto)' nel blocco .agent-killswitch. Dicitura scelta per dire cosa fa davvero — 'Riattiva bot' avrebbe promesso il riavvio dei bot, che non avviene."
+        },
+        {
+          "criterion": "resumeFromKillSwitch() chiama POST /api/agents/killswitch con {on:false}, previa conferma",
+          "checked": true,
+          "evidence": "window.confirm nativo (siamo nell'app reale, non in un artifact sandboxed: il precedente noto di confirm bloccato non si applica, nessuna UI custom necessaria). Il testo della conferma dichiara che i bot NON ripartono da soli."
+        },
+        {
+          "criterion": "Stato aggiornato senza refresh manuale della pagina",
+          "checked": true,
+          "evidence": "Nuovo _setKillSwitchUi(on) aggiorna in un punto unico etichetta #killswitchState e visibilità del bottone. Chiamato da resumeFromKillSwitch() subito dopo la POST, da loadAgents() (/api/agents/status) e da _renderRiskSnapshot() (/api/perps/risk, la fonte che si aggiorna più spesso). Prima la logica stava inline solo in loadAgents: con due fonti dello stesso stato, duplicarla le avrebbe fatte divergere."
+        },
+        {
+          "criterion": "La riattivazione NON riavvia i bot — verificato nel codice, non assunto",
+          "checked": true,
+          "evidence": "riskAgent.setKillSwitch(false) (src/agents/riskAgent.js:31) fa solo db.setSetting + db.insertAudit. Grep su 'killswitch' in src/: gli unici lettori del setting sono isKillSwitchOn() → _evaluate (gate sulle aperture), lo snapshot /api/perps/risk e /api/agents/status. Nessun riavvio di bot in nessun punto. In più bot.stop() (src/perps/bot.js:100) persiste status='stopped' via db.setBotStatus, quindi i bot fermati dal kill-switch non ripartono nemmeno al riavvio del server (a differenza di shutdown(), che lascia lo stato intatto). Comportamento non toccato: solo documentato e reso esplicito nella conferma."
+        },
+        {
+          "criterion": "docs/MANUAL.md §6.4 e sezione corrispondente di public/manual.html documentano come disattivarlo",
+          "checked": true,
+          "evidence": "Nuova riga in tabella per il bottone di riattivazione + tre blocchi: 'Come si spegne' (persistenza del flag su DB, sopravvive al riavvio), 'Riattivare non riavvia i bot' (alert warning in manual.html), 'Da fuori dall'interfaccia' (POST /api/agents/killswitch {on:false}, con la precisazione che richiede sessione autenticata). Aggiunto rinvio a §6.4 nella FAQ 'il bot non apre mai una posizione' (causa 5: kill-switch inserito), che indicava la causa senza dire come rimuoverla."
+        },
+        {
+          "criterion": "npm test verde, npm run lint verde, HTML bilanciato",
+          "checked": true,
+          "evidence": "npm test 94/94 (era 87/87: +7 casi in test/killSwitchUi.test.js). npm run lint verde. Tag bilanciati verificati su public/index.html e public/manual.html con un parser che ignora il contenuto degli attributi (il favicon inline data-URI contiene un <svg> che manda fuori strada un check naive)."
+        }
+      ],
+      "notes": "Correzione collaterale dentro lo stesso paragrafo riscritto: il manuale affermava che 'il kill-switch è raggiungibile anche da Telegram (/chiuditutto)'. Falso — _cmdCloseAll (src/perps/telegramControl.js:237) chiude le posizioni aperte e non tocca né il flag né i bot. Corretto in MANUAL.md §6.4 + tabella comandi §16 e nei due punti corrispondenti di manual.html: documentare la disattivazione lasciando in piedi, nella stessa sezione, un canale di attivazione inesistente non avrebbe avuto senso. Nota di metodo: test/killSwitchUi.test.js è il primo test su public/*.js del progetto — perps.js è uno script di browser senza export, caricato in node:vm con un DOM finto minimale (getElementById + classList), zero dipendenze aggiunte. Copre la logica della classe e la presenza degli id in index.html, NON il rendering reale del browser: la resa visiva del bottone l'ho verificata a mano sulle classi CSS esistenti (.btn-success in styles.css:1055, .hidden in styles.css:834), non c'è headless browser in questo repo e non ne ho introdotto uno."
     }
   },
   "refinementCandidates": [
+    "PROMOSSA a docs/KB/BACKLOG/sprint3.md (8 agosto, su richiesta del PO): Telegram non ha alcun comando per il kill-switch, né per attivarlo né per spegnerlo (verificato in src/perps/telegramControl.js: /chiuditutto chiude solo le posizioni). Un operatore che ha solo la chat non può fermare né riprendere le aperture. Un `/killswitch on|off` chiuderebbe il buco per davvero. Area Bruno/Joshua, 1-2 SP.",
+    "`npm run lint` (scripts/lint-syntax.js) copre solo src/, test/ e scripts/: public/*.js — cioè tutto il mio perimetro, perps.js incluso, ~1900 righe — non viene mai passato a `node --check`. Un errore di sintassi lì passerebbe la CI e romperebbe l'interfaccia in silenzio. Aggiungere 'public' ai roots è una riga; da verificare solo che i file browser passino `node --check` (perps.js sì, controllato a mano in questo task). 1 SP.",
+    "POST /api/agents/killswitch (server.js:1263) ricava lo stato con `req.body?.on !== false`: qualunque body assente o malformato ATTIVA il kill-switch. La direzione è fail-safe e difendibile, ma `{\"on\":\"false\"}` (stringa) attiva anche lui — vale un commento esplicito sul perché, o una validazione stretta. Area server, non toccato.",
+    "Asimmetria di notifica sulla stessa coppia di rotte: l'attivazione (server.js:889) fa notifier.notify + logger.warn, la disattivazione (server.js:1263) non fa nulla oltre alla riga di audit su DB. Sbloccare le aperture è un cambio di stato altrettanto rilevante e oggi non lascia traccia su Telegram né su logs/app.log. Candidato P2 lato server.",
+    "Le due rotte hanno prefissi diversi (/api/perps/killswitch per attivare, /api/agents/killswitch per on/off) e semantica diversa a nome quasi identico: la prima ferma anche i bot, la seconda scrive solo il flag. Chi legge l'API può ragionevolmente crederle equivalenti. Il manuale ora distingue i due usi, ma un riordino delle rotte resta un candidato di refinement.",
     "INDEX.md §1.1: la colonna Sforzo di TrendSpider (e l'header di §F.1) dice 'Basso', ma aprire il webhook richiede HMAC, anti-replay, whitelist del path e test di regressione — non è basso. Il rating è però sul documento nel suo insieme, non sul singolo spunto: fuori dal perimetro DOC-02, va deciso se i rating vanno per-documento o per-spunto.",
     "INDEX.md §4 punto 1 e 2 (duplicato AOLM, typo 'rchitettura' nel nome file) sono aperti da prima dello Sprint 1 e nessuno li ha presi in carico: candidati a una story di manutenzione KB da 1 SP.",
     "INDEX.md §3 Priorità 1 riga 0 e §B.1 punto 2 descrivono ancora il bug TP/SL dopo DCA come 'da verificare come primo intervento', ma è stato corretto in SEC-01 (Sprint 1). Stessa classe di residuo di DOC-02, area di Bruno: non toccato."

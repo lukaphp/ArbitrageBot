@@ -431,6 +431,59 @@ verdi, lint pulito, `npm audit` a zero vulnerabilità a qualsiasi livello.**
 
 **17 SP chiusi, 2 SP differiti, 1 SP in attesa di un'azione umana.**
 
+### 4.1 Aggiunta dopo la review — UI-01
+
+Scoperta dal PO **fuori dal ciclo di planning**, dopo la chiusura della review dello Sprint 2, e
+chiusa subito su sua richiesta diretta invece di essere rimandata allo Sprint 3: un kill-switch che
+nessuno sa come spegnere non è un difetto cosmetico. Non entra nel conteggio degli SP dello sprint
+(17 SP restano il consuntivo della review): è un'attività extra tracciata qui per non perderne
+la storia.
+
+| Task | Owner | SP | Esito |
+|:---|:---|:--:|:---|
+| UI-01 | Maya | 1 | ✅ **Done** — aggiunta e chiusa dopo la review, su richiesta del PO |
+
+#### 🐛 UI-01 · Il kill-switch non è disattivabile dall'interfaccia
+
+| | |
+|:---|:---|
+| **Tipo** | 🐛 bug (operativo) |
+| **Story Point** | **1** |
+| **Priorità** | **P1** — un arresto d'emergenza che nessun operatore sa come revocare blocca il trading a tempo indefinito |
+| **File** | `public/index.html`, `public/perps.js`, `docs/MANUAL.md` §6.4, `public/manual.html`, `test/killSwitchUi.test.js` |
+| **Origine** | PO, fuori dal ciclo di planning — segnalato dopo la chiusura della review dello Sprint 2 |
+
+**Descrizione.** `POST /api/agents/killswitch` (`src/server.js:1263`) accetta `{on:false}` e spegne il
+kill-switch, ma **nessuna parte dell'interfaccia lo chiamava**. L'UI esponeva solo l'attivazione
+(`perps.killSwitch()` → `POST /api/perps/killswitch`, sempre e solo `on:true`); nessun comando
+Telegram lo disattivava e `docs/MANUAL.md` non documentava la disattivazione. Il flag persiste in
+`settings.killswitch`: una volta attivato restava attivo **per sempre** — anche attraverso i riavvii
+del server — finché qualcuno non chiamava l'endpoint dalla console del browser, cosa che nessun
+operatore reale scoprirebbe da solo.
+
+**Criteri di accettazione**
+
+- [x] Bottone di riattivazione accanto al kill-switch in `public/index.html`, **visibile solo quando il kill-switch è attivo**.
+- [x] `perps.resumeFromKillSwitch()` chiama `POST /api/agents/killswitch` con `{on:false}`, previa conferma (`window.confirm` nativo: siamo nell'app reale, non in un artifact sandboxed).
+- [x] Lo stato mostrato (`killswitchState` + visibilità del bottone) si aggiorna subito dopo la chiamata, senza refresh manuale della pagina.
+- [x] Verificato **sul codice** che la riattivazione non riavvii i bot: `riskAgent.setKillSwitch(false)` scrive solo il setting e la riga di audit, e `settings.killswitch` non ha altri lettori oltre a `isKillSwitchOn()`. I bot fermati dal kill-switch hanno `status='stopped'` persistito da `bot.stop()`, quindi non ripartono nemmeno al riavvio del server. Riavviarli resta una scelta separata dell'operatore.
+- [x] `docs/MANUAL.md` §6.4 e la sezione corrispondente di `public/manual.html` documentano esplicitamente **come si spegne**, la persistenza del flag e il fatto che riattivare non riavvia i bot.
+- [x] `npm test` verde (94/94, +7 casi in `test/killSwitchUi.test.js` — primo test su `public/*.js` del progetto, DOM finto in `node:vm`, nessuna dipendenza aggiunta), `npm run lint` verde, tag HTML bilanciati in entrambi i file toccati.
+
+**Correzione collaterale, dentro lo stesso paragrafo riscritto.** Il manuale affermava *"il
+kill-switch è raggiungibile anche da Telegram (`/chiuditutto`)"*: falso. `_cmdCloseAll` in
+`src/perps/telegramControl.js:237` chiude le posizioni aperte e **non tocca né il kill-switch né i
+bot**. Corretto in §6.4 e nella tabella comandi §16 (più i due riflessi in `manual.html`): non si
+poteva documentare la disattivazione lasciando in piedi, nella stessa sezione, un canale di
+attivazione che non esiste.
+
+**Dipendenze esterne.** Nessuna. **Rischi.** Nessuno lato esecuzione: la rotta esisteva già e non è
+stata modificata, il bug era l'assenza di un chiamante.
+
+**Approvato dal PO** l'8 agosto, nessuna riserva. La lacuna emersa fuori perimetro — Telegram non ha
+alcun comando per il kill-switch, né on né off — non viene chiusa ora: **promossa a story per lo
+Sprint 3**, vedi `docs/KB/BACKLOG/sprint3.md`.
+
 ### Decisioni prese in review
 
 1. **TEST-01** — Bruno, scrivendo i test, ha trovato che `scripts/rotate-encryption-key.js`

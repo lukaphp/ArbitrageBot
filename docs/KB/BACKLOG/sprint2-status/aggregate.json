@@ -14,7 +14,7 @@
   "disclaimer": "Ogni 'status' e ogni 'criteriaChecked' qui sotto è la trascrizione di quanto dichiarato dall'agente proprietario del task nel proprio file di stato, integrata dal verdetto di Annie dove disponibile. La transizione a 'done' riflette le decisioni prese dal PO in sessione di review l'8 agosto 2026 (vedi poDecisionsResolved).",
   "reviewedAt": "2026-08-08",
   "statusCounts": {
-    "done": 7,
+    "done": 8,
     "deferred": 1,
     "pending_po_action": 1
   },
@@ -152,6 +152,21 @@
       "criteriaSatisfied": 2,
       "poApproval": "2026-08-08 — approvato senza riserve.",
       "summary": "Riga 59 corretta, più due contraddizioni collaterali richieste dal criterio 2 stesso: §3 riga 5 (debito di sicurezza marcato erroneamente come da fare) e rimozione di una ⭐ su un'opzione già scartata. Due link stantii aggiornati."
+    },
+    {
+      "id": "UI-01",
+      "title": "Il kill-switch non è disattivabile dall'interfaccia",
+      "owner": "maya",
+      "reviewer": null,
+      "sp": 1,
+      "priority": "P1",
+      "status": "done",
+      "criteriaTotal": 6,
+      "criteriaSatisfied": 6,
+      "poApproval": "2026-08-08 — approvato senza riserve.",
+      "addedAfterReview": true,
+      "summary": "Scoperta dal PO fuori dal ciclo di planning, dopo la chiusura della review — chiusa subito su sua richiesta invece di essere rimandata allo Sprint 3. POST /api/agents/killswitch {on:false} esisteva già ma nessuna parte dell'interfaccia lo chiamava: aggiunto bottone 'Riattiva le aperture' visibile solo a kill-switch attivo, verificato nel codice che la riattivazione non riavvii i bot. Corretta anche un'affermazione falsa nel manuale (Telegram /chiuditutto non tocca il kill-switch). 94/94 test verdi (+7 nuovi), primo test su public/*.js del progetto.",
+      "outOfScopeFinding": "Telegram non ha alcun comando per il kill-switch, né on né off — promossa a story per lo Sprint 3 su richiesta del PO (docs/KB/BACKLOG/sprint3.md)."
     }
   ],
   "poDecisionsResolved": [
@@ -177,8 +192,12 @@
     }
   ],
   "sprintSpCompleted": 17,
+  "sprintSpCompletedIncludingPostReview": 18,
   "sprintSpDeferred": 2,
   "sprintSpPendingHuman": 1,
+  "postReviewAdditions": [
+    {"id": "UI-01", "sp": 1, "note": "Non conteggiata negli SP di sprint pianificati (17): aggiunta e chiusa dopo la review, su richiesta diretta del PO. Vedi sprint2.md §4.1."}
+  ],
   "refinementCandidates": [
     "INDEX.md §1.1: il rating 'Sforzo: Basso' per l'apertura del webhook a TrendSpider è probabilmente sbagliato (richiede HMAC, anti-replay, whitelist path, test di regressione) — segnalato da Maya, fuori perimetro DOC-02.",
     "INDEX.md §4: duplicato AOLM e typo 'rchitettura' nel nome file, aperti da prima dello Sprint 1 — candidati a una story di manutenzione KB da 1 SP (Maya).",
@@ -186,6 +205,10 @@
     "WS-01: contatore separato per riconnessioni da drop vs cambio rete volontario, se il PO lo ritiene utile.",
     "TEST-01/Annie: secretBox.js ricade silenziosamente su chiave di sviluppo hardcoded se la variabile di cifratura è assente — nessun test.",
     "TEST-01/Annie: rotate-encryption-key.js confronta solo l'id della chiave, non il materiale — disallineamento silenzioso non testato.",
-    "TEST-01/Annie: check-secrets.js, solo 3 variabili su 12 esercitate dai test."
+    "TEST-01/Annie: check-secrets.js, solo 3 variabili su 12 esercitate dai test.",
+    "UI-01/Maya: npm run lint non copre public/*.js — un errore di sintassi in perps.js passerebbe la CI in silenzio.",
+    "UI-01/Maya: POST /api/agents/killswitch attiva il kill-switch anche su body malformato o {\"on\":\"false\"} (stringa) — direzione fail-safe ma da rendere esplicita.",
+    "UI-01/Maya: asimmetria di notifica — l'attivazione del kill-switch notifica Telegram/log, la disattivazione no.",
+    "PROMOSSA a docs/KB/BACKLOG/sprint3.md (8 agosto): UI-01/Maya — Telegram non ha alcun comando per il kill-switch, né on né off."
   ]
 }

@@ -813,11 +813,25 @@
                             <td><span class="btn-demo btn-demo-danger">🛑 KILL-SWITCH</span></td>
                             <td>Ferma istantaneamente tutti i bot e blocca ogni nuova operazione. Opzionalmente chiude a mercato tutte le posizioni aperte.</td>
                         </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-success">✅ Riattiva le aperture</span></td>
+                            <td>Toglie il blocco: le nuove aperture sono di nuovo consentite. Compare <strong>solo quando il kill-switch è attivo</strong>.</td>
+                        </tr>
                     </tbody>
                 </table>
                 </div>
 
-                <p style="margin:14px 0 0"><strong>Il kill-switch è raggiungibile anche da Telegram</strong> (<code>/chiuditutto</code>) e via API <code>POST /api/perps/killswitch</code>: utile per averlo a portata di mano da fuori dall'interfaccia.</p>
+                <h4 style="margin-top:20px">Come si spegne il kill-switch</h4>
+                <p>Il kill-switch è un interruttore <strong>persistente</strong>: lo stato è salvato sul database, quindi resta attivo anche dopo un riavvio del server e finché non lo disattivi esplicitamente. Per farlo, nel pannello Risk premi <span class="btn-demo btn-demo-success">✅ Riattiva le aperture</span> — il bottone appare accanto al kill-switch <em>solo</em> quando questo è attivo — e confermi.</p>
+
+                <div class="alert alert-warning">
+                    <span class="alert-icon">⚠️</span>
+                    <div>
+                        <strong>Riattivare non riavvia i bot.</strong> Disattivare il kill-switch rimuove <em>solo</em> il blocco sulle nuove aperture. I bot che il kill-switch aveva fermato restano fermi — il loro stato è stato persistito come <code>stopped</code>, quindi non ripartono nemmeno dopo un riavvio del server. Riavviarli è una scelta separata, da fare bot per bot nella tab <strong>System</strong>. È voluto: dopo un arresto d'emergenza si riprende a operare deliberatamente, non per effetto collaterale di un click.
+                    </div>
+                </div>
+
+                <p style="margin:14px 0 0"><strong>Da fuori dall'interfaccia.</strong> L'attivazione è disponibile via API <code>POST /api/perps/killswitch</code>, la disattivazione via <code>POST /api/agents/killswitch</code> con body <code>{"on": false}</code>. Entrambe richiedono una <strong>sessione autenticata</strong> (cookie di login): non sono chiamabili da uno script esterno senza prima fare login. <strong>Da Telegram il kill-switch non è raggiungibile</strong>, né per attivarlo né per spegnerlo: <code>/chiuditutto</code> chiude le posizioni aperte ma non tocca il kill-switch e non ferma i bot.</p>
             </div>
         </section>
 
@@ -1177,7 +1191,7 @@
                         <tr><td><code>/bot</code>, <code>/bots</code></td><td>Elenco dei bot configurati e loro stato.</td></tr>
                         <tr><td><code>/avvia &lt;bot&gt;</code></td><td>Avvia un bot.</td></tr>
                         <tr><td><code>/ferma &lt;bot&gt;</code></td><td>Ferma un bot.</td></tr>
-                        <tr><td><code>/chiuditutto</code></td><td><strong>Kill-switch</strong>: ferma tutto e chiude le posizioni.</td></tr>
+                        <tr><td><code>/chiuditutto</code></td><td>Chiude a mercato tutte le posizioni aperte. <strong>Non è il kill-switch</strong>: non ferma i bot e non blocca le nuove aperture — quello si fa dal pannello Risk.</td></tr>
                         <tr><td><code>/proposte</code></td><td>Elenca le proposte dell'Analyst AI in attesa.</td></tr>
                         <tr><td><code>/approva &lt;id&gt;</code></td><td>Approva una proposta.</td></tr>
                         <tr><td><code>/rifiuta &lt;id&gt;</code></td><td>Rifiuta una proposta.</td></tr>
@@ -1261,7 +1275,7 @@
 
                 <div class="faq-item">
                     <h4>Il bot non apre mai una posizione. Perché?</h4>
-                    <p>Apri il <strong>Monitor</strong> del bot: mostra l'ultima valutazione e la motivazione. Le cause più frequenti, in ordine: (1) candele insufficienti a scaldare gli indicatori — su timeframe lunghi serve tempo; (2) conferma multi-timeframe non concorde; (3) gate ML sotto la soglia <code>minProb</code>; (4) un limite di portafoglio raggiunto o un cooldown attivo; (5) kill-switch inserito.</p>
+                    <p>Apri il <strong>Monitor</strong> del bot: mostra l'ultima valutazione e la motivazione. Le cause più frequenti, in ordine: (1) candele insufficienti a scaldare gli indicatori — su timeframe lunghi serve tempo; (2) conferma multi-timeframe non concorde; (3) gate ML sotto la soglia <code>minProb</code>; (4) un limite di portafoglio raggiunto o un cooldown attivo; (5) kill-switch inserito — resta attivo finché non lo spegni, vedi <em>Risk Engine &amp; Kill-Switch</em> per come farlo.</p>
                 </div>
 
                 <div class="faq-item">

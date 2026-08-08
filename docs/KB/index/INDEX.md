@@ -4,7 +4,7 @@
 > valutazione del **potenziale** (quanto vale l'idea in sé) e dell'**attinenza** (quanto è applicabile
 > *a questo* progetto, così com'è oggi), più gli **spunti operativi** già mappati sui file sorgente.
 >
-> **Ultimo aggiornamento:** 2026-08-07 · **Documenti indicizzati:** 14 · **Branch di riferimento:** `feat/perps-hardening`
+> **Ultimo aggiornamento:** 2026-08-08 · **Documenti indicizzati:** 14 · **Branch di riferimento:** `feat/perps-hardening`
 
 ---
 
@@ -56,7 +56,7 @@ Dove è così, lo segnalo esplicitamente: serve a evitare di riscrivere ciò che
 | [Architettura Modulare & AsyncIO](../rchitettura%20Modulare%20e%20AsyncIO%20per%20Bot%20di%20Trading.md) | A | ★★★★☆ | ★★★★☆ | Medio | Adottare le **metriche**, non il refactor |
 | [DegenBot (Dart)](../Sviluppo%20di%20un%20Crypto%20Trading%20Bot%20in%20Dart%20(DegenBot).md) | C | ★★★★☆ | ★★★★☆ | Basso-Medio | Valida la scelta attuale + auto-tuning |
 | [Sciforce Trade Prediction](../guida_sciforce_trader_prediction.md) | B | ★★★★☆ | ★★★★☆ | Medio | **3 classi + confidenza** sul predictor |
-| [TrendSpider](../TrendSpider_TradingBot_Analysis.md) | F | ★★★★☆ | ★★★☆☆ | Basso | Il webhook esiste già → estenderlo |
+| [TrendSpider](../TrendSpider_TradingBot_Analysis.md) | F | ★★★★☆ | ★★★☆☆ | Basso | Webhook **interno per scelta** (SEC-04) → estenderlo solo su decisione esplicita |
 | [LLM Crypto Bot (FinBERT)](../guida_llm_crypto_bot.md) | C | ★★★☆☆ | ★★★☆☆ | Medio | Lezioni negative + sizing su equity |
 | [Transformer Crypto Bot](../guida_transformer_crypto_bot.md) | B | ★★★☆☆ | ★★☆☆☆ | Molto alto | **Cherry-pick** (HMM, 3 classi), non il Transformer |
 | [Coinrule](../Coinrule.md) | F | ★★☆☆☆ | ★★★☆☆ | Basso | Benchmark UX del rule builder |
@@ -486,7 +486,7 @@ d'interesse — **webhook JSON** che spara segnali al proprio bot, con esecuzion
 occupa **solo** di risk management ed esecuzione. È una divisione del lavoro sensata.
 
 **Attinenza — il gancio esiste, ma è deliberatamente interno.** Il progetto ha `POST /api/perps/webhook`
-([server.js:1096](../../../src/server.js#L1096)) e il tipo di regola `external` in
+([server.js:1128](../../../src/server.js#L1128)) e il tipo di regola `external` in
 [strategyEngine.js](../../../src/perps/strategyEngine.js), con scadenza dei segnali a 5 minuti.
 
 > ℹ️ **Aggiornamento (Sprint 1, SEC-04).** L'endpoint è dietro `requireAuth` + rate limit + secret a
@@ -496,7 +496,7 @@ occupa **solo** di risk management ed esecuzione. È una divisione del lavoro se
 
 **Spunti operativi**
 
-1. **Aprire il webhook a fonti esterne** ⭐ — oggi è raggiungibile solo da sessioni autenticate del
+1. **Aprire il webhook a fonti esterne** — oggi è raggiungibile solo da sessioni autenticate del
    pannello stesso. Per collegarci davvero TrendSpider/TradingView servirebbe: whitelist esplicita
    del path fuori dal gate cookie, HMAC-SHA256 sul corpo, timestamp anti-replay, rate limiting
    dedicato — è la "opzione A" già scartata per lo Sprint 1 perché nessuna integrazione esterna era
@@ -595,7 +595,7 @@ Ordinato per **rapporto valore/sforzo**, non per tema. Ogni voce cita il documen
 | 2 | Infisical da opzionale a **default** → niente `.env` sul disco | [package.json](../../../package.json), [DEPLOY.md](../../DEPLOY.md) | §D.1 |
 | 3 | ✅ ~~Verificare che TP/SL siano trigger order lato exchange~~ — **verificato: lo sono** (`placeTriggerOrder`), sopravvivono a un crash. Resta aperto il caso DCA (riga 0) | [bot.js](../../../src/perps/bot.js) | §E.1 |
 | 4 | **Verificare la base di calcolo del sizing** (account value totale, non margine libero) | [riskManager.js](../../../src/perps/riskManager.js) | §C.2 |
-| 5 | Auth/HMAC + rate limit sul webhook che può scatenare ordini | [server.js:1096](../../../src/server.js#L1096) | §F.1 + §D.1 |
+| 5 | ✅ ~~Auth/HMAC + rate limit sul webhook che può scatenare ordini~~ — **chiuso in SEC-04**: la rotta è dietro `requireAuth`, rate limit globale su `/api` e secret a confronto costante. L'HMAC servirebbe solo aprendo l'endpoint a fonti esterne (opzione A, scartata) — non è un debito attuale | [server.js:1128](../../../src/server.js#L1128) | §F.1 + §D.1 |
 
 > Le voci 3 e 4 sono **verifiche**, non necessariamente modifiche: possono chiudersi in pochi minuti
 > con esito "già a posto". Vanno comunque fatte, perché entrambe hanno un downside asimmetrico —

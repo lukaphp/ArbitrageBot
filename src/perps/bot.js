@@ -323,6 +323,40 @@ export class PerpsBot {
     }
   }
 
+  /**
+   * Serializza `trailing_json` facendo MERGE col contenuto già persistito, MAI un
+   * overwrite (TRAIL-01).
+   *
+   * In quel campo non vive solo `slOid`: ci sono anche `originalEntryPx` e
+   * `dcaCount`, scritti dal fix di SEC-01. Sovrascriverlo col solo `{ slOid }`
+   * non dà problemi a runtime — i valori restano corretti in memoria — ma dopo un
+   * RIAVVIO il costruttore li rilegge dal DB e `dcaCount` torna a 0: il bot può
+   * eseguire più step di DCA di quanti configurati, impegnando capitale non
+   * previsto su una posizione già in perdita.
+   *
+   * Lo stato in memoria è la fonte di verità a runtime e vince sul persistito; le
+   * eventuali chiavi sconosciute già presenti in DB vengono preservate.
+   */
+  _trailingJson(extra = {}) {
+    let persisted = {};
+    try {
+      const row = db.getPosition(this.position?.id);
+      if (row?.trailing_json) persisted = JSON.parse(row.trailing_json) || {};
+    } catch (error) {
+      // Un trailing_json illeggibile non blocca la scrittura del nuovo stato, ma
+      // non passa in silenzio: senza traccia, la perdita di
+      // originalEntryPx/dcaCount resterebbe invisibile fino al riavvio.
+      logger.warn(`Bot ${this.name}: trailing_json esistente non leggibile, riscrivo dallo stato in memoria`, error.message);
+    }
+    return JSON.stringify({
+      ...persisted,
+      originalEntryPx: this.position?.originalEntryPx ?? persisted.originalEntryPx ?? null,
+      dcaCount: this.position?.dcaCount ?? persisted.dcaCount ?? 0,
+      slOid: this.position?.slOid ?? null,
+      ...extra
+    });
+  }
+
   async _placeTpSl() {
     if (!this.position) return;
     const closeIsBuy = this.position.side === 'short'; // chiudere short = buy; chiudere long = sell
@@ -354,7 +388,7 @@ export class PerpsBot {
           size: this.position.size, triggerPx: this.position.slPx, tpsl: 'sl'
         }, this.network);
         this.position.slOid = res.oid;
-        db.updatePosition(this.position.id, { trailing_json: JSON.stringify({ slOid: res.oid }) });
+        db.updatePosition(this.position.id, { trailing_json: this._trailingJson() });
       }
     } catch (error) {
       logger.warn(`Bot ${this.name}: errore piazzamento TP/SL`, error.message);
@@ -395,7 +429,7 @@ export class PerpsBot {
         size: this.position.size, triggerPx: this.position.slPx, tpsl: 'sl'
       }, this.network);
       this.position.slOid = res.oid;
-      db.updatePosition(this.position.id, { trailing_json: JSON.stringify({ slOid: res.oid }) });
+      db.updatePosition(this.position.id, { trailing_json: this._trailingJson() });
 
       // Verifica finale: se ancora non c'è, chiusura di sicurezza.
       stop = await this._findStopOrder();
@@ -440,7 +474,7 @@ export class PerpsBot {
         const oldOid = this.position.slOid;
         this.position.slPx = roundedSl;
         this.position.slOid = res.oid;
-        db.updatePosition(this.position.id, { sl_px: roundedSl, trailing_json: JSON.stringify({ slOid: res.oid }) });
+        db.updatePosition(this.position.id, { sl_px: roundedSl, trailing_json: this._trailingJson() });
         // Solo ora rimuovo il vecchio SL (se diverso da quello nuovo).
         if (oldOid && res.oid && oldOid !== res.oid) {
           await this.broker.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: oldOid }, this.network).catch(() => {});
@@ -560,9 +594,7 @@ export class PerpsBot {
       this.position.slOid = newSlOid;
       db.updatePosition(this.position.id, {
         entry_px: this.position.entryPx, size: this.position.size, tp_px: tpPx, sl_px: slPx,
-        trailing_json: JSON.stringify({
-          slOid: newSlOid, originalEntryPx: this.position.originalEntryPx, dcaCount: this.position.dcaCount
-        })
+        trailing_json: this._trailingJson()
       });
 
       // 3) CANCEL: solo ora rimuovo i vecchi trigger (mai prima del punto 1-2).

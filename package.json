@@ -46,7 +46,7 @@
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
     "hyperliquid": "^1.7.7",
-    "node-cron": "^3.0.2",
+    "node-cron": "^4.6.0",
     "socket.io": "^4.7.2",
     "technicalindicators": "^3.1.0",
     "ws": "^8.21.0"
@@ -55,6 +55,6 @@
     "@types/node": "^20.8.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

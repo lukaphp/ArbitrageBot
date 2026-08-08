@@ -21,6 +21,15 @@ export function inc(name, by = 1) {
   counters[name] = (counters[name] || 0) + by;
 }
 
+/**
+ * Valore corrente di un contatore. Esiste per poter asserire un contatore nei
+ * test senza passare da render(), che importa botManager/marketData (troppi
+ * singleton per un test mirato).
+ */
+export function get(name) {
+  return counters[name] || 0;
+}
+
 /** Riga Prometheus per una metrica con etichette opzionali. */
 function line(name, value, labels) {
   const lbl = labels
@@ -78,4 +87,4 @@ export async function render() {
   return out.join('\n') + '\n';
 }
 
-export default { inc, render };
+export default { inc, get, render };

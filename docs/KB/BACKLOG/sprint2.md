@@ -1,7 +1,7 @@
 # Sprint 2 — Resilienza, Dipendenze e Copertura Test
 
 **Branch:** `feat/perps-hardening` (da valutare se proseguire qui o aprire un nuovo branch) · **Team:** Nautilus
-**Data di redazione:** 8 agosto 2026 · **Story point totali:** 16
+**Data di redazione:** 8 agosto 2026 · **Planning:** 8 agosto 2026 · **Story point totali:** 20 (16 + 4 aggiunti in planning)
 **Origine:** scoperte emerse durante l'esecuzione e la review dello Sprint 1 — non un backlog esterno da verificare, ma un raccolto organico. Ogni voce cita la fonte.
 
 ---
@@ -18,6 +18,23 @@ A differenza dello Sprint 1 (nato da un documento di istruzioni esterno da verif
 > **Candidato scartato:** Annie aveva segnalato "aggiungere harden-runner anche ad altri workflow, se ce ne sono". Verificato: `.github/workflows/` contiene **solo `ci.yml`**. Non c'è nient'altro da coprire — chiuso come non applicabile, non diventa un task.
 >
 > **Candidato ridotto a nota, non task:** "verificare `npm audit signatures` anche per pacchetti senza attestazioni provenance" — oggi 16/171 pacchetti hanno attestazioni; è una situazione dell'ecosistema npm (dipende da chi pubblica), non qualcosa che risolviamo lato nostro. Nessuna azione, resta come osservazione.
+
+### 0.1 Planning (8 agosto) — prima sessione formale
+
+Prima dell'avvio effettivo, il backlog sopra è stato sottoposto a planning col PO. Tre nuove story sono
+emerse durante la **Sala Review dello Sprint 1** (non da questo documento, ma da ciascun membro del
+team che rileggeva il proprio codice per prepararsi a presentarlo) e sono state proposte come
+aggiunta allo sprint, non rimandate:
+
+| Story | Origine | Decisione del PO |
+|:---|:---|:---|
+| TRAIL-01 | Bruno, ri-verificando `bot.js` per la sua sezione di review | **Aggiunta a Sprint 2**, story a sé |
+| CI-REBUILD-01 | Joshua, ri-verificando `Dockerfile`/CI per la sua sezione | **Aggiunta a Sprint 2**, story a sé |
+| DOC-02 | Maya, ri-verificando `manual.html`/`INDEX.md` per la sua sezione | **Aggiunta a Sprint 2**, story a sé |
+
+Il PO ha esplicitamente scelto di **non accorpare** TRAIL-01 a WS-01 né CI-REBUILD-01 a DEP-01,
+nonostante la vicinanza tematica — restano tracciabili singolarmente sulla board. Le 6 story
+originali (§2) restano invariate, confermate senza modifiche.
 
 ---
 
@@ -228,38 +245,133 @@ A differenza dello Sprint 1 (nato da un documento di istruzioni esterno da verif
 
 ---
 
+### 🟠 TRAIL-01 · `trailing_json` perde `originalEntryPx`/`dcaCount` dopo un riavvio
+
+| | |
+|:---|:---|
+| **Tipo** | 🐛 bug — correttezza, esposizione non voluta |
+| **Story Point** | **2** |
+| **Priorità** | P1 — non capitale immediatamente scoperto come SEC-01, ma può portare a più DCA di quanti configurati |
+| **File** | `src/perps/bot.js` (`_placeTpSl`, `_ensureStopLoss`, il trailing stop) |
+| **Origine** | Bruno, scoperto ri-verificando il proprio codice per la Sala Review dello Sprint 1 (non durante l'implementazione originale di SEC-01) |
+
+**Descrizione.** Tre punti distinti di `bot.js` scrivono il campo `trailing_json` sovrascrivendolo col
+solo `{ slOid }` — cancellando `originalEntryPx` e `dcaCount` che il fix di SEC-01 salva nello stesso
+campo. A runtime nessun problema: i valori restano corretti in memoria finché il processo non si
+riavvia. Il guaio emerge dopo un **riavvio** del bot su una posizione che ha già eseguito almeno una
+mediazione DCA: `dcaCount` torna a 0, e il bot può eseguire più step di DCA di quanti configurati,
+impegnando capitale non previsto.
+
+**Criteri di accettazione**
+
+- [ ] I tre punti che scrivono `trailing_json` fanno **merge** col contenuto esistente (`originalEntryPx`, `dcaCount` preservati), non un overwrite completo.
+- [ ] Test che riproduce lo scenario: apre una posizione, esegue un'aggiunta DCA, fa scattare un aggiornamento di trailing stop, istanzia un **nuovo** `PerpsBot` sullo stesso DB (simula il riavvio), verifica che `dcaCount` sia ancora quello corretto.
+- [ ] Nessuna regressione sul comportamento già testato in `test/botDca.test.js`.
+
+**Dipendenze esterne.** Nessuna. **Dipendenza interna:** stesso file di SEC-01/SEC-05 — va assegnato a chi già conosce quel codice (Bruno), non parallelizzato con altri task sullo stesso file.
+
+**Rischi**
+
+| Rischio | Mitigazione |
+|:---|:---|
+| Il merge introduce una regressione sul trailing stop "normale" (senza DCA) | Rigirare `test/botDca.test.js` e l'intera suite dopo la modifica, non solo il nuovo test |
+| Il fix tocca lo stesso file toccato pesantemente da SEC-01: rischio di conflitto se lavorato in parallelo con altro codice su `bot.js` | Nessun altro task Sprint 2 tocca `bot.js` — verificato, nessun conflitto reale |
+
+---
+
+### 🟠 CI-REBUILD-01 · La CI non ricompila `better-sqlite3`
+
+| | |
+|:---|:---|
+| **Tipo** | 🔒 affidabilità CI |
+| **Story Point** | **1** |
+| **Priorità** | P1 — "verde da noi, rosso su un runner pulito" è un problema di fiducia nella CI, non solo tecnico |
+| **File** | `.github/workflows/ci.yml` |
+| **Origine** | Joshua, scoperto ri-verificando l'infrastruttura per la Sala Review dello Sprint 1 |
+
+**Descrizione.** `.npmrc` (SEC-02) blocca gli script postinstall per tutto il repository, ma **solo il
+`Dockerfile`** esegue `npm rebuild better-sqlite3 --ignore-scripts=false` dopo `npm ci`. La pipeline
+CI fa solo `npm ci` + `npm test`, senza quel passaggio. In locale i test che aprono davvero SQLite
+passano perché resta un binario compilato **prima** dell'introduzione di `.npmrc` — su un runner CI
+realmente pulito (senza quello stato residuo) quei test fallirebbero.
+
+**Criteri di accettazione**
+
+- [ ] Aggiunto uno step CI che esegue `npm run rebuild:native` (già esistente in `package.json`, introdotto in SEC-02) dopo `npm ci` e prima di `npm test`.
+- [ ] Verificato su un ambiente realmente pulito (`rm -rf node_modules` prima di `npm ci`, non solo in locale con cache residua) che i test SQLite passino.
+- [ ] Le istruzioni di setup per chi clona il repo da zero menzionano il passaggio.
+
+**Dipendenze esterne.** Nessuna. **Dipendenza interna:** stesso file di CI-01 — stesso proprietario (Joshua), eseguito in sequenza nella stessa sessione, non in parallelo con Annie su CI-01.
+
+**Rischi**
+
+| Rischio | Mitigazione |
+|:---|:---|
+| Il rebuild allunga i tempi della CI | Trascurabile: pochi secondi per un solo modulo nativo |
+| Conflitto di modifica con CI-01 se eseguiti da agenti diversi in parallelo sullo stesso file | Stesso proprietario per entrambi (Joshua), sequenziale per costruzione |
+
+---
+
+### ⚪️ DOC-02 · Residuo in `INDEX.md:59` dopo DOC-01
+
+| | |
+|:---|:---|
+| **Tipo** | 📄 docs |
+| **Story Point** | **1** |
+| **Priorità** | P3 — cosmetico, zero rischio operativo |
+| **File** | `docs/KB/index/INDEX.md` |
+| **Origine** | Maya, scoperto ri-verificando la documentazione per la Sala Review dello Sprint 1 |
+
+**Descrizione.** La tabella di sintesi del backlog (riga 59) dice ancora *"il webhook esiste già →
+estenderlo"*, in contraddizione diretta col riquadro corretto poche righe sotto nello stesso file
+(che riflette la decisione SEC-04, opzione B: endpoint tenuto interno). Un residuo della chiusura di
+DOC-01 non completamente propagato a quella riga specifica.
+
+**Criteri di accettazione**
+
+- [ ] La riga riflette lo stato reale: endpoint interno per scelta, non da estendere salvo decisione futura esplicita.
+- [ ] Nessun'altra menzione contraddittoria del webhook nello stesso file.
+
+**Dipendenze esterne.** Nessuna. **Rischi.** Nessuno — fix di una riga.
+
+---
+
 ## 3. Riepilogo e pianificazione
 
 ### 3.1 Story point e ordine di esecuzione
 
-| ID | Titolo | SP | Priorità | Blocca |
-|:---|:---|:--:|:---:|:---|
-| **DEP-01** | Aggiornamento dipendenze vulnerabili | 5 | P0 | CI di tutto lo sprint |
-| **WS-01** | Watchdog riconnessione WebSocket | 3 | P1 | — |
-| **TEST-01** | Copertura test script segreti | 3 | P1 | — |
-| **CI-01** | harden-runner audit → block | 2 | P2 | Serve tempo di osservazione |
-| **OPS-01** | Rinnovo automatico SHA pinnati | 2 | P2 | — |
-| **CHORE-01** | Verifica igiene .npmrc | 1 | P2 | — |
-| | **Totale** | **16** | | |
+| ID | Titolo | SP | Priorità | Owner | Blocca |
+|:---|:---|:--:|:---:|:---|:---|
+| **DEP-01** | Aggiornamento dipendenze vulnerabili | 5 | P0 | Joshua | CI di tutto lo sprint |
+| **WS-01** | Watchdog riconnessione WebSocket | 3 | P1 | Bruno | — |
+| **TEST-01** | Copertura test script segreti | 3 | P1 | Bruno (review: Annie) | — |
+| **TRAIL-01** | `trailing_json` perde stato dopo riavvio | 2 | P1 | Bruno | — |
+| **CI-01** | harden-runner audit → block | 2 | P2 | Joshua (review: Annie) | Serve tempo di osservazione |
+| **OPS-01** | Rinnovo automatico SHA pinnati | 2 | P2 | Joshua | — |
+| **CI-REBUILD-01** | La CI non ricompila better-sqlite3 | 1 | P1 | Joshua | — |
+| **CHORE-01** | Verifica igiene .npmrc | 1 | P2 | PO | — |
+| **DOC-02** | Residuo INDEX.md:59 | 1 | P3 | Maya | — |
+| | **Totale** | **20** | | | |
 
-**Sequenza consigliata:** DEP-01 → (WS-01, TEST-01, CHORE-01 in parallelo — file disgiunti) → CI-01 (aperto presto per iniziare a raccogliere log, chiuso più tardi) → OPS-01.
+**Sequenza consigliata:** DEP-01 → (WS-01 → TRAIL-01, stesso proprietario e file limitrofi, in sequenza) → (CI-REBUILD-01 → CI-01 → OPS-01, stesso proprietario, in sequenza) → (TEST-01, CHORE-01, DOC-02 in parallelo — file disgiunti da tutto il resto).
 
-DEP-01 va per primo perché blocca la CI per l'intero team, non solo per questo sprint — è l'unico task con un effetto a cascata sul resto del lavoro.
+DEP-01 va per primo perché blocca la CI per l'intero team. TRAIL-01 segue WS-01 perché entrambi sono di Bruno; CI-REBUILD-01 precede CI-01 perché entrambi toccano `ci.yml` e sono di Joshua — farli in sequenza nella stessa sessione evita qualunque rischio di conflitto sullo stesso file.
 
 ### 3.2 Grafo delle dipendenze
 
 ```
 DEP-01 ──► (sblocca la CI per tutto il resto)
              │
-             ├── WS-01     (parallelo, file disgiunti)
-             ├── TEST-01   (parallelo, file disgiunti)
-             ├── CHORE-01  (parallelo, verifica rapida)
-             └── CI-01     (apre presto, raccoglie log nel tempo, chiude per ultimo)
-
-OPS-01 ──► indipendente, nessuna relazione con gli altri
+             ├── WS-01 ──► TRAIL-01     (Bruno, sequenziale: stesso file bot.js)
+             ├── CI-REBUILD-01 ──► CI-01 ──► OPS-01   (Joshua, sequenziale: stesso file ci.yml)
+             ├── TEST-01    (Bruno o parallelo — file disgiunti da bot.js)
+             ├── CHORE-01   (PO, verifica rapida)
+             └── DOC-02     (Maya, file disgiunto da tutto il resto)
 ```
 
-Nessuna dipendenza circolare. WS-01, TEST-01, CHORE-01 e OPS-01 sono pienamente parallelizzabili tra loro una volta sbloccata la CI da DEP-01.
+Nessuna dipendenza circolare. Uniche sequenzialità **obbligate** (stesso file, stesso proprietario):
+WS-01→TRAIL-01 e CI-REBUILD-01→CI-01→OPS-01. Tutto il resto è pienamente parallelizzabile una volta
+sbloccata la CI da DEP-01.
 
 ### 3.3 Dipendenze esterne
 
@@ -278,6 +390,8 @@ Nessuna dipendenza circolare. WS-01, TEST-01, CHORE-01 e OPS-01 sono pienamente 
 | R3 | CI-01 parte con un'allowlist incompleta e rompe il primo push utile | Media | Basso | Raccogliere log da più run reali, non da uno solo |
 | R4 | Refactoring per TEST-01 introduce una regressione negli script di rotazione chiavi | Bassa | **Alto** (area cifratura) | Test manuale CLI oltre ai test automatici; nessun test tocca `data/perps.db` reale |
 | R5 | Nuove vulnerabilità emergono tra la stesura di questo doc e l'esecuzione | Media | Basso | Rieseguire `npm audit` il giorno dell'esecuzione, non fidarsi di questo documento se sono passati giorni |
+| R6 | TRAIL-01 (merge su `trailing_json`) rompe il trailing stop "normale" senza DCA | Bassa | Medio | Rigirare `test/botDca.test.js` e l'intera suite, non solo il nuovo test mirato |
+| R7 | CI-REBUILD-01 e CI-01 sullo stesso file (`ci.yml`) lavorati fuori sequenza generano conflitti | Bassa | Basso | Stesso proprietario (Joshua) per entrambi, ordine fissato nella sequenza consigliata |
 
 ### 3.5 Definition of Done
 
@@ -291,6 +405,63 @@ Per **ogni** task:
 
 Per lo **sprint**:
 
-- [ ] `npm audit --audit-level=high` verde — è il segnale che la CI di SEC-03 è finalmente utilizzabile senza rumore preesistente.
-- [ ] Watchdog WS verificato con un test che simula un drop, non solo osservato "a occhio" sui log.
-- [ ] `perps_ws_reconnects_total` osservato incrementare almeno una volta in un test o in un ambiente di verifica (non deve restare morto come oggi).
+- [x] `npm audit --audit-level=high` verde — è il segnale che la CI di SEC-03 è finalmente utilizzabile senza rumore preesistente. **0 vulnerabilità a qualsiasi livello (DEP-01).**
+- [x] Watchdog WS verificato con un test che simula un drop, non solo osservato "a occhio" sui log. **`test/marketDataWs.test.js`, 6 casi (WS-01).**
+- [x] `perps_ws_reconnects_total` osservato incrementare almeno una volta in un test o in un ambiente di verifica. **Verificato in WS-01; nota aperta: conta anche le ri-sottoscrizioni volontarie da cambio rete, non solo i drop.**
+
+---
+
+## 4. Esito — Sprint 2 (review PO, 8 agosto 2026)
+
+Review condotta sullo stesso modello dello Sprint 1: ogni membro presenta il proprio lavoro con
+evidenza, il PO decide task per task. Integrazione verificata sull'intero albero: **87/87 test
+verdi, lint pulito, `npm audit` a zero vulnerabilità a qualsiasi livello.**
+
+| Task | Owner | SP | Esito |
+|:---|:---|:--:|:---|
+| DEP-01 | Joshua | 5 | ✅ **Done** — nessuna riserva |
+| WS-01 | Bruno | 3 | ✅ **Done** — nessuna riserva |
+| TRAIL-01 | Bruno | 2 | ✅ **Done** — nessuna riserva |
+| TEST-01 | Bruno | 3 | ✅ **Done** — con deviazione approvata (vedi sotto) |
+| OPS-01 | Joshua | 2 | ✅ **Done** — con scelta di scope confermata (vedi sotto) |
+| CI-REBUILD-01 | Joshua | 1 | ✅ **Done** — nessuna riserva |
+| DOC-02 | Maya | 1 | ✅ **Done** — nessuna riserva |
+| CI-01 | Joshua | 2 | ⏸️ **Differito** — dipendenza temporale non comprimibile |
+| CHORE-01 | PO | 1 | ⏳ **In attesa del PO** — nessun agente ha accesso a `.npmrc` |
+
+**17 SP chiusi, 2 SP differiti, 1 SP in attesa di un'azione umana.**
+
+### Decisioni prese in review
+
+1. **TEST-01** — Bruno, scrivendo i test, ha trovato che `scripts/rotate-encryption-key.js`
+   leggeva una colonna DB inesistente (`address` invece di `master_address`, introdotta in
+   `fbd5402`): la rotazione delle chiavi agent **non è mai stata eseguibile**, in nessun momento,
+   nemmeno su un DB vuoto. Mai in produzione — il bug esisteva solo su `feat/perps-hardening`.
+   Annie ha rifatto la verifica in modo indipendente (non si è fidata del resoconto) e confermato:
+   bug reale, fix corretto, test genuini. **Il PO ha accettato il fix dentro TEST-01** invece di
+   isolarlo in un task a sé. Nota aggiunta in `docs/DEPLOY.md` §10 per chi farà un audit
+   retrospettivo del periodo 6-8 agosto.
+2. **OPS-01** — Joshua ha escluso deliberatamente l'ecosistema npm da Dependabot (già coperto da
+   audit bloccante in CI + review riga-per-riga obbligatoria del lockfile). **Il PO ha confermato
+   la scelta.** Il criterio "apre PR per SHA pinnati" resta formalmente aperto fino al merge sul
+   branch di default — non blocca la chiusura del task, si conferma con la prima PR automatica.
+3. **CI-01** — dipendenza temporale reale (servono 3-5 run CI in modalità `audit` accumulate nel
+   tempo, nessuna è mai partita). **Il PO ha scelto di farlo scivolare fuori dallo Sprint 2**,
+   resta in backlog.
+4. **CHORE-01** — nessun agente ha accesso a `.npmrc` per via della sandbox. Resta un'ispezione
+   che solo il PO può fare di persona prima del primo commit.
+
+### Portato avanti (refinement candidates, non azionati in questo sprint)
+
+- Rating "Sforzo: Basso" per l'apertura del webhook a TrendSpider in `INDEX.md` §1.1, probabilmente
+  sbagliato (Maya).
+- Duplicato AOLM e typo nel nome file in `INDEX.md` §4, residui pre-Sprint-1 (Maya).
+- `INDEX.md` §3/§B.1 descrivono ancora come aperto il bug TP/SL-dopo-DCA chiuso in SEC-01 (Maya).
+- Contatore separato per riconnessioni da drop vs cambio rete volontario in WS-01, se utile (Bruno).
+- `secretBox.js` ricade silenziosamente su una chiave di sviluppo hardcoded se la variabile di
+  cifratura è assente — nessun test (Annie).
+- `rotate-encryption-key.js` confronta solo l'id della chiave, non il materiale — disallineamento
+  silenzioso non testato (Annie).
+- `check-secrets.js`: solo 3 variabili su 12 esercitate dai test (Annie).
+
+Stato consolidato: `docs/KB/BACKLOG/sprint2-status/aggregate.json`.

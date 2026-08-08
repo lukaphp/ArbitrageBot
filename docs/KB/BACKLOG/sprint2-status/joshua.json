@@ -1,9 +1,30 @@
 {
   "agent": "joshua",
-  "updatedAt": null,
+  "updatedAt": "2026-08-08T20:00:00Z",
   "tasks": {
-    "DEP-01": { "status": "not_started", "criteriaChecked": [false, false, false, false, false, false], "notes": "" },
-    "CI-01": { "status": "not_started", "criteriaChecked": [false, false, false, false], "notes": "" },
-    "OPS-01": { "status": "not_started", "criteriaChecked": [false, false, false], "notes": "" }
+    "DEP-01": {
+      "status": "done",
+      "criteriaChecked": [true, true, true, true, true, true],
+      "poApproval": "2026-08-08 — approvato in review, nessuna riserva.",
+      "notes": "17 vulnerabilita -> 0 (npm audit pulito a QUALSIASI livello, non solo high). 16/17 chiuse da `npm audit fix` (solo lockfile: package.json invariato perche' erano tutte dentro i range caret esistenti); ws deduplicato a 8.21.0 su tutte le 5 copie annidate. node-cron 3.0.3 -> 4.6.0 installato in modo mirato con `npm install node-cron@^4.6.0`, NON con `npm audit fix --force`: force avrebbe potuto trascinare altri major non richiesti. Verifica 4.x reale, non 'import ok': validate() sulle 3 espressioni di src/index.js, semantica di getNextRuns() sui 3 pattern (mezzanotte / minuto 0 / secondi 0-30), fire davvero eseguito dal daemon per '*/30 * * * * *' con attesa reale e nessun mock di timer, + boot completo del CLI legacy che logga 'Task automatici configurati' ed esce 0 su SIGINT. Le callback di setupAutomaticTasks() non leggono argomenti, quindi il passaggio 3.x(now) -> 4.x(TaskContext) e' innocuo; node-cron 4 e' inoltre zero-dependency, il che elimina uuid alla radice invece di aggiornarlo. Review lockfile riga per riga come da CONTRIBUTING: 11 pacchetti aggiunti (agent-base, https-proxy-agent, proxy-from-env@2, @types/ws + nested debug/ms/http-errors/statuses), tutti da registry.npmjs.org con integrity, maintainer storici e noti (rob-w, tootallnate, Microsoft types), ZERO nuovi script di install (l'insieme hasInstallScript resta better-sqlite3/fsevents/hyperliquid, gia' esaminati in SEC-02). SANATO FUORI PERIMETRO: engines.node era '>=18.0.0' ma sia node-cron@4 sia @playwright/test@1.62 (arrivato col fix non-breaking) dichiarano engines.node>=20 -> alzato a '>=20.0.0' con README allineato e il perche' scritto. Docker (node:20) e CI (node 22) erano gia' conformi: era solo il requisito dichiarato a essere rimasto indietro. NON VERIFICATO: la build Docker (`npm ci --omit=dev` su linux/node20), demone Docker non attivo su questa macchina - unica variante di install non esercitata."
+    },
+    "CI-REBUILD-01": {
+      "status": "done",
+      "criteriaChecked": [true, true, true],
+      "poApproval": "2026-08-08 — approvato in review, nessuna riserva.",
+      "notes": "Step 'Ricompila i moduli nativi (better-sqlite3)' aggiunto in ci.yml subito dopo `npm ci` e prima di audit/lint/test. Toccata SOLO la parte di rebuild: harden-runner e la sua egress-policy non sono stati sfiorati (perimetro di CI-01). Il gap e' stato PROVATO, non ipotizzato: copia pulita del repo in sandbox (git archive di HEAD + package.json/lock correnti + .npmrc), zero node_modules, `npm ci` -> nessun better_sqlite3.node e 3 test rossi (botDca 'due aggiunte DCA', riskPersistence x2) con 'Could not locate the bindings file'; dopo `npm run rebuild:native` sullo stesso albero, 66/66 verdi. Non ho smontato il node_modules di lavoro: Bruno stava girando i test in parallelo. Istruzioni di setup aggiornate in README (sezione Installa Dipendenze) e in CONTRIBUTING (nuova sezione 'Setup di un clone pulito'), entrambe con l'avvertenza che `npm rebuild better-sqlite3` SENZA --ignore-scripts=false stampa 'rebuilt dependencies successfully' e non produce alcun binario - falso positivo in cui sono gia' inciampato in SEC-02."
+    },
+    "CI-01": {
+      "status": "deferred",
+      "criteriaChecked": [false, false, false, false],
+      "poDecision": "2026-08-08 — PO: scivola fuori dallo Sprint 2, resta in backlog. Si riprende quando ci sono abbastanza run CI reali in modalita audit su cui basare l'allowlist.",
+      "notes": "Fuori perimetro in questa sessione: la dipendenza temporale non e' soddisfatta (servono i log di 3-5 run CI in modalita audit, nessuna run e' mai partita). INPUT PER CHI LO ESEGUIRA': lo step di rebuild che ho aggiunto con CI-REBUILD-01 introduce egress NUOVO da mettere in allowlist. better-sqlite3 ha install 'prebuild-install || node-gyp rebuild': prebuild-install scarica il binario prebuilt dalle release GitHub, quindi oltre a registry.npmjs.org e github.com servono verosimilmente api.github.com e objects.githubusercontent.com. Se manca, egress-policy: block non rompe `npm ci` ma fa cadere il rebuild sul fallback node-gyp (compilazione da sorgente, piu' lenta) o lo fa fallire del tutto. Da confermare comunque sui log reali, non su questa deduzione."
+    },
+    "OPS-01": {
+      "status": "done",
+      "criteriaChecked": [true, false, true],
+      "poApproval": "2026-08-08 — PO conferma l'esclusione dell'ecosistema npm da Dependabot. Criterio 2 resta aperto: si confermera' con la prima PR automatica dopo il merge su branch di default, non blocca la chiusura del task ora.",
+      "notes": "Creato .github/dependabot.yml, ecosistema github-actions, directory '/', cadenza settimanale (lunedi 06:00 Europe/Rome), open-pull-requests-limit 3, commit-message prefix 'chore' + include 'scope' -> produce `chore(deps): ...`, coerente con la convenzione del repo. Nessun auto-merge, deliberatamente: l'automazione e' sulla scoperta, non sull'applicazione (e' il rischio registrato per questo task). Etichette: solo 'dependencies', che Dependabot crea da se' se manca; ho scartato 'ci' perche' `gh label list` mostra che il repo non ha quell'etichetta e Dependabot ignorerebbe silenziosamente un'etichetta inesistente. Ecosistema npm NON configurato: scelta motivata nel file (le dipendenze npm hanno gia' audit bloccante in CI + review riga per riga obbligatoria del lockfile; PR automatiche la scavalcherebbero) - confermata dal PO in review. CRITERIO 2 NON SODDISFATTO E NON SODDISFACIBILE QUI: GitHub valida ed esegue dependabot.yml solo quando il file e' sul branch di default, non esiste dry-run e non devo pushare. Cio' che ho potuto verificare: lo YAML parsa e non contiene chiavi fuori schema; il pin di harden-runner e' nel formato che Dependabot riconosce e aggiorna mantenendolo SHA (`@<sha> # v2.20.1`); c'e' drift reale da scoprire, quindi la config produrra' output al primo giro. La conferma sara' la prima PR automatica dopo il merge su master."
+    }
   }
 }

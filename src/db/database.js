@@ -369,6 +369,11 @@ export class PerpsDatabase {
     this.db.prepare(`UPDATE positions SET ${sets.join(', ')} WHERE id = @id`).run(params);
   }
 
+  getPosition(id) {
+    if (id == null) return undefined;
+    return this.db.prepare(`SELECT * FROM positions WHERE id = ?`).get(id);
+  }
+
   getOpenPositionByBot(botId) {
     return this.db.prepare(
       `SELECT * FROM positions WHERE bot_id = ? AND status = 'open' ORDER BY opened_at DESC LIMIT 1`

@@ -57,7 +57,10 @@
 
 ### Prerequisiti
 
-- **Node.js** >= 18.0.0
+- **Node.js** >= 20.0.0 — il minimo è salito da 18 a 20 con DEP-01 (Sprint 2): `node-cron@4.x` e
+  `@playwright/test@1.62.x`, entrambi necessari per chiudere le vulnerabilità note, dichiarano
+  `engines.node >= 20`. L'immagine Docker (`node:20-bookworm-slim`) e la CI (Node 22) erano già
+  conformi: qui si allinea solo il requisito dichiarato, che era rimasto indietro.
 - **npm** o **yarn**
 - **MetaMask** installato nel browser
 - **Fondi testnet** per le transazioni
@@ -73,7 +76,20 @@ cd ArbitrageBot
 
 ```bash
 npm install
+
+# Obbligatorio su un clone pulito: ricompila i moduli nativi.
+npm run rebuild:native
 ```
+
+> ⚠️ **Il secondo comando non è opzionale.** `.npmrc` imposta `ignore-scripts=true`
+> (protezione supply-chain, SEC-02): `npm install` non esegue quindi lo script di install di
+> `better-sqlite3` e il binario nativo non viene prodotto. Senza `npm run rebuild:native` il
+> bot parte ma la prima apertura del database fallisce con
+> `Could not locate the bindings file`, e i test che usano SQLite sono rossi.
+> Lo script sblocca gli script di install per quel solo pacchetto
+> (`--ignore-scripts=false`): non disattiva la protezione per le altre dipendenze.
+> Nota: `npm rebuild better-sqlite3` **senza** `--ignore-scripts=false` stampa
+> "rebuilt dependencies successfully" e non produce nulla — usa sempre lo script npm.
 
 ### 3. Configurazione
 

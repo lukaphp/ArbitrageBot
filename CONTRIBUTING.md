@@ -41,6 +41,28 @@ vulnerabilità note di severità alta/critica con fix disponibile) e
 controlli sono un complemento alla review umana, non un sostituto: `npm audit`
 non rileva il typosquatting né i pacchetti dannosi non ancora segnalati.
 
+## 🔧 Setup di un clone pulito
+
+Dopo `npm ci` (o `npm install`) esegui **sempre**:
+
+```bash
+npm run rebuild:native
+```
+
+`.npmrc` imposta `ignore-scripts=true`, quindi l'install non compila il binario nativo di
+`better-sqlite3`. Salta questo passaggio e i test che aprono davvero SQLite
+(`test/botDca.test.js`, `test/riskPersistence.test.js`) falliscono con
+`Could not locate the bindings file`. Su una macchina che ha installato le dipendenze *prima*
+di SEC-02 il problema non si vede, perché il `.node` è rimasto sul disco: è esattamente il caso
+"verde da noi, rosso su un runner pulito". La CI esegue lo stesso step (vedi
+`.github/workflows/ci.yml`).
+
+Lo script sblocca gli script di install per **quel solo pacchetto**
+(`npm rebuild better-sqlite3 --ignore-scripts=false`): non allentare `.npmrc` per farlo
+funzionare. E non usare `npm rebuild better-sqlite3` senza il flag — `npm rebuild` eredita
+`ignore-scripts` da `.npmrc` e stampa "rebuilt dependencies successfully" senza produrre alcun
+binario.
+
 ## ✅ Prima di aprire una PR
 
 - `npm run lint` deve essere verde (lint di sintassi leggero su `src/`,

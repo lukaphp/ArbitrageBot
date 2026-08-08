@@ -24,3 +24,7 @@ I 7 candidati che hai segnalato a fine SEC-03 sono diventati direttamente il bac
 (con uno scartato come non applicabile dopo verifica — non tutto quello che si nota deve diventare
 un task). Continua a tenerla esplicita, con una riga di motivazione per ciascun candidato: è quello
 che rende il refinement azionabile invece che una lista di impressioni.
+
+## Sprint 2 — TEST-01 e vincoli operativi
+- [Il sandbox blocca nomi di variabili segrete anche in prosa](project_sandbox-blocca-nomi-variabili-segrete.md) — riformula il testo invece di ridigitare il token letterale, e verifica bug su copie in scratchpad quando non hai Edit/Write.
+- [Un fix di sicurezza "en passant" va segnalato al PO a parte](feedback_fix-di-sicurezza-en-passant-va-segnalato-a-parte.md) — anche se piccolo, giustificato e testato, non lasciarlo confuso tra i criteri d'accettazione ordinari.

@@ -30,6 +30,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # .npmrc (ignore-scripts=true, SEC-02) blocca gli script di install di TUTTE le
+      # dipendenze, quindi `npm ci` non produce il binario nativo di better-sqlite3.
+      # Senza questo step il runner è pulito e i test che aprono davvero SQLite
+      # (botDca, riskPersistence) fallirebbero con "Could not locate the bindings file",
+      # anche se in locale passano grazie a un .node residuo da un install pre-SEC-02.
+      # Lo script sblocca gli script per QUESTO SOLO pacchetto (--ignore-scripts=false):
+      # non è un allentamento di .npmrc, che resta attivo per tutto il resto.
+      # `cache: 'npm'` di setup-node non copre il caso: mette in cache i tarball, non il
+      # binario compilato.
+      - name: Ricompila i moduli nativi (better-sqlite3)
+        run: npm run rebuild:native
+
       # Fallisce il job su vulnerabilità note di severità alta o critica senza fix disponibile.
       - name: Audit delle dipendenze (npm audit)
         run: npm audit --audit-level=high

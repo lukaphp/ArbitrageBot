@@ -1,0 +1,49 @@
+# Dependabot — rinnovo automatico delle GitHub Action pinnate a SHA (OPS-01, Sprint 2).
+#
+# PERCHÉ ESISTE QUESTO FILE
+# SEC-03 ha pinnato `step-security/harden-runner` a uno SHA immutabile invece che al tag
+# mobile `v2`: un tag può essere ripuntato da chi mantiene l'action (è il vettore del caso
+# tj-actions/changed-files citato in CONTRIBUTING.md), uno SHA no. Il costo di quella scelta
+# è che nessun aggiornamento arriva più da solo: senza automazione il progetto resta fermo su
+# una versione sempre più vecchia, comprese le sue correzioni di sicurezza. Questo file
+# sostituisce la disciplina manuale — che non regge nel tempo — con una notifica automatica.
+#
+# COSA FA E COSA NON FA
+# Dependabot rispetta il formato di riferimento già in uso: dove trova uno SHA pinnato con il
+# commento di versione (`@<sha> # v2.20.1`) aggiorna SHA *e* commento, non converte il pin in
+# un tag mobile. L'obiettivo è mantenere il pinning, automatizzandone solo il rinnovo.
+# Nessun auto-merge, deliberatamente: l'automazione è sulla *scoperta* dell'aggiornamento, non
+# sulla sua *applicazione*. Ogni PR passa dalla review umana come qualsiasi altra (vedi la
+# regola su package-lock.json in CONTRIBUTING.md).
+version: 2
+updates:
+  - package-ecosystem: 'github-actions'
+    # Per github-actions la directory è sempre '/': Dependabot analizza .github/workflows/.
+    directory: '/'
+    schedule:
+      # Settimanale, non giornaliero: gli aggiornamenti di action sono poco frequenti e una
+      # cadenza più fitta trasformerebbe queste PR in rumore da ignorare — che è esattamente
+      # il rischio registrato per questo task.
+      interval: 'weekly'
+      day: 'monday'
+      time: '06:00'
+      timezone: 'Europe/Rome'
+    # Tetto basso e volontario: se le PR si accumulano non riviste, il segnale si perde.
+    open-pull-requests-limit: 3
+    commit-message:
+      # Produce `chore(deps): ...`, coerente con la convenzione <tipo>(<scope>): <descrizione>
+      # del repository.
+      prefix: 'chore'
+      include: 'scope'
+    # Solo 'dependencies': è l'etichetta che Dependabot crea da sé se manca. Etichette
+    # inesistenti nel repository verrebbero ignorate silenziosamente (oggi il repo non ha
+    # né 'ci' né 'dependencies' — verificato con `gh label list` l'8 agosto 2026).
+    labels:
+      - 'dependencies'
+
+# NOTA DI PERIMETRO — l'ecosistema 'npm' NON è configurato qui.
+# È una scelta, non una dimenticanza: OPS-01 copre il rinnovo degli SHA delle Action. Le
+# dipendenze npm hanno già un presidio in CI (`npm audit --audit-level=high` bloccante, da
+# SEC-03) e la review riga per riga del lockfile imposta da CONTRIBUTING.md; aggiungere qui
+# l'ecosistema npm significherebbe aprire PR automatiche su un percorso che richiede quella
+# review manuale. Valutabile come story a sé nel refinement dello sprint successivo.

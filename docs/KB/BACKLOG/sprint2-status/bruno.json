@@ -1,8 +1,24 @@
 {
   "agent": "bruno",
-  "updatedAt": null,
+  "updatedAt": "2026-08-08T20:00:00Z",
   "tasks": {
-    "WS-01": { "status": "not_started", "criteriaChecked": [false, false, false, false, false, false, false, false], "notes": "" },
-    "TEST-01": { "status": "not_started", "criteriaChecked": [false, false, false, false, false], "notes": "" }
+    "WS-01": {
+      "status": "done",
+      "criteriaChecked": [true, true, true, true, true, true, true, true],
+      "poApproval": "2026-08-08 — approvato in review, nessuna riserva.",
+      "notes": "Watchdog in marketData._wsWatchdogTick (PERPS_WS_WATCHDOG_MS default 30s; backoff PERPS_WS_RECONNECT_BACKOFF_MS default 15s; soglia notifica PERPS_WS_DOWN_NOTIFY_MS default 5 min, tutte documentate in docs/DEPLOY.md 2.4 e 6). Nuovi metodi client: closeWsFor(network), onNetworkChange(cb), _attachWsLogging(sdk,network). setNetwork chiude il WS della rete precedente e notifica i listener, cosi' marketData ri-sottoscrive subito senza attendere il watchdog. metrics.js: aggiunta get(name) per asserire i contatori nei test senza passare da render() (che importa botManager). Nomi eventi SDK verificati sul pacchetto installato: error/close/reconnect/maxReconnectAttemptsReached (agganciato anche quest'ultimo: e' il momento in cui l'SDK rinuncia). Test: test/marketDataWs.test.js, 6 casi con timer e Date mockati (mock.timers), nessun WS reale aperto. NON coperto: il comportamento dell'SDK Hyperliquid vero; _attachWsLogging e' verificato contro un fake che espone .on, non contro l'SDK. Nota accettata dal PO come miglioramento futuro non bloccante: ws_reconnects_total si incrementa anche sulla ri-sottoscrizione dopo un cambio rete voluto."
+    },
+    "TEST-01": {
+      "status": "done",
+      "criteriaChecked": [true, true, true, false, true],
+      "poApproval": "2026-08-08 — PO accetta il fix di sicurezza dentro TEST-01. Nota aggiunta in docs/DEPLOY.md §10 per l'audit retrospettivo.",
+      "notes": "Entrambi gli script sono coperti eseguendoli come processo figlio su DB temporaneo e ambiente costruito da zero (DOTENV_CONFIG_PATH su file vuoto: i test non dipendono dalla configurazione locale della macchina). Nessuna estrazione di funzioni e' stata necessaria: il CLI stesso e' l'unita' sotto test, quindi sono coperti anche il parsing di --apply e gli exit code (e la mitigazione R4 'test manuale CLI' e' inglobata nel test automatico). test/rotateEncryptionKey.test.js: 6 casi (dry-run che non scrive nulla byte-per-byte, rotazione v1->v2 con dati ancora leggibili con la SOLA chiave nuova, idempotenza, valore non decifrabile lasciato intatto + exit 1 mentre gli altri vengono comunque ruotati, formato legacy senza prefisso, telegram_config con JSON illeggibile). test/checkSecrets.test.js: 6 casi (produzione senza critici -> exit 1; sviluppo senza configurazione -> exit 0; NODE_ENV non impostato -> exit 0; produzione con critici validi -> exit 0; valore troppo corto -> blocca in prod, avvisa in dev, e mai stampa il valore). CRITERIO 4 NON SODDISFATTO (deviazione deliberata, approvata dal PO in review): scripts/rotate-encryption-key.js leggeva la colonna inesistente 'address' invece di 'master_address' (schema in src/db/database.js) -> 'no such column: address' al primo prepare(), quindi la rotazione NON era eseguibile affatto, nemmeno su un DB vuoto. Introdotto in fbd5402, mai esercitato, mai in produzione (confermato da Annie via git log). Corretto: senza la correzione il criterio 2 ('rotazione riuscita, dati ancora leggibili') non e' verificabile. Verificato — da me e indipendentemente da Annie — che i 6 test falliscono tutti ripristinando la colonna sbagliata. Non ho eseguito npm run secrets:rotate ne' secrets:check contro l'ambiente/DB reali (leggerebbero data/perps.db e i segreti locali): la copertura CLI e' tutta su DB e ambiente temporanei."
+    },
+    "TRAIL-01": {
+      "status": "done",
+      "criteriaChecked": [true, true, true],
+      "poApproval": "2026-08-08 — approvato in review, nessuna riserva.",
+      "notes": "Tutte e quattro le scritture di trailing_json in bot.js (_placeTpSl, _ensureStopLoss, trailing in _manageOpen, _repriceTpSlAfterDca) passano ora da _trailingJson(), che fa merge col contenuto persistito preservando anche le chiavi sconosciute, con lo stato in memoria come fonte di verita'. Aggiunto db.getPosition(id) per rileggere per id la riga da aggiornare. Test: test/botTrailingPersistence.test.js, 3 casi: (1) apertura -> DCA -> trailing -> nuovo PerpsBot sullo stesso DB (riavvio) -> dcaCount/originalEntryPx intatti e nessun DCA extra oltre gli step configurati; (2) trailing senza DCA, nessuna regressione, un solo SL sul book; (3) merge che preserva chiavi sconosciute. Verificato che i test FALLISCONO ripristinando l'overwrite: non passano per il motivo sbagliato. test/botDca.test.js invariato e verde."
+    }
   }
 }

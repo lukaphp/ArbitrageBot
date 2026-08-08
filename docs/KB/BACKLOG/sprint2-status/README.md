@@ -9,11 +9,15 @@ serve lock né coordinamento tra agenti.
 
 | File | Scritto da | Contenuto |
 |:---|:---|:---|
-| `sprint2-tasks.json` | Io/PO (statico, non da agenti) | Elenco canonico dei task, proprietario, story point — fonte: `sprint2.md` |
-| `joshua.json` | joshua | Stato dei task che possiede |
-| `bruno.json` | bruno | Stato dei task che possiede |
-| `annie.json` | annie | Note di review + candidati di refinement (non possiede task da implementare in Sprint 2) |
+| `sprint2-tasks.json` | Io/PO (statico, non da agenti) | Elenco canonico dei task, proprietario, story point — fonte: `sprint2.md`. Aggiornato dopo ogni planning. |
+| `joshua.json` | joshua | Stato dei task che possiede: DEP-01, CI-REBUILD-01, CI-01, OPS-01 |
+| `bruno.json` | bruno | Stato dei task che possiede: WS-01, TEST-01, TRAIL-01 |
+| `maya.json` | maya | Stato dei task che possiede: DOC-02 (dal planning dell'8 agosto — prima non ne aveva) |
+| `annie.json` | annie | Note di review (TEST-01, CI-01) + candidati di refinement |
 | `aggregate.json` | roger | Sintesi di tutti i file sopra, letta da me per aggiornare la board visuale |
+
+CHORE-01 non ha un file di stato dedicato: è esplicitamente non delegato a un agente (vedi
+`sprint2-tasks.json`), resta in carico al PO.
 
 ## Schema di un file di stato agente
 

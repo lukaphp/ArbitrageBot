@@ -1,5 +1,191 @@
 {
   "producedBy": "roger",
-  "updatedAt": null,
-  "note": "Non ancora prodotto — Roger lo genera leggendo joshua.json, bruno.json e annie.json quando gli viene chiesto un riepilogo di sprint. Placeholder iniziale."
+  "updatedAt": "2026-08-08T20:00:00Z",
+  "sprint": "Sprint 2",
+  "sources": {
+    "taskPlan": "docs/KB/BACKLOG/sprint2-status/sprint2-tasks.json",
+    "perAgentStatus": [
+      "docs/KB/BACKLOG/sprint2-status/joshua.json",
+      "docs/KB/BACKLOG/sprint2-status/bruno.json",
+      "docs/KB/BACKLOG/sprint2-status/maya.json",
+      "docs/KB/BACKLOG/sprint2-status/annie.json"
+    ]
+  },
+  "disclaimer": "Ogni 'status' e ogni 'criteriaChecked' qui sotto è la trascrizione di quanto dichiarato dall'agente proprietario del task nel proprio file di stato, integrata dal verdetto di Annie dove disponibile. La transizione a 'done' riflette le decisioni prese dal PO in sessione di review l'8 agosto 2026 (vedi poDecisionsResolved).",
+  "reviewedAt": "2026-08-08",
+  "statusCounts": {
+    "done": 7,
+    "deferred": 1,
+    "pending_po_action": 1
+  },
+  "tasks": [
+    {
+      "id": "WS-01",
+      "title": "Watchdog di riconnessione per il WebSocket Hyperliquid",
+      "owner": "bruno",
+      "reviewer": null,
+      "sp": 3,
+      "priority": "P1",
+      "status": "done",
+      "criteriaTotal": 8,
+      "criteriaSatisfied": 8,
+      "poApproval": "2026-08-08 — approvato senza riserve.",
+      "summary": "Tutti gli 8 criteri soddisfatti. Watchdog periodico (default 30s), backoff (default 15s), soglia notifica Telegram (default 5 min) tutti configurabili via env e documentati in docs/DEPLOY.md. setNetwork chiude il WS della rete precedente e notifica i listener. Copre anche l'evento 'maxReconnectAttemptsReached' dell'SDK. Test dedicato (test/marketDataWs.test.js, 6 casi) con timer mockati, nessun WS reale.",
+      "notCovered": "Il comportamento dell'SDK Hyperliquid reale non è esercitato dai test (solo un fake che espone .on).",
+      "openNonBlockingNote": "ws_reconnects_total si incrementa anche sulla ri-sottoscrizione dopo un cambio rete voluto (setNetwork), non solo dopo un drop. Migliorabile con un secondo contatore in un prossimo giro, se serve."
+    },
+    {
+      "id": "DEP-01",
+      "title": "Aggiornamento delle dipendenze vulnerabili",
+      "owner": "joshua",
+      "reviewer": null,
+      "sp": 5,
+      "priority": "P0",
+      "status": "done",
+      "criteriaTotal": 6,
+      "criteriaSatisfied": 6,
+      "poApproval": "2026-08-08 — approvato senza riserve.",
+      "summary": "17 vulnerabilità -> 0 (npm audit pulito a qualsiasi livello). 16/17 risolte da 'npm audit fix' (solo lockfile). node-cron aggiornato in modo mirato a 4.6.0 con verifica reale delle 3 schedulazioni di src/index.js. Lockfile riesaminato riga per riga come da CONTRIBUTING (11 pacchetti nuovi, tutti da registry.npmjs.org, zero nuovi install script).",
+      "notCovered": "Build Docker non verificata (demone non attivo sulla macchina di Joshua) — unica variante di install non esercitata.",
+      "outOfScopeFix": "engines.node alzato da '>=18.0.0' a '>=20.0.0' (node-cron 4 e @playwright/test 1.62 richiedono >=20). Dichiarato e motivato, non nascosto."
+    },
+    {
+      "id": "CI-01",
+      "title": "harden-runner da audit a block",
+      "owner": "joshua",
+      "reviewer": "annie",
+      "sp": 2,
+      "priority": "P2",
+      "status": "deferred",
+      "criteriaTotal": 4,
+      "criteriaSatisfied": 0,
+      "poDecision": "2026-08-08 — PO: scivola fuori dallo Sprint 2, resta in backlog fino ad accumulare abbastanza run CI reali in modalità audit.",
+      "summary": "Non avviato per dipendenza temporale reale: servono i log di 3-5 run CI in modalità 'audit' e non è mai partita nessuna run. Joshua lascia un input per chi lo eseguirà: lo step di rebuild introdotto da CI-REBUILD-01 genera nuovo traffico di rete (better-sqlite3 scarica binari prebuilt da GitHub release) — oltre a registry.npmjs.org e github.com serviranno verosimilmente api.github.com e objects.githubusercontent.com in allowlist. Dedotto, non confermato sui log reali."
+    },
+    {
+      "id": "TEST-01",
+      "title": "Copertura test per gli script di rotazione chiavi/segreti",
+      "owner": "bruno",
+      "reviewer": "annie",
+      "sp": 3,
+      "priority": "P1",
+      "status": "done",
+      "criteriaTotal": 5,
+      "criteriaSatisfied": 4,
+      "poApproval": "2026-08-08 — PO accetta il fix di sicurezza dentro TEST-01. Nota aggiunta in docs/DEPLOY.md §10 per l'audit retrospettivo.",
+      "summary": "4 criteri su 5. Copertura via processo figlio su DB temporaneo e ambiente costruito da zero. test/rotateEncryptionKey.test.js: 6 casi. test/checkSecrets.test.js: 6 casi.",
+      "criterioNonSoddisfatto": "Criterio 4 non soddisfatto per scelta deliberata: scripts/rotate-encryption-key.js leggeva la colonna DB 'address' invece di 'master_address', quindi la rotazione non era MAI eseguibile, nemmeno su un DB vuoto. Bug introdotto in fbd5402, mai in produzione (confermato da Annie via git history: esiste solo su feat/perps-hardening). Corretto perché senza il fix il criterio 2 non era verificabile.",
+      "reviewStatus": {
+        "agent": "annie",
+        "verdict": "PASS sulla verifica indipendente. Annie ha confermato il bug con git show fbd5402, riprodotto la query buggata isolatamente e visto i 6 test falliti lei stessa, poi rieseguito i test reali (6/6 + 6/6, 87/87 su npm test completo)."
+      },
+      "notCovered": "npm run secrets:rotate e secrets:check non eseguiti contro l'ambiente/DB reali — copertura interamente su DB e ambiente temporanei.",
+      "refinementCandidatesFromAnnie": [
+        "secretBox.js ricade silenziosamente su una chiave di sviluppo hardcoded se la variabile di cifratura è assente/vuota, senza errore né test.",
+        "rotate-encryption-key.js decide se ri-cifrare confrontando solo l'id della chiave, non il materiale — se cambia il segreto senza incrementare l'id, non ruota nulla, non testato.",
+        "check-secrets.js ha 12 variabili ma solo 3 sono esercitate dai test (+NODE_ENV) — rischio basso, solo output diagnostico."
+      ]
+    },
+    {
+      "id": "OPS-01",
+      "title": "Rinnovo automatico degli SHA pinnati (GitHub Actions)",
+      "owner": "joshua",
+      "reviewer": null,
+      "sp": 2,
+      "priority": "P2",
+      "status": "done",
+      "criteriaTotal": 3,
+      "criteriaSatisfied": 2,
+      "poApproval": "2026-08-08 — PO conferma l'esclusione dell'ecosistema npm da Dependabot. Criterio 2 resta aperto fino al merge su branch di default: la prima PR automatica di Dependabot ne sarà la prova, non blocca la chiusura ora.",
+      "summary": ".github/dependabot.yml creato: ecosistema github-actions, cadenza settimanale, open-pull-requests-limit 3, nessun auto-merge (deliberato: l'automazione è sulla scoperta, non sull'applicazione).",
+      "criterioNonSoddisfatto": "Criterio 2 non verificabile in locale: GitHub valida ed esegue dependabot.yml solo sul branch di default, nessun dry-run possibile.",
+      "scopeChoice": "Ecosistema npm escluso deliberatamente (già coperto da audit bloccante in CI + review riga-per-riga obbligatoria del lockfile) — confermato dal PO in review."
+    },
+    {
+      "id": "CHORE-01",
+      "title": "Verifica igiene .npmrc",
+      "owner": "po",
+      "reviewer": null,
+      "sp": 1,
+      "priority": "P2",
+      "status": "pending_po_action",
+      "criteriaTotal": 3,
+      "criteriaSatisfied": null,
+      "summary": "Nessun agente ha accesso a .npmrc (protezione sandbox) — resta interamente in carico al PO. Nessuna azione del team possibile su questo task.",
+      "poActionNeeded": "Ispezionare .npmrc di persona prima del primo commit e confermare l'assenza di token/credenziali."
+    },
+    {
+      "id": "TRAIL-01",
+      "title": "trailing_json perde originalEntryPx/dcaCount dopo un riavvio",
+      "owner": "bruno",
+      "reviewer": null,
+      "sp": 2,
+      "priority": "P1",
+      "status": "done",
+      "criteriaTotal": 3,
+      "criteriaSatisfied": 3,
+      "poApproval": "2026-08-08 — approvato senza riserve.",
+      "summary": "Le quattro scritture di trailing_json in bot.js ora fanno merge tramite _trailingJson() invece di overwrite. Test dedicato (test/botTrailingPersistence.test.js, 3 casi) verifica anche che i test falliscano se si ripristina l'overwrite."
+    },
+    {
+      "id": "CI-REBUILD-01",
+      "title": "La CI non ricompila better-sqlite3",
+      "owner": "joshua",
+      "reviewer": null,
+      "sp": 1,
+      "priority": "P1",
+      "status": "done",
+      "criteriaTotal": 3,
+      "criteriaSatisfied": 3,
+      "poApproval": "2026-08-08 — approvato senza riserve.",
+      "summary": "Gap dimostrato su sandbox pulita (node_modules azzerato -> npm ci -> 3 test rossi per binding mancante; dopo npm run rebuild:native, 66/66 verdi). Step aggiunto in ci.yml dopo npm ci, senza toccare harden-runner (perimetro di CI-01)."
+    },
+    {
+      "id": "DOC-02",
+      "title": "Residuo in INDEX.md:59 dopo DOC-01",
+      "owner": "maya",
+      "reviewer": null,
+      "sp": 1,
+      "priority": "P3",
+      "status": "done",
+      "criteriaTotal": 2,
+      "criteriaSatisfied": 2,
+      "poApproval": "2026-08-08 — approvato senza riserve.",
+      "summary": "Riga 59 corretta, più due contraddizioni collaterali richieste dal criterio 2 stesso: §3 riga 5 (debito di sicurezza marcato erroneamente come da fare) e rimozione di una ⭐ su un'opzione già scartata. Due link stantii aggiornati."
+    }
+  ],
+  "poDecisionsResolved": [
+    {
+      "taskId": "CI-01",
+      "issue": "Dipendenza temporale non comprimibile (servono run CI ripetute in modalità audit)",
+      "decision": "Scivola fuori dallo Sprint 2, resta in backlog."
+    },
+    {
+      "taskId": "OPS-01",
+      "issue": "Scelta di scope di Joshua di escludere l'ecosistema npm da Dependabot",
+      "decision": "Confermata. Criterio 2 chiuso solo formalmente in attesa del merge — non blocca."
+    },
+    {
+      "taskId": "TEST-01",
+      "issue": "Bug di sicurezza reale corretto da Bruno fuori dal perimetro stretto del task",
+      "decision": "Accettato dentro TEST-01. Nota aggiunta in docs/DEPLOY.md §10."
+    },
+    {
+      "taskId": "CHORE-01",
+      "issue": "Nessun agente ha accesso a .npmrc",
+      "decision": "Resta azione dovuta del PO, non del team — non chiudibile in questa review."
+    }
+  ],
+  "sprintSpCompleted": 17,
+  "sprintSpDeferred": 2,
+  "sprintSpPendingHuman": 1,
+  "refinementCandidates": [
+    "INDEX.md §1.1: il rating 'Sforzo: Basso' per l'apertura del webhook a TrendSpider è probabilmente sbagliato (richiede HMAC, anti-replay, whitelist path, test di regressione) — segnalato da Maya, fuori perimetro DOC-02.",
+    "INDEX.md §4: duplicato AOLM e typo 'rchitettura' nel nome file, aperti da prima dello Sprint 1 — candidati a una story di manutenzione KB da 1 SP (Maya).",
+    "INDEX.md §3 Priorità 1 riga 0 e §B.1 punto 2 descrivono ancora il bug TP/SL dopo DCA come 'da verificare', ma è stato corretto in SEC-01 nello Sprint 1 (Maya, area di Bruno).",
+    "WS-01: contatore separato per riconnessioni da drop vs cambio rete volontario, se il PO lo ritiene utile.",
+    "TEST-01/Annie: secretBox.js ricade silenziosamente su chiave di sviluppo hardcoded se la variabile di cifratura è assente — nessun test.",
+    "TEST-01/Annie: rotate-encryption-key.js confronta solo l'id della chiave, non il materiale — disallineamento silenzioso non testato.",
+    "TEST-01/Annie: check-secrets.js, solo 3 variabili su 12 esercitate dai test."
+  ]
 }

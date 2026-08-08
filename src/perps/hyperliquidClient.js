@@ -38,6 +38,10 @@ class HyperliquidClient {
     this.readSdks = new Map();   // network -> SDK (sola lettura)
     this.signSdks = new Map();   // `${network}:${master}` -> SDK (firma con agent key)
     this.wsSdks = new Map();     // network -> SDK con WebSocket connesso
+    // Listener notificati dopo un cambio rete a runtime: serve a chi ha una
+    // sottoscrizione WS attiva (marketData) per ri-sottoscrivere la rete nuova
+    // senza che questo modulo debba conoscerlo (nessun import circolare).
+    this.networkChangeListeners = [];
   }
 
   init() {
@@ -60,10 +64,43 @@ class HyperliquidClient {
     if (network !== 'testnet' && network !== 'mainnet') {
       throw new Error('Rete non valida (testnet|mainnet)');
     }
+    const previous = this.network;
     this.network = network;
     db.setSetting('perps_network', network);
     logger.info(`🔀 Rete Perps impostata su: ${network}`);
+    if (previous !== network) {
+      // Il WS della rete precedente non serve più: lasciandolo aperto resterebbe
+      // una connessione viva che consegna i prezzi della rete SBAGLIATA, mentre
+      // la rete nuova non verrebbe mai sottoscritta (nessuno richiama
+      // subscribeAllMids) — restando silenziosamente sul fallback REST fino al
+      // riavvio del processo.
+      this.closeWsFor(previous).catch(() => { /* già loggato in closeWsFor */ });
+      this._emitNetworkChange(network, previous);
+    }
     return this.network;
+  }
+
+  /**
+   * Registra un listener sul cambio rete. Invocato DOPO che la rete è cambiata e
+   * che il WS della rete precedente è stato chiuso.
+   * @param {(network: string, previous: string) => void} cb
+   */
+  onNetworkChange(cb) {
+    if (typeof cb === 'function') this.networkChangeListeners.push(cb);
+  }
+
+  _emitNetworkChange(network, previous) {
+    for (const cb of this.networkChangeListeners) {
+      try {
+        const r = cb(network, previous);
+        // Un listener asincrono non deve poter far rigettare setNetwork.
+        if (r && typeof r.catch === 'function') {
+          r.catch(e => logger.warn('Listener cambio rete fallito', e?.message));
+        }
+      } catch (e) {
+        logger.warn('Listener cambio rete fallito', e?.message);
+      }
+    }
   }
 
   // ---- Istanze SDK ----
@@ -111,9 +148,54 @@ class HyperliquidClient {
       const sdk = new Hyperliquid({ enableWs: true, testnet: network === 'testnet' });
       await sdk.connect();
       this.wsSdks.set(network, sdk);
+      this._attachWsLogging(sdk, network);
       logger.info(`🔌 Hyperliquid WS connesso (${network})`);
     }
     return this.wsSdks.get(network);
+  }
+
+  /**
+   * Aggancia gli eventi del WebSocket dell'SDK al NOSTRO logger.
+   *
+   * Serve perché l'SDK logga i propri tentativi di riconnessione interni con
+   * console.error/console.warn diretti, che non passano dal nostro logger: senza
+   * questo, un drop del WS può non lasciare alcuna traccia in logs/app.log (è il
+   * difetto secondario #2 di WS-01).
+   *
+   * `maxReconnectAttemptsReached` è l'evento più importante: è il momento esatto
+   * in cui l'SDK rinuncia e il watchdog di marketData diventa l'unica cosa che
+   * può rimettere in piedi il feed.
+   *
+   * Best-effort: se l'SDK non esponesse un emitter, si registra a debug e si tira
+   * avanti — il watchdog non dipende da questi eventi, li usa solo per lasciare
+   * traccia.
+   */
+  _attachWsLogging(sdk, network) {
+    const ws = sdk?.ws;
+    if (!ws || typeof ws.on !== 'function') {
+      logger.debug(`Hyperliquid WS (${network}): eventi non agganciabili (l'SDK non espone .on)`);
+      return false;
+    }
+    if (ws.__hlLoggerAttached) return true;
+    try {
+      ws.on('error', (err) => {
+        logger.warn(`🔌 Hyperliquid WS errore (${network})`, err?.message || String(err));
+      });
+      ws.on('close', (info) => {
+        logger.warn(`🔌 Hyperliquid WS chiuso (${network})`, info?.reason || info?.code || '');
+      });
+      ws.on('reconnect', () => {
+        logger.warn(`🔌 Hyperliquid WS: riconnessione interna dell'SDK in corso (${network})`);
+      });
+      ws.on('maxReconnectAttemptsReached', () => {
+        logger.error(`🔌 Hyperliquid WS (${network}): l'SDK ha esaurito i propri tentativi di riconnessione — subentra il watchdog di marketData`);
+      });
+      ws.__hlLoggerAttached = true;
+      return true;
+    } catch (e) {
+      logger.debug(`Hyperliquid WS (${network}): impossibile agganciare gli eventi`, e?.message);
+      return false;
+    }
   }
 
   /** True se il WebSocket per la rete è connesso. */
@@ -141,11 +223,31 @@ class HyperliquidClient {
     return sdk;
   }
 
+  /**
+   * Chiude e rimuove dalla cache la sola SDK WebSocket di una rete.
+   * Va chiamata PRIMA di ri-sottoscrivere: se l'istanza morta resta in `wsSdks`,
+   * `getWsSdk` la ritrova in cache e non riconnette nulla (e le istanze morte si
+   * accumulerebbero a ogni cambio rete).
+   * @returns {Promise<boolean>} true se c'era qualcosa da chiudere.
+   */
+  async closeWsFor(network) {
+    const sdk = this.wsSdks.get(network);
+    this.wsSdks.delete(network);
+    if (!sdk) return false;
+    try {
+      sdk.disconnect?.();
+    } catch (e) {
+      // La chiusura di una connessione già morta può lanciare: non è un errore
+      // bloccante (l'istanza è comunque fuori dalla cache), ma va tracciata.
+      logger.debug(`Hyperliquid WS (${network}): disconnect fallito`, e?.message);
+    }
+    return true;
+  }
+
   /** Chiude le connessioni WebSocket aperte. */
   async closeWs() {
-    for (const [network, sdk] of this.wsSdks) {
-      try { sdk.disconnect?.(); } catch { /* noop */ }
-      this.wsSdks.delete(network);
+    for (const network of [...this.wsSdks.keys()]) {
+      await this.closeWsFor(network);
     }
   }
 

@@ -1,0 +1,17 @@
+{
+  "agent": "maya",
+  "updatedAt": "2026-08-08",
+  "tasks": {
+    "DOC-02": {
+      "status": "done",
+      "criteriaChecked": [true, true],
+      "poApproval": "2026-08-08 — approvato in review, nessuna riserva.",
+      "notes": "Aggiunta in planning 8 agosto. Chiusa l'8 agosto. Riga 59 di docs/KB/index/INDEX.md: 'Il webhook esiste già → estenderlo' → 'Webhook interno per scelta (SEC-04) → estenderlo solo su decisione esplicita'. Criterio 2 (nessun'altra menzione contraddittoria nello stesso file) ha richiesto due correzioni ulteriori nello stesso file: §3 Priorità 1 riga 5 ('Auth/HMAC + rate limit sul webhook') era elencata come debito di sicurezza da fare subito, in contraddizione diretta col riquadro §F.1 che dichiara 'non un debito di sicurezza attuale' — barrata con nota di chiusura SEC-04 nello stesso stile della riga 3; e rimossa la ⭐ da §F.1 spunto 1 ('Aprire il webhook a fonti esterne'), che marcava come idea prioritaria l'opzione A esplicitamente scartata e dichiarata non-goal dello Sprint 2. Aggiornati anche i due link stantii server.js#L1096 → #L1128 (la rotta si è spostata, L1096 ora punta ad altro endpoint). Verificato sul sorgente: requireAuth su tutte le /api/* tranne login/logout/auth-status, rate limit globale /api 300/min, secret via constantTimeEquals; nessun HMAC né anti-replay. docs/MANUAL.md e public/manual.html verificati: ancora corretti da SEC-04, nessuna regressione. npm test 66/66 verde, npm run lint verde (nessun file di codice toccato)."
+    }
+  },
+  "refinementCandidates": [
+    "INDEX.md §1.1: la colonna Sforzo di TrendSpider (e l'header di §F.1) dice 'Basso', ma aprire il webhook richiede HMAC, anti-replay, whitelist del path e test di regressione — non è basso. Il rating è però sul documento nel suo insieme, non sul singolo spunto: fuori dal perimetro DOC-02, va deciso se i rating vanno per-documento o per-spunto.",
+    "INDEX.md §4 punto 1 e 2 (duplicato AOLM, typo 'rchitettura' nel nome file) sono aperti da prima dello Sprint 1 e nessuno li ha presi in carico: candidati a una story di manutenzione KB da 1 SP.",
+    "INDEX.md §3 Priorità 1 riga 0 e §B.1 punto 2 descrivono ancora il bug TP/SL dopo DCA come 'da verificare come primo intervento', ma è stato corretto in SEC-01 (Sprint 1). Stessa classe di residuo di DOC-02, area di Bruno: non toccato."
+  ]
+}

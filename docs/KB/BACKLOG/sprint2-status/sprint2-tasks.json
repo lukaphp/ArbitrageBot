@@ -2,6 +2,7 @@
   "sprint": "Sprint 2",
   "source": "docs/KB/BACKLOG/sprint2.md",
   "generatedAt": "2026-08-08",
+  "planningAt": "2026-08-08",
   "tasks": [
     {
       "id": "DEP-01",
@@ -32,6 +33,16 @@
       "note": "Nato da una scoperta di Annie in SEC-03; assegnato a Bruno per l'implementazione perché Annie non ha accesso a Edit/Write. Annie rivede prima della review col PO."
     },
     {
+      "id": "TRAIL-01",
+      "title": "trailing_json perde originalEntryPx/dcaCount dopo un riavvio",
+      "owner": "bruno",
+      "reviewer": null,
+      "sp": 2,
+      "priority": "P1",
+      "criteriaCount": 3,
+      "note": "Aggiunta in planning (8 agosto). Scoperta da Bruno stesso ri-verificando bot.js per la Sala Review dello Sprint 1. Sequenziale dopo WS-01: stesso file, stesso proprietario."
+    },
+    {
       "id": "CI-01",
       "title": "harden-runner da audit a block",
       "owner": "joshua",
@@ -51,6 +62,16 @@
       "criteriaCount": 3
     },
     {
+      "id": "CI-REBUILD-01",
+      "title": "La CI non ricompila better-sqlite3",
+      "owner": "joshua",
+      "reviewer": null,
+      "sp": 1,
+      "priority": "P1",
+      "criteriaCount": 3,
+      "note": "Aggiunta in planning (8 agosto). Scoperta da Joshua stesso ri-verificando l'infrastruttura per la Sala Review dello Sprint 1. Sequenziale prima di CI-01: stesso file, stesso proprietario."
+    },
+    {
       "id": "CHORE-01",
       "title": "Verifica igiene .npmrc",
       "owner": "po",
@@ -59,10 +80,19 @@
       "priority": "P2",
       "criteriaCount": 3,
       "note": "Esplicitamente NON delegato a un agente: .npmrc è protetto dal sandbox anche per gli agenti (verificato empiricamente), va ispezionato da un umano."
+    },
+    {
+      "id": "DOC-02",
+      "title": "Residuo in INDEX.md:59 dopo DOC-01",
+      "owner": "maya",
+      "reviewer": null,
+      "sp": 1,
+      "priority": "P3",
+      "criteriaCount": 2,
+      "note": "Aggiunta in planning (8 agosto). Scoperta da Maya stessa ri-verificando la documentazione per la Sala Review dello Sprint 1."
     }
   ],
   "notOwned": {
-    "maya": "Nessun task Sprint 2 di sua competenza diretta (nessuna superficie frontend in questo backlog). Resta disponibile per affiancamento.",
     "roger": "Non possiede task di implementazione — produce l'aggregato in aggregate.json."
   }
 }

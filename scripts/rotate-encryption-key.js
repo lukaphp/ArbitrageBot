@@ -62,17 +62,20 @@ function main() {
   };
 
   // ---- Chiavi agent ----
-  const wallets = db.prepare('SELECT rowid AS rid, address, encrypted_key FROM agent_wallets').all();
+  // NB: la colonna è `master_address` (vedi lo schema in src/db/database.js), non
+  // `address`: con il nome sbagliato questa query lanciava "no such column" e la
+  // rotazione delle chiavi agent non era eseguibile affatto.
+  const wallets = db.prepare('SELECT rowid AS rid, master_address, network, encrypted_key FROM agent_wallets').all();
   const updWallet = db.prepare('UPDATE agent_wallets SET encrypted_key = ? WHERE rowid = ?');
   for (const w of wallets) {
     const from = label(keyIdOf(w.encrypted_key));
     try {
       const next = rotateValue(w.encrypted_key);
       if (!next) continue;
-      console.log(`  agent ${String(w.address || w.rid).slice(0, 12)}… : ${from} → v${target}`);
+      console.log(`  agent ${String(w.master_address || w.rid).slice(0, 12)}… : ${from} → v${target}`);
       if (APPLY) { updWallet.run(next, w.rid); done++; }
     } catch (e) {
-      failures.push(`agent_wallets rowid=${w.rid} (${from}): ${e.message}`);
+      failures.push(`agent_wallets rowid=${w.rid} ${w.network || ''} (${from}): ${e.message}`);
     }
   }
 

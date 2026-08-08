@@ -1,24 +1,25 @@
 ---
 name: project-ci-binding-nativo
-description: Gap aperto trovato il 2026-08-08 — la CI fa npm ci sotto ignore-scripts ma non ricompila better-sqlite3, quindi i test DB non hanno il binding
+description: Il gap "CI non ricompila better-sqlite3" e' stato chiuso l'8 agosto 2026 (CI-REBUILD-01) — resta aperta la conseguenza sull'allowlist egress di CI-01
 metadata:
   type: project
 ---
 
-Effetto collaterale di SEC-02 rimasto aperto alla review dello Sprint 1: `.npmrc`
-(`ignore-scripts=true`) vale anche fuori dal Dockerfile, ma **solo il Dockerfile** ricompila
-`better-sqlite3`. Non lo fanno né `.github/workflows/ci.yml` (`npm ci` → `npm test`, nessun rebuild)
-né la documentazione per chi clona da zero. Lo script `rebuild:native` esiste in `package.json` ma al
-2026-08-08 non è referenziato da nessun workflow o doc.
+Il gap aperto dallo Sprint 1 (`.npmrc` con `ignore-scripts=true` valido per tutto il repo, ma solo
+il `Dockerfile` ricompilava `better-sqlite3`) e' stato **chiuso l'8 agosto 2026** con CI-REBUILD-01:
+step `npm run rebuild:native` in `ci.yml` subito dopo `npm ci`, piu' istruzioni di setup in `README`
+e nella nuova sezione "Setup di un clone pulito" di `CONTRIBUTING`. Prova raccolta su una copia
+pulita del repo, non dedotta: senza lo step 3 test rossi con "Could not locate the bindings file"
+(`botDca`, `riskPersistence` x2), con lo step 66/66.
 
-**Why:** in locale il problema non si vede perché il `.node` è rimasto da un install precedente
-all'introduzione di `.npmrc` — `npm test` passa (66/66) su una macchina di sviluppo e fallirebbe su
-un runner pulito. `cache: 'npm'` di setup-node non aiuta: mette in cache i tarball, non il binario
-compilato. I test che lo toccano sono quelli che istanziano davvero SQLite (`riskPersistence`,
-`botDca`).
+**Why:** era il classico "verde da noi, rosso su un runner pulito" — in locale il `.node` era
+sopravvissuto da un install pre-SEC-02.
 
-**How to apply:** se il PO/team chiede perché la CI è rossa su questo branch, o se qualcuno segnala
-"i test non partono su una macchina nuova", questa è la causa prima da controllare. Il fix è
-aggiungere lo step `npm run rebuild:native` dopo `npm ci` (CI + istruzioni di setup), non allentare
-`.npmrc`. Verificare comunque lo stato attuale del workflow prima di proporlo: potrebbe essere già
-stato sistemato. Vedi [[feedback-prove-reali]], [[feedback-hardening-mirato]].
+**How to apply:** non riproporre questo fix, e' fatto (stato `ready_for_review`, il passaggio a
+`done` e' del PO). **Conseguenza ancora aperta, da portare a chi esegue CI-01:** l'install di
+`better-sqlite3` e' `prebuild-install || node-gyp rebuild`, quindi il nuovo step scarica il binario
+prebuilt dalle release GitHub. Passando `egress-policy` da `audit` a `block` servono in allowlist,
+oltre a `registry.npmjs.org`, anche `github.com` e verosimilmente `api.github.com` /
+`objects.githubusercontent.com`; se mancano, il rebuild non fallisce in modo evidente ma ripiega su
+`node-gyp` (compilazione da sorgente) o si rompe. Da confermare sui log reali delle run in `audit`.
+Vedi [[feedback-prove-reali]], [[feedback-hardening-mirato]].

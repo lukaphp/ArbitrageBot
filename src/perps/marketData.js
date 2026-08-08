@@ -13,14 +13,37 @@
  * Prezzi in tempo reale via WebSocket (subscribeAllMids), con POLLING REST come
  * fallback automatico: se il WS è "fresco" il poll REST si auto-salta (meno
  * carico, sub-secondo di latenza); se il WS cade, il poll riprende a 4s.
+ *
+ * WATCHDOG WEBSOCKET (WS-01)
+ * --------------------------
+ * `_startWs()` da solo non basta: veniva chiamato una volta sola all'avvio, e se
+ * il WS cadeva (anche dopo che l'SDK esauriva i propri retry interni) nessuno se
+ * ne accorgeva. Misurato in produzione: `perps_ws_connected 0` dopo ~28h di
+ * uptime, senza un errore nei log, con il fallback REST che copriva il guasto in
+ * silenzio per giorni. Il watchdog qui sotto verifica periodicamente lo stato
+ * reale della connessione e ri-sottoscrive, con backoff minimo per non generare
+ * un reconnect storm e una notifica Telegram (una per episodio) se il downtime
+ * supera la soglia.
  */
 
 import client from './hyperliquidClient.js';
+import notifier from './notifier.js';
+import metrics from './metrics.js';
 import logger from '../utils/logger.js';
 
 const PRICE_POLL_MS = 4000;
 // Se l'ultimo messaggio WS è più recente di questa soglia, il poll REST si salta.
 const WS_FRESH_MS = 8000;
+// Ogni quanto il watchdog verifica che la sottoscrizione WS sia ancora viva.
+const WS_WATCHDOG_MS = parseInt(process.env.PERPS_WS_WATCHDOG_MS) || 30000;
+// Backoff MINIMO tra due tentativi di riconnessione: se il problema è persistente
+// (rete giù, rate limit lato Hyperliquid) non deve trasformarsi in un loop di
+// tentativi ravvicinati.
+const WS_RECONNECT_BACKOFF_MS = parseInt(process.env.PERPS_WS_RECONNECT_BACKOFF_MS) || 15000;
+// Downtime oltre il quale il WS giù diventa un problema da notificare. La
+// notifica parte UNA volta per episodio, non a ogni tentativo: un WS che
+// sfarfalla non deve generare rumore su Telegram.
+const WS_DOWN_NOTIFY_MS = parseInt(process.env.PERPS_WS_DOWN_NOTIFY_MS) || 300000;
 const CANDLE_TTL_MS = 20000;
 // Candele da richiedere di default: abbastanza per scaldare gli indicatori
 // (RSI/EMA/MACD…) su QUALSIASI timeframe. Senza questo, su 1h/4h/1d si
@@ -33,7 +56,7 @@ const INTERVAL_MS = {
   '1d': 86400e3, '3d': 259200e3, '1w': 604800e3, '1M': 2592000e3
 };
 
-class MarketData {
+export class MarketData {
   constructor() {
     this.io = null;
     this.mids = {};            // coin -> prezzo
@@ -42,6 +65,13 @@ class MarketData {
     this.pollTimer = null;
     this.isRunning = false;
     this.lastWsTickAt = 0;     // timestamp dell'ultimo aggiornamento via WebSocket
+    // --- Stato del watchdog WebSocket (WS-01) ---
+    this.wsWatchdogTimer = null;
+    this.wsNetwork = null;      // rete per cui la sottoscrizione WS è attualmente attiva
+    this.wsDownSince = 0;       // inizio dell'episodio di downtime in corso (0 = WS su)
+    this.wsDownNotified = false;// notifica già inviata per QUESTO episodio
+    this.lastWsAttemptAt = 0;   // ultimo tentativo di (ri)sottoscrizione, per il backoff
+    this.netChangeHooked = false;
   }
 
   async start(io) {
@@ -57,10 +87,25 @@ class MarketData {
     this._startWs();
     this.poll();
     this.pollTimer = setInterval(() => this.poll(), PRICE_POLL_MS);
+    // Watchdog: unica cosa nel nostro codice che si accorge che il WS è caduto.
+    this.wsWatchdogTimer = setInterval(() => this._wsWatchdogTick(), WS_WATCHDOG_MS);
+    // Cambio rete a runtime: ri-sottoscrive subito la rete nuova invece di
+    // aspettare fino a WS_WATCHDOG_MS (il backoff viene azzerato perché non è un
+    // guasto, è una scelta dell'operatore).
+    if (!this.netChangeHooked) {
+      client.onNetworkChange(() => {
+        this.lastWsAttemptAt = 0;
+        return this._wsWatchdogTick();
+      });
+      this.netChangeHooked = true;
+    }
   }
 
-  /** Sottoscrive i mid via WebSocket. In caso di errore si resta sul polling REST. */
-  async _startWs() {
+  /**
+   * Sottoscrive i mid via WebSocket. In caso di errore si resta sul polling REST.
+   * @returns {Promise<boolean>} true se la sottoscrizione è stata stabilita.
+   */
+  async _startWs(network = client.getNetwork()) {
     try {
       await client.subscribeAllMids((data) => {
         // L'SDK può consegnare { mids: {...} } oppure direttamente la mappa.
@@ -70,11 +115,78 @@ class MarketData {
           this.lastWsTickAt = Date.now();
           if (this.io) this.io.emit('perps:price', { mids, network: client.getNetwork(), ts: this.lastWsTickAt });
         }
-      });
-      logger.info('🔌 Market data: prezzi in tempo reale via WebSocket');
+      }, network);
+      this.wsNetwork = network;
+      logger.info(`🔌 Market data: prezzi in tempo reale via WebSocket (${network})`);
+      return true;
     } catch (error) {
       logger.warn('Market data: WebSocket non disponibile, uso polling REST', error.message);
+      return false;
     }
+  }
+
+  /**
+   * Un giro di watchdog. Estratto dal timer per essere invocabile direttamente
+   * (test e cambio rete) senza aspettare tempo reale. Non rigetta mai: un errore
+   * qui non deve poter uccidere il timer e lasciare il watchdog morto.
+   */
+  async _wsWatchdogTick() {
+    if (!this.isRunning) return false;
+    try {
+      const network = client.getNetwork();
+      // "Sano" = connesso E sottoscritto per la rete ATTUALE: un WS connesso alla
+      // rete precedente dopo un setNetwork consegnerebbe prezzi sbagliati.
+      if (client.wsConnected(network) && this.wsNetwork === network) {
+        this._markWsHealthy();
+        return true;
+      }
+
+      const now = Date.now();
+      if (!this.wsDownSince) this.wsDownSince = now;
+      const downMs = now - this.wsDownSince;
+
+      if (!this.wsDownNotified && downMs >= WS_DOWN_NOTIFY_MS) {
+        this.wsDownNotified = true;
+        logger.error(`Market data: WebSocket giù da ~${Math.round(downMs / 1000)}s (rete ${network}), avanti col fallback REST`);
+        notifier.notify(`⚠️ <b>Market data</b>: WebSocket Hyperliquid non disponibile da ~${Math.round(downMs / 60000)} min (rete ${network}).\nI prezzi arrivano dal fallback REST: validi ma meno freschi.`);
+      }
+
+      // Backoff minimo: niente reconnect storm se il guasto è persistente.
+      if (this.lastWsAttemptAt && (now - this.lastWsAttemptAt) < WS_RECONNECT_BACKOFF_MS) return false;
+      this.lastWsAttemptAt = now;
+
+      logger.warn(`Market data: WebSocket non connesso (rete ${network}), tentativo di riconnessione…`);
+      // Via le istanze SDK morte prima di risottoscrivere, altrimenti getWsSdk le
+      // ritrova in cache e non riconnette nulla.
+      if (this.wsNetwork && this.wsNetwork !== network) await client.closeWsFor(this.wsNetwork);
+      await client.closeWsFor(network);
+      this.wsNetwork = null;
+
+      const ok = await this._startWs(network);
+      if (!ok) return false;
+
+      // Solo un tentativo RIUSCITO conta come riconnessione (i fallimenti non
+      // gonfiano il contatore). Include la ri-sottoscrizione dopo un cambio rete:
+      // è comunque una riconnessione del WS, non un caso separato.
+      metrics.inc('ws_reconnects_total');
+      logger.info(`✅ Market data: WebSocket ristabilito (rete ${network}) dopo ~${Math.round(downMs / 1000)}s di downtime`);
+      if (this.wsDownNotified) {
+        notifier.notify(`✅ <b>Market data</b>: WebSocket Hyperliquid ristabilito (rete ${network}) dopo ~${Math.round(downMs / 60000)} min.`);
+      }
+      this._markWsHealthy();
+      return true;
+    } catch (error) {
+      // Un fallimento del watchdog stesso non è mai silenzioso: se resta muto,
+      // torniamo esattamente al bug che WS-01 risolve.
+      logger.error('Market data: watchdog WebSocket in errore', error?.message);
+      return false;
+    }
+  }
+
+  /** Chiude l'episodio di downtime corrente (WS di nuovo sano). */
+  _markWsHealthy() {
+    this.wsDownSince = 0;
+    this.wsDownNotified = false;
   }
 
   /** True se il WebSocket sta consegnando dati freschi. */
@@ -161,7 +273,14 @@ class MarketData {
 
   stop() {
     if (this.pollTimer) clearInterval(this.pollTimer);
+    this.pollTimer = null;
+    // Il timer del watchdog va ripulito come il pollTimer: sopravvivere a stop()
+    // significherebbe riaprire connessioni WS su un market data già fermo.
+    if (this.wsWatchdogTimer) clearInterval(this.wsWatchdogTimer);
+    this.wsWatchdogTimer = null;
     this.isRunning = false;
+    this.wsNetwork = null;
+    this._markWsHealthy();
     client.closeWs().catch(() => {});
   }
 
@@ -171,7 +290,9 @@ class MarketData {
       markets: this.markets.length,
       network: client.getNetwork(),
       ws: client.wsConnected(),
-      wsFresh: this._wsFresh()
+      wsFresh: this._wsFresh(),
+      wsNetwork: this.wsNetwork,
+      wsDownSeconds: this.wsDownSince ? Math.round((Date.now() - this.wsDownSince) / 1000) : 0
     };
   }
 }

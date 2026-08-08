@@ -169,6 +169,13 @@ PERPS_DEFAULT_LEVERAGE=3
 
 # --- Opzionali ---
 METRICS_TOKEN=                     # se vuoto, /metrics è pubblico (§2.5)
+
+# Watchdog del WebSocket Hyperliquid: valori di default ragionevoli, si toccano
+# solo per diagnosi. Il watchdog ri-sottoscrive il feed se cade (§6).
+PERPS_WS_WATCHDOG_MS=30000            # ogni quanto verificare che il WS sia vivo
+PERPS_WS_RECONNECT_BACKOFF_MS=15000   # attesa minima tra due tentativi (anti reconnect storm)
+PERPS_WS_DOWN_NOTIFY_MS=300000        # downtime oltre il quale arriva una notifica Telegram
+
 AGENTS_ENABLED=false               # Analyst AI: advisory, non esegue mai
 ANTHROPIC_API_KEY=
 AGENT_MAX_CALLS_PER_HOUR=8         # tetto di spesa dell'Analyst
@@ -316,6 +323,16 @@ storage, o `restic`).
   ```bash
   curl -H "Authorization: Bearer $METRICS_TOKEN" https://.../metrics
   ```
+
+- **Feed di mercato (WebSocket)**: `perps_ws_connected` deve stare a `1`. Se resta
+  a `0` il bot non è fermo — lavora sul fallback REST, con prezzi validi ma meno
+  freschi. Un watchdog verifica la connessione ogni `PERPS_WS_WATCHDOG_MS` e la
+  ristabilisce da sé; ogni ripristino riuscito incrementa
+  `perps_ws_reconnects_total`. Se il downtime supera `PERPS_WS_DOWN_NOTIFY_MS`
+  (default 5 min) arriva **una** notifica Telegram per episodio, più una di
+  ripristino. Un `perps_ws_reconnects_total` che cresce di continuo indica una
+  connessione instabile, non un guasto momentaneo: da guardare insieme ai log
+  `Hyperliquid WS …` in `logs/app.log`.
 
 - Log: `docker compose logs` (Docker) o `logs/app.log` (script di riavvio).
 
@@ -558,6 +575,22 @@ sovrascriverlo significherebbe perderlo definitivamente.
 
 Se compaiono errori: aggiungi la chiave mancante ad `AGENT_ENCRYPTION_KEYS_OLD`
 col suo id e rilancia. Non forzare, non cancellare le righe.
+
+Questo comportamento non è solo dichiarato: è verificato dai test
+`test/rotateEncryptionKey.test.js` (dry-run che non scrive, rotazione che mantiene
+i dati leggibili, valore non decifrabile lasciato byte-per-byte com'era) e
+`test/checkSecrets.test.js`, che eseguono gli script veri su un DB temporaneo.
+
+> **Nota per l'audit (8 agosto 2026).** Tra l'introduzione del key versioning
+> (`fbd5402`, 7 agosto) e questa data, `scripts/rotate-encryption-key.js`
+> leggeva una colonna DB inesistente (`address` invece di `master_address`) ed
+> era **inutilizzabile per la rotazione delle chiavi agent** — falliva al
+> primo `prepare()`, anche su un DB vuoto. Il runbook sopra descritto e il
+> punto 4 di §12 non erano quindi mai stati eseguibili in quella finestra. Mai
+> in produzione: il bug esisteva solo su `feat/perps-hardening`, non su
+> `master`. Corretto e coperto dai test citati sopra durante lo Sprint 2
+> (TEST-01), con verifica indipendente (i test falliscono ripristinando la
+> colonna sbagliata).
 
 ### Se la chiave è persa davvero
 

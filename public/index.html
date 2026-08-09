@@ -668,7 +668,10 @@
                         <div style="display:flex;gap:8px;align-items:center;">
                             <span id="aiAgentStatus" class="muted"></span>
                             <button class="btn btn-sm btn-outline" onclick="perps.toggleAnalysisParams()">⚙️ Parametri</button>
-                            <button class="btn btn-sm btn-primary" onclick="perps.runAnalyst()">▶️ Analizza ora</button>
+                            <button id="aiAgentRunBtn" class="btn btn-sm btn-primary" onclick="perps.runAnalyst()">▶️ Analizza ora</button>
+                            <button id="aiAgentPauseBtn" class="btn btn-sm btn-outline" onclick="perps.pauseAnalyst()" title="Ferma le run future. Una run in corso finisce da sola.">⏸️ Pausa</button>
+                            <button id="aiAgentResumeBtn" class="btn btn-sm btn-outline hidden" onclick="perps.resumeAnalyst()">▶️ Riprendi</button>
+                            <button id="aiAgentStopBtn" class="btn btn-sm btn-danger" onclick="perps.stopAnalyst()" title="Annulla anche una run in corso e azzera il contatore run/h.">⏹️ Stop</button>
                         </div>
                     </div>
                     <div class="card-body">

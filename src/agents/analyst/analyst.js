@@ -111,6 +111,8 @@ function rejectedContext() {
   return `Strategie già rifiutate dall'utente — NON riproporle, né varianti equivalenti sugli stessi indicatori: ${items.join('; ')}.`;
 }
 
+const PAUSED_SETTING = 'analyst_paused';
+
 class Analyst {
   constructor() {
     this.name = 'analyst';
@@ -119,10 +121,52 @@ class Analyst {
     this.lastSummary = null;
     this.lastError = null;
     this.lastProposalCount = 0;
+    this._busy = false;          // true mentre una run è davvero in volo (per l'abort di stop())
+    this._abortController = null;
   }
 
   get cfg() { return HYPERLIQUID_CONFIG.agents; }
   get intervalMs() { return (this.cfg.cadenceMin || 30) * 60 * 1000; }
+
+  /** Pausa/stop persistiti in settings: sopravvivono a un riavvio del processo. */
+  isPaused() {
+    return db.getSetting(PAUSED_SETTING, 'false') === 'true';
+  }
+
+  /** Ferma le run future. Una run già in volo finisce da sola. Ripristinabile con resume(). */
+  pause() {
+    db.setSetting(PAUSED_SETTING, 'true');
+    db.insertAudit('analyst', 'pause', {});
+    logger.info('🧠 Analyst: messo in pausa');
+  }
+
+  resume() {
+    db.setSetting(PAUSED_SETTING, 'false');
+    db.insertAudit('analyst', 'resume', {});
+    logger.info('🧠 Analyst: ripreso');
+  }
+
+  /**
+   * Come pause(), ma annulla anche una run in corso (abort della chiamata Claude
+   * in volo) e azzera il contatore orario: al prossimo resume() riparte da 0/N,
+   * non da dove era rimasto. Non tocca il costo totale speso né le proposte già
+   * create — quelli sono storico, non stato operativo.
+   *
+   * Limite dichiarato: se l'iterazione corrente sta eseguendo un tool (backtest,
+   * lettura mercati) invece della chiamata a Claude, l'abort la interrompe al
+   * prossimo giro del loop, non istantaneamente — i singoli tool non hanno un
+   * proprio signal di cancellazione.
+   */
+  stop() {
+    db.setSetting(PAUSED_SETTING, 'true');
+    this.runTimestamps = [];
+    if (this._abortController) {
+      this._abortController.abort();
+      logger.info('🧠 Analyst: run in corso annullata');
+    }
+    db.insertAudit('analyst', 'stop', {});
+    logger.info('🧠 Analyst: fermato, contatore orario azzerato');
+  }
 
   _underRateCap() {
     const hourAgo = Date.now() - 3600_000;
@@ -132,7 +176,7 @@ class Analyst {
 
   /** Chiamato dal runtime sulla cadenza configurata. */
   async tick() {
-    if (!this.cfg.enabled) return;
+    if (!this.cfg.enabled || this.isPaused()) return;
     if (!this._underRateCap()) { logger.info('🧠 Analyst: cap orario raggiunto, salto'); return; }
     await this.run();
   }
@@ -142,6 +186,10 @@ class Analyst {
    * @param opts { model?, riskAppetite?, focusMarkets?, maxProposals?, exploration?, notes? }
    */
   async run(opts = {}) {
+    if (this.isPaused() && !opts.force) {
+      this.lastError = 'Analyst in pausa';
+      return { error: this.lastError, paused: true };
+    }
     const anthropic = getClient();
     if (!anthropic) { this.lastError = 'ANTHROPIC_API_KEY mancante'; return { error: this.lastError }; }
 
@@ -151,6 +199,9 @@ class Analyst {
     this.runTimestamps.push(Date.now());
     this.lastRunAt = Date.now();
     this.lastError = null;
+    this._busy = true;
+    const controller = new AbortController();
+    this._abortController = controller;
 
     // Content come array di blocchi (non stringa): serve per poterci agganciare
     // il cache_control mobile a ogni iterazione.
@@ -160,6 +211,7 @@ class Analyst {
     try {
       let final = null;
       for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+        if (controller.signal.aborted) throw new Error('Run annullata (stop)');
         moveCacheBreakpoint(messages);
         const res = await anthropic.messages.create({
           model,
@@ -167,7 +219,7 @@ class Analyst {
           system: CACHED_SYSTEM,
           tools: TOOL_DEFS,
           messages
-        });
+        }, { signal: controller.signal });
         // `input_tokens` è il solo residuo NON cachato: il totale del prompt è
         // input + cache_creation + cache_read.
         tokensIn += res.usage?.input_tokens || 0;
@@ -221,9 +273,22 @@ class Analyst {
       );
       return { summary: this.lastSummary, proposals: created, ...usage };
     } catch (e) {
-      this.lastError = e.message;
-      logger.error('🧠 Analyst: errore run', e.message);
+      // controller.signal.aborted è l'unico controllo affidabile: l'SDK lancia
+      // APIUserAbortError su un abort, non il DOMException 'AbortError' standard.
+      const aborted = controller.signal.aborted;
+      this.lastError = aborted ? 'Run annullata (stop)' : e.message;
+      if (aborted) {
+        // Annullamento intenzionale dell'utente via stop(): non è un errore da
+        // allertare, solo da registrare.
+        logger.info('🧠 Analyst: run annullata da stop()');
+      } else {
+        logger.error('🧠 Analyst: errore run', e.message);
+      }
+      if (aborted) return { error: this.lastError, aborted: true };
       throw e; // il runtime lo traccia/allerta
+    } finally {
+      this._busy = false;
+      this._abortController = null;
     }
   }
 
@@ -317,6 +382,8 @@ class Analyst {
   status() {
     return {
       enabled: this.cfg.enabled,
+      paused: this.isPaused(),
+      busy: this._busy,
       model: this.cfg.analystModel,
       hasApiKey: !!process.env.ANTHROPIC_API_KEY,
       runsThisHour: this.runTimestamps.length,

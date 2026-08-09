@@ -1268,6 +1268,22 @@ class ArbitrageBotServer {
       }
     });
 
+    // Pausa/stop dell'Analyst — persistiti, sopravvivono a un riavvio.
+    // Pausa: nessuna run futura, quella in corso (se c'è) finisce da sola.
+    // Stop: come pausa, ma annulla anche la run in corso e azzera il cap orario.
+    app.post('/api/agents/analyst/pause', (req, res) => {
+      analyst.pause();
+      res.json({ success: true, data: analyst.status() });
+    });
+    app.post('/api/agents/analyst/resume', (req, res) => {
+      analyst.resume();
+      res.json({ success: true, data: analyst.status() });
+    });
+    app.post('/api/agents/analyst/stop', (req, res) => {
+      analyst.stop();
+      res.json({ success: true, data: analyst.status() });
+    });
+
     // Audit trail
     app.get('/api/agents/audit', (req, res) => {
       res.json({ success: true, data: db.listAudit(parseInt(req.query.limit) || 100) });

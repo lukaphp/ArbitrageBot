@@ -882,11 +882,17 @@ class PerpsApp {
         let base;
         if (!a.hasApiKey) base = '⚪ chiave AI non configurata';
         else if (!a.enabled) base = '⏸️ disattivato (AGENTS_ENABLED)';
+        else if (a.paused) base = a.busy ? '⏸️ in pausa (run in corso in chiusura)' : '⏸️ in pausa';
+        else if (a.busy) base = '🟢 analisi in corso…';
         else base = `🟢 attivo · ${a.runsThisHour}/${a.maxCallsPerHour} run/h`;
         const cost = a.costTotal ? ` · 💸 speso ${this._fmtCost(a.costTotal)}` : '';
         st.textContent = base + cost;
         if (st.title !== undefined) st.title = a.model ? `Modello: ${a.model}` : '';
       }
+      // Pausa/Riprendi si scambiano in base allo stato; Stop resta sempre visibile
+      // (utile anche mentre è in pausa, per azzerare il contatore).
+      document.getElementById('aiAgentPauseBtn')?.classList.toggle('hidden', !!a.paused);
+      document.getElementById('aiAgentResumeBtn')?.classList.toggle('hidden', !a.paused);
       this._setKillSwitchUi(status.killSwitch);
       this._renderProposals(props || []);
       await this.loadStrategyHistory();
@@ -1207,6 +1213,33 @@ class PerpsApp {
     }
 
     return this._executeAnalyst(params);
+  }
+
+  /** Ferma le run future dell'Analyst. Una run già in corso finisce da sola. */
+  async pauseAnalyst() {
+    try {
+      await this.api('/api/agents/analyst/pause', { method: 'POST' });
+      this.toast('Analyst in pausa', 'info');
+      await this.loadAgents();
+    } catch (e) { this.toast('Errore: ' + e.message, 'error'); }
+  }
+
+  async resumeAnalyst() {
+    try {
+      await this.api('/api/agents/analyst/resume', { method: 'POST' });
+      this.toast('Analyst ripreso', 'info');
+      await this.loadAgents();
+    } catch (e) { this.toast('Errore: ' + e.message, 'error'); }
+  }
+
+  /** Come pausa, ma annulla anche una run in corso e azzera il contatore run/h. */
+  async stopAnalyst() {
+    if (!confirm('Fermare l\'Analyst e annullare una run eventualmente in corso?\n\nIl contatore run/h torna a 0. Il costo già speso e le proposte esistenti restano.')) return;
+    try {
+      await this.api('/api/agents/analyst/stop', { method: 'POST' });
+      this.toast('Analyst fermato, contatore azzerato', 'info');
+      await this.loadAgents();
+    } catch (e) { this.toast('Errore: ' + e.message, 'error'); }
   }
 
   /** Mostra il preventivo nel modale e risolve true/false alla scelta dell'utente. */

@@ -342,16 +342,22 @@ class ArbitrageBotApp {
             this.signer = await this.provider.getSigner();
             this.walletAddress = await this.signer.getAddress();
             
-            // Verifica la rete
+            // Verifica la rete — SOLO se il demo arbitraggio EVM è attivo. Hyperliquid
+            // non usa queste reti: il chainId nella firma EIP-712 (transferToPerp,
+            // approvazione agent) è definito dal payload che arriva dal server, non da
+            // quello su cui MetaMask è puntato. Forzare Sepolia/BSC/Polygon qui bloccava
+            // anche chi voleva solo collegare il wallet per Perps (demoEvm disattivato
+            // di default), senza alcun bisogno reale di cambiare rete.
             const network = await this.provider.getNetwork();
-            const isTestnet = this.isTestnetChain(network.chainId);
-            
-            if (!isTestnet) {
-                const switched = await this.switchToTestnet();
-                if (!switched) {
-                    throw new Error(`⚠️ Rete non supportata (Chain ID: ${network.chainId}). Usa solo testnet (Sepolia, BSC Testnet, Polygon Amoy)`);
+            if (this.demoEvm) {
+                const isTestnet = this.isTestnetChain(network.chainId);
+                if (!isTestnet) {
+                    const switched = await this.switchToTestnet();
+                    if (!switched) {
+                        throw new Error(`⚠️ Rete non supportata (Chain ID: ${network.chainId}). Usa solo testnet (Sepolia, BSC Testnet, Polygon Amoy)`);
+                    }
+                    return; // Dopo lo switch la pagina potrebbe ricaricarsi
                 }
-                return; // Dopo lo switch la pagina potrebbe ricaricarsi
             }
             
             // Ottieni il saldo

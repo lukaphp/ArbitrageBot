@@ -1,8 +1,11 @@
 # Reverse proxy — accesso SOLO via rete privata (Tailscale), niente dominio pubblico.
-# Ascolta in HTTP sulla rete interna: la porta viene pubblicata solo sull'IP
-# Tailscale dell'host in docker-compose.yml, quindi non è raggiungibile da
-# Internet — il tunnel WireGuard di Tailscale fornisce già la cifratura in
-# transito, non serve un secondo strato TLS qui.
+# Ascolta in HTTP su localhost soltanto (docker-compose.yml: 127.0.0.1:8080),
+# quindi non raggiungibile da Internet né direttamente dalla tailnet.
+# L'HTTPS reale verso la tailnet lo termina `tailscale serve` sull'host,
+# fuori da Docker (certificato pubblico via Let's Encrypt, rinnovo
+# automatico — vedi docs/DEPLOY.md §3), che inoltra qui in HTTP puro: due
+# processi entrambi su localhost, nessun secondo strato TLS necessario tra
+# i due.
 #
 # Socket.IO: il reverse_proxy di Caddy gestisce gli upgrade WebSocket in automatico,
 # quindi non serve configurazione extra.

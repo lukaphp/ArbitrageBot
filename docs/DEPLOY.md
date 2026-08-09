@@ -227,28 +227,42 @@ uno script di deploy.
 
 ### Opzione A — consigliata per single-user: **Tailscale** (niente porte pubbliche)
 Solo i tuoi dispositivi raggiungono il pannello; superficie d'attacco minima.
+Nessun dominio pubblico, nessun certificato da gestire a mano: HTTPS reale,
+rinnovo automatico, il tutto dentro la tailnet.
 
 ```bash
-curl -fsSL https://tailscale.com/install.sh | sh && tailscale up
+curl -fsSL https://tailscale.com/install.sh | sh && tailscale up --ssh
 ```
 
-In `Caddyfile` usa il blocco `:8080` (in fondo al file) e pubblica la porta solo
-sull'IP Tailscale, oppure raggiungi direttamente `http://<tailscale-ip>:3000`
-mappando la porta dell'app in `docker-compose.yml` su `100.x.x.x:3000`.
+**1. Abilita i certificati HTTPS per la tailnet** (una tantum, dal pannello,
+non dalla CLI): [login.tailscale.com/admin/dns](https://login.tailscale.com/admin/dns)
+→ sezione "HTTPS Certificates" → attiva.
 
-> ⚠️ **`COOKIE_SECURE=false` è obbligatorio con questa opzione.** L'app marca
-> di default il cookie di sessione come `Secure` in produzione (protezione
-> corretta dietro HTTPS pubblico, opzione B). Un cookie `Secure` il browser lo
-> accetta **solo su HTTPS** — su HTTP puro (questa opzione) lo scarta subito
-> dopo il login, e sembra che la password sia sbagliata quando in realtà la
-> sessione non viene mai salvata. Imposta `COOKIE_SECURE=false` tra i segreti
-> (Infisical o `.env`) insieme agli altri. Vedi anche la nota sulla CSP subito
-> sotto: stesso problema, causa diversa.
->
-> ⚠️ **CSP e asset statici.** Fino alla versione con la fix per `upgrade-insecure-requests`
-> rimossa dalla CSP (vedi commit su `src/server.js`), CSS/JS non si caricavano
-> affatto su HTTP puro per lo stesso motivo — il browser tentava di riscrivere
-> ogni asset in `https://` e falliva. Assicurati di essere sull'ultima versione.
+**2. `docker-compose.yml`** pubblica Caddy solo su `127.0.0.1:8080` — mai
+raggiungibile da fuori l'host, nemmeno dalla tailnet direttamente. `Caddyfile`
+usa già il blocco `:8080` (in fondo al file) per questo.
+
+**3. `tailscale serve`** è il vero ingresso pubblico sulla tailnet: termina
+HTTPS con un certificato Let's Encrypt reale per il nome MagicDNS dell'host
+(rinnovo automatico, nessun cron da gestire) e inoltra in HTTP puro a Caddy
+su localhost:
+
+```bash
+sudo tailscale serve --bg 8080
+tailscale serve status     # conferma cosa è pubblicato
+```
+
+Il pannello è raggiungibile su `https://<hostname>.<tuo-tailnet>.ts.net` —
+trovi l'hostname esatto con `tailscale status`. La configurazione di `serve`
+persiste da sola tra i riavvii (stato di `tailscaled`, non serve rieseguirla).
+
+> ⚠️ **`COOKIE_SECURE=false` serviva solo prima di `tailscale serve`.** Con
+> HTTP puro diretto (senza questo passaggio) l'app marca il cookie di sessione
+> `Secure` per default, e il browser lo scarta su HTTP — il login sembra
+> fallire con password corretta. Con `tailscale serve` il browser vede HTTPS
+> vero end-to-end, quindi il default va bene: se avevi impostato
+> `COOKIE_SECURE=false` in precedenza puoi rimuoverlo (non è dannoso lasciarlo,
+> ma non serve più).
 
 ### Opzione B — HTTPS pubblico con dominio
 1. Punta un record DNS `A` del tuo dominio all'IP del VPS.

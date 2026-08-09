@@ -1,14 +1,11 @@
 # Deploy di produzione: app (Node) + Caddy (reverse proxy).
-# L'app NON è esposta all'host: solo Caddy pubblica una porta, e solo sull'IP
-# Tailscale dell'host (TAILSCALE_IP qui sotto — default 127.0.0.1, mai 0.0.0.0,
-# così un .env mancante non pubblica per errore su tutte le interfacce).
+# L'app NON è esposta all'host: solo Caddy pubblica una porta, e solo su
+# 127.0.0.1 — mai raggiungibile da fuori l'host, nemmeno dalla tailnet
+# direttamente. L'ingresso reale sulla tailnet è `tailscale serve` (fuori da
+# Docker, gestito dall'host), che termina HTTPS con certificato reale
+# (rinnovo automatico incluso, DEPLOY.md §3) e inoltra a Caddy su localhost.
 # L'app è raggiungibile solo sulla rete interna Docker. SQLite persiste su un
 # volume nominato.
-#
-# TAILSCALE_IP va in un .env locale al VPS (non committato — vedi .gitignore):
-#   TAILSCALE_IP=100.x.y.z
-# Non è un segreto (è un IP privato nella tailnet), ma è specifico dell'host,
-# quindi non appartiene al repository.
 #
 # Segreti via Infisical (cloud o self-hosted), non .env in chiaro: .infisical-bootstrap.env
 # contiene solo le 1-4 variabili di bootstrap (INFISICAL_TOKEN e affini, vedi DEPLOY.md §9),
@@ -33,10 +30,10 @@ services:
     image: caddy:2
     restart: unless-stopped
     ports:
-      - "${TAILSCALE_IP:-127.0.0.1}:8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data         # certificati Let's Encrypt
+      - caddy-data:/data         # certificati Let's Encrypt (opzione B, dominio pubblico)
       - caddy-config:/config
     depends_on: [app]
     networks: [web]

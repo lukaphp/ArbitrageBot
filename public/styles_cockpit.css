@@ -89,6 +89,15 @@
   font-size: 0.68rem;
 }
 
+/* Solo il pill del wallet è un'azione (avvia/interrompe la connessione
+   MetaMask) — quello del server è solo stato, non va segnalato cliccabile. */
+#walletStatus.status-indicator {
+  cursor: pointer;
+}
+#walletStatus.status-indicator:hover {
+  border-color: var(--cockpit-accent, #6ea8fe);
+}
+
 .cockpit-mode .status-indicator.online {
   border-color: rgba(38, 208, 124, 0.4);
   background: rgba(38, 208, 124, 0.08);

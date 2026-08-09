@@ -157,7 +157,18 @@ class ArbitrageBotApp {
         document.getElementById('disconnectWallet').addEventListener('click', () => {
             this.disconnectWallet();
         });
-        
+
+        // In modalità cockpit .wallet-section (col vero pulsante) è display:none
+        // (styles_cockpit.css) per non mostrare la card in stile "demo EVM" nel
+        // tema scuro — ma senza questo listener non restava alcun modo di
+        // avviare la connessione dalla cockpit UI: la pillola di stato in header
+        // era solo indicatore, mai cliccabile. Scoperto quando un utente reale
+        // non trovava alcun pulsante da premere.
+        document.getElementById('walletStatus')?.addEventListener('click', () => {
+            if (this.isConnected) this.disconnectWallet();
+            else this.connectWallet();
+        });
+
         // Settings Modal
         document.getElementById('openSettings').addEventListener('click', () => {
             this.openSettingsModal();

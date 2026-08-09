@@ -139,7 +139,14 @@ class ArbitrageBotServer {
           objectSrc: ["'none'"],
           baseUri: ["'self'"],
           frameAncestors: ["'none'"],
-          formAction: ["'self'"]
+          formAction: ["'self'"],
+          // helmet la aggiunge di default: dice al browser di riscrivere ogni
+          // asset in https:// prima di richiederlo. Innocuo dietro un dominio
+          // HTTPS pubblico (Caddy la termina comunque), ma rompe silenziosamente
+          // CSS/JS quando l'app è servita in HTTP puro (es. accesso via
+          // Tailscale senza TLS, DEPLOY.md §3 opzione A) — nessun asset locale
+          // qui usa URL http:// assolute, quindi non serve in nessuno dei due casi.
+          upgradeInsecureRequests: null
         }
       },
       crossOriginEmbedderPolicy: false

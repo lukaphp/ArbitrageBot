@@ -149,7 +149,14 @@ class ArbitrageBotServer {
           upgradeInsecureRequests: null
         }
       },
-      crossOriginEmbedderPolicy: false
+      crossOriginEmbedderPolicy: false,
+      // Come upgrade-insecure-requests: helmet la manda di default anche su
+      // HTTP puro, dove è priva di senso (HSTS dice al browser "usa sempre
+      // HTTPS per questo host", ma qui HTTPS non c'è). Il posto giusto per
+      // annunciarla è Caddy, che è dove il TLS viene davvero terminato
+      // nell'opzione con dominio pubblico (DEPLOY.md §3 opzione B) — non
+      // l'app, che dietro Caddy non sa mai se la richiesta originale era HTTPS.
+      hsts: false
     }));
 
     // CORS ristretto all'origine dell'app (default: stesso host)

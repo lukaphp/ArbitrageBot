@@ -78,10 +78,20 @@ export function verifyToken(token) {
 }
 
 export function cookieOptions() {
+  // Un cookie Secure viene accettato dal browser SOLO su HTTPS. Di default lo
+  // attiviamo in produzione (è la protezione giusta dietro un dominio pubblico,
+  // DEPLOY.md §3 opzione B, dove Caddy termina il TLS). Ma se l'app è servita
+  // in HTTP puro — es. accesso via Tailscale senza dominio, opzione A — il
+  // browser scarta il cookie subito dopo il login, e sembra che la password
+  // sia sbagliata quando in realtà è la sessione a non venir mai salvata.
+  // COOKIE_SECURE=false disattiva esplicitamente il flag per quel caso.
+  const secure = process.env.COOKIE_SECURE === 'false'
+    ? false
+    : process.env.NODE_ENV === 'production';
   return {
     httpOnly: true,
     sameSite: 'strict',
-    secure: process.env.NODE_ENV === 'production',
+    secure,
     maxAge: SESSION_TTL_MS,
     path: '/'
   };

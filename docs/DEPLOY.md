@@ -236,6 +236,20 @@ In `Caddyfile` usa il blocco `:8080` (in fondo al file) e pubblica la porta solo
 sull'IP Tailscale, oppure raggiungi direttamente `http://<tailscale-ip>:3000`
 mappando la porta dell'app in `docker-compose.yml` su `100.x.x.x:3000`.
 
+> ⚠️ **`COOKIE_SECURE=false` è obbligatorio con questa opzione.** L'app marca
+> di default il cookie di sessione come `Secure` in produzione (protezione
+> corretta dietro HTTPS pubblico, opzione B). Un cookie `Secure` il browser lo
+> accetta **solo su HTTPS** — su HTTP puro (questa opzione) lo scarta subito
+> dopo il login, e sembra che la password sia sbagliata quando in realtà la
+> sessione non viene mai salvata. Imposta `COOKIE_SECURE=false` tra i segreti
+> (Infisical o `.env`) insieme agli altri. Vedi anche la nota sulla CSP subito
+> sotto: stesso problema, causa diversa.
+>
+> ⚠️ **CSP e asset statici.** Fino alla versione con la fix per `upgrade-insecure-requests`
+> rimossa dalla CSP (vedi commit su `src/server.js`), CSS/JS non si caricavano
+> affatto su HTTP puro per lo stesso motivo — il browser tentava di riscrivere
+> ogni asset in `https://` e falliva. Assicurati di essere sull'ultima versione.
+
 ### Opzione B — HTTPS pubblico con dominio
 1. Punta un record DNS `A` del tuo dominio all'IP del VPS.
 2. In `Caddyfile` sostituisci `trading.tuodominio.it` col tuo dominio.

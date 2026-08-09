@@ -9,7 +9,7 @@
  */
 
 import { ethers } from 'ethers';
-import { NETWORKS, SECURITY_CONFIG, DEMO_EVM } from '../config/config.js';
+import { NETWORKS, SECURITY_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
 
 class BlockchainConnection {
@@ -20,11 +20,12 @@ class BlockchainConnection {
     this.walletAddress = null;
     this.isBrowser = typeof window !== 'undefined' && typeof window.ethereum !== 'undefined';
 
-    // Inizializza i provider solo se la demo EVM è attiva (in prod resta off).
-    if (DEMO_EVM.enabled) {
-      this.initializeProviders();
-      this.initializeWallet();
-    }
+    // EVM-01: il costruttore non apre più niente da sé. Prima chiamava
+    // initializeProviders()/initializeWallet() quando DEMO_EVM_ENABLED=true, cioè
+    // faceva lavoro di rete al solo `import` del modulo; con la flag ritirata
+    // l'alternativa "inizializza sempre" avrebbe aperto provider RPC in qualunque
+    // processo che importa questo file. Ora è chi usa la demo (la CLI
+    // `src/index.js`) a inizializzare esplicitamente.
   }
   
   /**

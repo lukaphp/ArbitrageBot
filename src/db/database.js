@@ -355,8 +355,30 @@ export class PerpsDatabase {
     return info.lastInsertRowid;
   }
 
+  /**
+   * SEC-08: inserisce una posizione SOLO se non esiste già una riga `open` per
+   * lo stesso `bot_id`+`coin`, altrimenti restituisce quella esistente.
+   *
+   * Su Hyperliquid un account ha al massimo UNA posizione per coin: due righe
+   * `open` per lo stesso bot+coin non sono uno stato legittimo, sono un
+   * duplicato. Il controllo vive qui — e non nel chiamante — perché
+   * better-sqlite3 è sincrono: SELECT e INSERT stanno nello stesso blocco senza
+   * `await` in mezzo, quindi nessun altro tick (o un'altra istanza di PerpsBot
+   * dello stesso bot, vedi botManager.updateBot) può infilarsi tra i due e
+   * creare la seconda riga. Fatto nel chiamante con un `await` in mezzo, la
+   * finestra si riaprirebbe.
+   *
+   * @returns { id, created, row } — `created:false` + `row` se ne esisteva già una.
+   */
+  insertPositionIfNoneOpen(pos) {
+    this.ensure();
+    const existing = this.getOpenPositionByBotCoin(pos.botId, pos.coin);
+    if (existing) return { id: existing.id, created: false, row: existing };
+    return { id: this.insertPosition(pos), created: true, row: null };
+  }
+
   updatePosition(id, fields) {
-    const allowed = ['tp_px', 'sl_px', 'trailing_json', 'status', 'pnl', 'closed_at', 'entry_px', 'size', 'fee', 'close_reason'];
+    const allowed = ['tp_px', 'sl_px', 'trailing_json', 'status', 'pnl', 'closed_at', 'entry_px', 'size', 'fee', 'close_reason', 'opened_at'];
     const sets = [];
     const params = { id };
     for (const [key, val] of Object.entries(fields)) {
@@ -378,6 +400,19 @@ export class PerpsDatabase {
     return this.db.prepare(
       `SELECT * FROM positions WHERE bot_id = ? AND status = 'open' ORDER BY opened_at DESC LIMIT 1`
     ).get(botId);
+  }
+
+  /**
+   * SEC-08: posizione aperta per bot_id + coin. Un bot è legato a un solo
+   * mercato, quindi in pratica coincide con getOpenPositionByBot; il filtro
+   * esplicito sulla coin serve perché la coin di un bot è modificabile
+   * (botManager.updateBot), e in quel caso una riga rimasta aperta sul mercato
+   * PRECEDENTE non deve far sembrare "già tracciata" una posizione su quello nuovo.
+   */
+  getOpenPositionByBotCoin(botId, coin) {
+    return this.db.prepare(
+      `SELECT * FROM positions WHERE bot_id = ? AND coin = ? AND status = 'open' ORDER BY opened_at DESC LIMIT 1`
+    ).get(botId, coin);
   }
 
   listPositions(limit = 100) {

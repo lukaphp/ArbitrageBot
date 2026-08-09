@@ -1,0 +1,11 @@
+{
+  "agent": "annie",
+  "updatedAt": "2026-08-09T00:00:00Z",
+  "reviews": {
+    "SEC-08": { "status": "not_started", "notes": "" },
+    "SEC-07": { "status": "not_started", "notes": "" },
+    "EVM-01": { "status": "not_started", "notes": "" },
+    "STRAT-01": { "status": "not_started", "notes": "" }
+  },
+  "refinementCandidates": []
+}

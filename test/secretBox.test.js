@@ -21,6 +21,15 @@ function withKeys({ key, id, old }, fn) {
   }
 }
 
+/** Esegue fn con un NODE_ENV temporaneo, ripristinandolo sempre. */
+function withNodeEnv(value, fn) {
+  const snap = process.env.NODE_ENV;
+  if (value === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = value;
+  try { return fn(); } finally {
+    if (snap === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = snap;
+  }
+}
+
 /** Produce un ciphertext nel formato PRE-versioning (nessun prefisso). */
 function legacyEncrypt(secret, plaintext) {
   const key = crypto.createHash('sha256').update(secret).digest();
@@ -154,5 +163,82 @@ test('la chiave corrente non è sovrascrivibile da una voce omonima in KEYS_OLD'
   // una voce "1:K2" non deve rimpiazzare la chiave corrente v1 (=K1)
   withKeys({ key: K1, id: '1', old: `1:${K2}` }, () => {
     assert.equal(decrypt(enc), 'x');
+  });
+});
+
+// ---- SEC-07: fail-fast in produzione, fallback di sviluppo solo fuori produzione ----
+//
+// Il fallback hardcoded è comodo in sviluppo e pericoloso in produzione: cifrerebbe
+// chiavi agent e token Telegram con un segreto leggibile nel sorgente. Questi test
+// fissano il confine, perché è esattamente il tipo di regressione che non si nota —
+// tutto continuerebbe a "funzionare".
+
+const PROD_ERR = /AGENT_ENCRYPTION_KEY mancante o troppo corta[\s\S]*production/;
+
+test('produzione senza chiave: encrypt fallisce in modo esplicito invece di usare il fallback', () => {
+  withNodeEnv('production', () => {
+    withKeys({ key: undefined, id: undefined, old: undefined }, () => {
+      assert.throws(() => encrypt('token-vero'), PROD_ERR);
+    });
+  });
+});
+
+test('produzione senza chiave: anche decrypt e currentKeyId falliscono (nessun percorso di lettura silenzioso)', () => {
+  // Un ciphertext prodotto in sviluppo con il fallback: in produzione non deve
+  // essere leggibile "per caso" solo perché la chiave di sviluppo è nota.
+  const encDev = withKeys({ key: undefined, id: '1' }, () => encrypt('valore'));
+
+  withNodeEnv('production', () => {
+    withKeys({ key: undefined, id: undefined, old: undefined }, () => {
+      assert.throws(() => decrypt(encDev), PROD_ERR);
+      assert.throws(() => currentKeyId(), PROD_ERR);
+      assert.throws(() => needsReencryption(encDev), PROD_ERR);
+    });
+  });
+});
+
+test('produzione con chiave presente ma più corta di 32 caratteri: rifiutata', () => {
+  withNodeEnv('production', () => {
+    withKeys({ key: 'a'.repeat(31), id: '1' }, () => {
+      assert.throws(() => encrypt('x'), PROD_ERR);
+    });
+  });
+});
+
+test('produzione con chiave valida: comportamento identico a prima (nessuna regressione sul deploy reale)', () => {
+  // È il caso del VPS già configurato: la chiave c'è ed è lunga, quindi il
+  // fail-fast non lo tocca — round-trip e versioning restano quelli.
+  withNodeEnv('production', () => {
+    withKeys({ key: K1, id: '2' }, () => {
+      const enc = encrypt('chiave-agent');
+      assert.ok(enc.startsWith('v2:'));
+      assert.equal(decrypt(enc), 'chiave-agent');
+      assert.equal(currentKeyId(), 2);
+      assert.equal(needsReencryption(enc), false);
+    });
+  });
+});
+
+test('fuori produzione senza chiave: il fallback di sviluppo resta, comportamento invariato', () => {
+  for (const env of [undefined, 'development', 'test']) {
+    withNodeEnv(env, () => {
+      withKeys({ key: undefined, id: undefined, old: undefined }, () => {
+        const enc = encrypt('sviluppo');
+        assert.ok(enc.startsWith('v1:'), `atteso v1: con NODE_ENV=${env}`);
+        assert.equal(decrypt(enc), 'sviluppo');
+      });
+    });
+  }
+});
+
+test('la chiave di produzione resta usabile come chiave vecchia dopo la rotazione', () => {
+  // Verifica che il fail-fast guardi solo la chiave CORRENTE: una rotazione in
+  // produzione deve poter ancora decifrare lo storico via KEYS_OLD.
+  const oldEnc = withNodeEnv('production', () => withKeys({ key: K1, id: '1' }, () => encrypt('storico')));
+  withNodeEnv('production', () => {
+    withKeys({ key: K2, id: '2', old: `1:${K1}` }, () => {
+      assert.equal(decrypt(oldEnc), 'storico');
+      assert.equal(needsReencryption(oldEnc), true);
+    });
   });
 });

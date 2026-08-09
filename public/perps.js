@@ -9,7 +9,17 @@ if (typeof BigInt.prototype.toJSON !== 'function') {
  * PERPS TRADING UI (Hyperliquid)
  * ==============================
  * Gestisce la vista "Perps": account/agent, ordini manuali, posizioni e bot
- * auto-pilot. Riusa la connessione MetaMask e i toast/modali di app.js.
+ * auto-pilot, più la connessione MetaMask che serve a firmare l'approvazione
+ * dell'agent e i trasferimenti Spot→Perp.
+ *
+ * La connessione MetaMask è arrivata qui con EVM-01 (Sprint 3): prima viveva in
+ * `public/app.js` insieme alla demo di arbitraggio EVM, e i due mondi si
+ * scambiavano stato (`perps.connected` era un getter su `app.isConnected`).
+ * Quell'accoppiamento ha già prodotto due bug reali durante il primo deploy —
+ * MetaMask forzato su reti EVM che a Hyperliquid non servono, e il pulsante di
+ * connessione nascosto senza alternative. Ora il wallet è di chi lo usa.
+ *
+ * Toast e modali stanno in `public/shell.js` (`window.shell`).
  */
 
 // Strategie pronte per la modalità semplificata: il "consulente" le traduce
@@ -100,12 +110,20 @@ class PerpsApp {
     this.riskSnapshot = null;
     this.riskRefreshInFlight = false;
     this.riskTimer = null;
+    // Stato del wallet MetaMask (ex app.isConnected / app.walletAddress)
+    this.walletAddress = null;
+    this.isConnected = false;
   }
 
   // ---- Helpers ----
-  get address() { return app?.walletAddress || '0x0000000000000000000000000000000000000000'; }
-  get connected() { return !!app?.isConnected; }
-  toast(msg, type = 'info') { app?.showToast ? app.showToast(msg, type) : alert(msg); }
+  get address() { return this.walletAddress || '0x0000000000000000000000000000000000000000'; }
+  get connected() { return this.isConnected; }
+  toast(msg, type = 'info') {
+    if (window.shell?.showToast) window.shell.showToast(msg, type);
+    else alert(msg);
+  }
+  _showModal(id) { window.shell?.showModal(id); }
+  _closeModal(id) { window.shell?.closeModal(id); }
 
   async api(path, opts = {}) {
     const res = await fetch(path, {
@@ -142,6 +160,7 @@ class PerpsApp {
   // ---- Lifecycle ----
   async onShow() {
     if (!this.socket) this._initSocket();
+    await this.initWallet();
     this._initCockpitDashboard();
     this.switchCockpitTab(this.cockpitTab || 'dashboard');
     await this.loadNetwork();
@@ -168,7 +187,7 @@ class PerpsApp {
   }
 
   _initSocket() {
-    this.socket = app?.socket || (window.io ? window.io() : null);
+    this.socket = window.shell?.getSocket?.() || (window.io ? window.io() : null);
     if (!this.socket) return;
     this.socket.on('perps:price', (d) => { this.mids = d.mids || {}; this._updateMid(); });
     this.socket.on('perps:botUpdate', (state) => { this._updateBotCard(state); this.refreshRiskSnapshot(); });
@@ -457,6 +476,108 @@ class PerpsApp {
     }).join('');
   }
 
+  // ---- Wallet MetaMask ----
+  // Hyperliquid non usa nessuna rete EVM per operare: il chainId che finisce nel
+  // dominio EIP-712 (approveAgent, transfer Spot→Perp) arriva dal payload del
+  // server e viene letto da MetaMask al momento della firma. Qui NON si verifica
+  // né si cambia la rete di MetaMask: forzarla era il primo dei due bug che
+  // EVM-01 chiude. Da non confondere con `setNetwork()` più sotto, che è la rete
+  // di Hyperliquid (testnet/mainnet) — cosa diversa, stessa parola.
+
+  /**
+   * Aggancia la UI del wallet e tenta una riconnessione silenziosa.
+   * `eth_accounts` non apre popup: risponde solo se l'utente ha già autorizzato
+   * il sito in una sessione precedente.
+   */
+  async initWallet(retries = 3) {
+    // Il pill in header è l'unico punto di ingresso alla connessione da quando
+    // la card `.wallet-section` (stile demo EVM) è stata ritirata: se questo
+    // listener non c'è, non resta nulla da premere.
+    const pill = document.getElementById('walletStatus');
+    if (pill && !pill.dataset.bound) {
+      pill.dataset.bound = '1';
+      pill.addEventListener('click', () => {
+        if (this.isConnected) this.disconnectWallet();
+        else this.connectWallet();
+      });
+      pill.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pill.click(); }
+      });
+    }
+    this._updateWalletUi();
+
+    if (typeof window.ethereum === 'undefined') {
+      // L'estensione può iniettare `window.ethereum` dopo il primo paint.
+      if (retries > 0) return void setTimeout(() => this.initWallet(retries - 1), 1000);
+      return;
+    }
+    if (!this._walletEventsBound) {
+      this._walletEventsBound = true;
+      window.ethereum.on?.('accountsChanged', (accounts) => {
+        if (!accounts || accounts.length === 0) this.disconnectWallet();
+        else if (accounts[0] !== this.walletAddress) this._setWallet(accounts[0]);
+      });
+      // Nessun handler su `chainChanged`: prima ricaricava la pagina, ma la vista
+      // Perps non ha stato che dipenda dalla rete di MetaMask (vedi sopra).
+    }
+    try {
+      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+      if (accounts?.length) this._setWallet(accounts[0]);
+    } catch (e) {
+      console.warn('Verifica account MetaMask fallita', e);
+    }
+  }
+
+  async connectWallet() {
+    if (typeof window.ethereum === 'undefined') {
+      return this.toast('MetaMask non disponibile: installa l\'estensione per collegare il wallet', 'error');
+    }
+    try {
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      if (!accounts?.length) return this.toast('Nessun account selezionato in MetaMask', 'warning');
+      this._setWallet(accounts[0]);
+      this.toast('Wallet connesso', 'success');
+    } catch (e) {
+      // 4001 = l'utente ha rifiutato la richiesta: non è un errore da segnalare come tale.
+      if (e?.code === 4001) return this.toast('Connessione annullata', 'info');
+      this.toast('Errore connessione wallet: ' + (e?.message || e), 'error');
+    }
+  }
+
+  disconnectWallet() {
+    if (!this.isConnected) return;
+    this.walletAddress = null;
+    this.isConnected = false;
+    this._updateWalletUi();
+    // MetaMask non offre una vera "disconnessione" lato estensione: qui si
+    // dimentica l'indirizzo, così la UI Perps torna allo stato non connesso.
+    this.toast('Wallet disconnesso', 'info');
+    this.refreshAccount();
+  }
+
+  _setWallet(address) {
+    this.walletAddress = address;
+    this.isConnected = !!address;
+    this._updateWalletUi();
+    this.refreshAccount();
+  }
+
+  _updateWalletUi() {
+    const pill = document.getElementById('walletStatus');
+    if (!pill) return;
+    pill.classList.toggle('online', this.isConnected);
+    pill.classList.toggle('offline', !this.isConnected);
+    const label = pill.querySelector('.text');
+    if (label) {
+      label.textContent = this.isConnected
+        ? `${this.walletAddress.slice(0, 6)}…${this.walletAddress.slice(-4)}`
+        : 'MetaMask';
+    }
+    pill.title = this.isConnected
+      ? `Wallet ${this.walletAddress} — clicca per disconnettere`
+      : 'Clicca per collegare MetaMask';
+  }
+
   // ---- Network ----
   async loadNetwork() {
     try {
@@ -465,7 +586,55 @@ class PerpsApp {
       document.querySelectorAll('.net-pill').forEach(p =>
         p.classList.toggle('active', p.dataset.net === this.network));
       this._updateFaucetVisibility();
+      this._applyNetworkBranding();
     } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * Allinea titolo, badge e avvertenze alla rete Hyperliquid effettiva (BRAND-01).
+   *
+   * Prima erano fissi: `<title>… Testnet Only</title>`, badge "TESTNET ONLY",
+   * footer "Non utilizzare su mainnet". Affermazioni false appena
+   * `HYPERLIQUID_NETWORK=mainnet` (che `validateConfig()` ammette solo con
+   * `ALLOW_MAINNET=true`): chi guardava la tab del browser concludeva che mainnet
+   * non fosse nemmeno un'opzione.
+   *
+   * La fonte è `GET /api/perps/network`, cioè la rete su cui il server sta
+   * davvero operando — non la configurazione desiderata. In mainnet il badge è
+   * rosso e dichiara i fondi reali: qui l'enfasi va sul caso che può costare,
+   * non su quello innocuo.
+   */
+  _applyNetworkBranding() {
+    const mainnet = this.network === 'mainnet';
+    const label = mainnet ? 'MAINNET' : 'TESTNET';
+
+    document.title = `🤖 ArbitrageBot Perps · ${label}`;
+
+    const badge = document.getElementById('networkBadge');
+    if (badge) {
+      badge.textContent = mainnet ? 'MAINNET · FONDI REALI' : 'TESTNET';
+      badge.classList.toggle('is-mainnet', mainnet);
+      badge.title = mainnet
+        ? 'Hyperliquid mainnet: ogni ordine muove denaro reale.'
+        : 'Hyperliquid testnet: fondi simulati, nessun rischio di capitale.';
+    }
+
+    const notice = document.getElementById('footerNetworkNotice');
+    if (notice) {
+      notice.textContent = mainnet
+        ? '⚠️ Mainnet: operazioni con fondi reali'
+        : '🧪 Testnet: fondi simulati';
+    }
+
+    const eyebrow = document.getElementById('cockpitNetworkEyebrow');
+    if (eyebrow) eyebrow.textContent = `OPERATING OVERVIEW · ${label}`;
+
+    const orderNotice = document.getElementById('cockpitOrderNotice');
+    if (orderNotice) {
+      orderNotice.textContent = mainnet
+        ? 'Fondi reali · verifica prima di inviare'
+        : 'Testnet · verifica prima di inviare';
+    }
   }
 
   async setNetwork(net) {
@@ -992,6 +1161,7 @@ class PerpsApp {
             <input type="checkbox" class="sh-check" ${checked} onchange="perps.toggleStrategySelection('${h.id}', this.checked)">
             ${badge} <b>${h.coin || ''}</b> <span class="muted">${date}</span>
             ${recycle}
+            <button class="sh-export" title="Esporta questa strategia in un file JSON" onclick="perps.exportStrategies(['${h.id}'])">📤</button>
             <button class="sh-del" title="Elimina questa strategia" onclick="perps.deleteStrategy('${h.id}')">🗑️</button>
           </div>
           ${h.rationale ? `<div class="sh-rationale">${h.rationale}</div>` : ''}
@@ -1075,6 +1245,182 @@ class PerpsApp {
       this.toast(`Riciclo fallito: ${e.message}`, 'error');
     } finally {
       box?.classList.remove('is-recycling');
+    }
+  }
+
+  // ---- Esportazione / importazione dello storico strategie (STRAT-01) ----
+  //
+  // Formato del file: una busta autodescrittiva, non l'array nudo. Serve a
+  // riconoscere subito un file che non c'entra nulla (o di una versione futura)
+  // invece di scoprirlo campo per campo durante l'importazione.
+  //
+  //   { kind: "arbitragebot.strategies", version: 1, exportedAt, network, items: [...] }
+  //
+  // Ogni `item` porta la configurazione completa della strategia (`payload.config`,
+  // lo stesso blob che finisce in `bots.config_json`) più i metadati che rendono
+  // leggibile da cosa arriva: mercato, esito, motivazione, modello e costo.
+
+  static get EXPORT_KIND() { return 'arbitragebot.strategies'; }
+  static get EXPORT_VERSION() { return 1; }
+
+  /** Riduce una voce dello storico ai campi che hanno senso fuori da questo DB. */
+  _strategyExportItem(h) {
+    return {
+      coin: h.coin,
+      status: h.status,
+      rationale: h.rationale,
+      confidence: h.confidence,
+      createdAt: h.createdAt,
+      decidedAt: h.decidedAt,
+      model: h.model,
+      costUsd: h.costUsd,
+      // `payload` contiene { coin, interval, config }: `config` è la strategia vera
+      // e propria (regole, leva, sizing, TP/SL) ed è il campo che rende il file
+      // riutilizzabile. Senza di esso l'export sarebbe solo un promemoria.
+      payload: h.payload
+    };
+  }
+
+  exportSelectedStrategies() {
+    const ids = [...(this._selectedStrategies || [])];
+    if (!ids.length) return this.toast('Nessuna strategia selezionata', 'warning');
+    this.exportStrategies(ids);
+  }
+
+  /**
+   * Scarica le strategie indicate come file JSON. Non passa dal server: i dati
+   * sono già quelli mostrati a schermo, quindi il file rispecchia esattamente
+   * quello che l'utente sta guardando.
+   */
+  exportStrategies(ids) {
+    const wanted = new Set(ids);
+    const items = (this._strategyHistory || []).filter(h => wanted.has(h.id));
+    if (!items.length) return this.toast('Strategie non trovate nello storico caricato', 'warning');
+
+    const senzaConfig = items.filter(h => !h.payload?.config);
+    if (senzaConfig.length) {
+      // Meglio dirlo che esportare in silenzio un file che all'importazione
+      // verrebbe scartato: è la stessa ragione per cui il riciclo rifiuta i
+      // payload incompleti invece di ritentare un backtest impossibile.
+      this.toast(`${senzaConfig.length} su ${items.length} senza configurazione: verranno esportate come sola cronologia, non riutilizzabili`, 'warning');
+    }
+
+    const envelope = {
+      kind: PerpsApp.EXPORT_KIND,
+      version: PerpsApp.EXPORT_VERSION,
+      exportedAt: new Date().toISOString(),
+      network: this.network,
+      items: items.map(h => this._strategyExportItem(h))
+    };
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    const name = items.length === 1 && items[0].coin
+      ? `strategia-${String(items[0].coin).toLowerCase()}-${stamp}.json`
+      : `strategie-${items.length}-${stamp}.json`;
+    this._downloadJson(envelope, name);
+    this.toast(`📤 ${items.length} strateg${items.length === 1 ? 'ia' : 'ie'} esportate in ${name}`, 'success');
+  }
+
+  _downloadJson(obj, filename) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    // L'object URL trattiene il Blob in memoria finché non viene revocato.
+    URL.revokeObjectURL(url);
+  }
+
+  pickStrategiesFile() {
+    const input = document.getElementById('shImportFile');
+    if (!input) return;
+    input.value = ''; // permette di reimportare due volte lo stesso file
+    input.click();
+  }
+
+  /**
+   * Valida la busta di un file di strategie **prima** di inviare qualunque cosa
+   * al server. Ritorna { items, errors }: `errors` non vuoto = niente scrittura.
+   *
+   * Questo è il primo dei due controlli, non l'unico che conta: la validazione
+   * autorevole resta lato server, perché è lì che si scrive. Qui serve a dare un
+   * messaggio comprensibile invece di un errore generico, e a non spedire al
+   * server file che si sa già essere sbagliati.
+   */
+  _validateStrategiesFile(parsed) {
+    const errors = [];
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { items: [], errors: ['Il file non contiene un oggetto JSON.'] };
+    }
+    if (parsed.kind !== PerpsApp.EXPORT_KIND) {
+      return { items: [], errors: [`Non è un export di strategie di ArbitrageBot (kind: ${parsed.kind ?? 'assente'}).`] };
+    }
+    if (parsed.version !== PerpsApp.EXPORT_VERSION) {
+      return { items: [], errors: [`Versione del formato non supportata: ${parsed.version ?? 'assente'} (attesa ${PerpsApp.EXPORT_VERSION}).`] };
+    }
+    if (!Array.isArray(parsed.items) || !parsed.items.length) {
+      return { items: [], errors: ['Il file non contiene strategie (items vuoto o assente).'] };
+    }
+
+    const items = [];
+    parsed.items.forEach((it, i) => {
+      const where = `voce ${i + 1}`;
+      if (!it || typeof it !== 'object') return void errors.push(`${where}: non è un oggetto.`);
+      if (!it.coin || typeof it.coin !== 'string') return void errors.push(`${where}: campo "coin" mancante.`);
+      const cfg = it.payload?.config;
+      if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+        return void errors.push(`${where} (${it.coin}): manca payload.config, la configurazione della strategia.`);
+      }
+      // Una strategia senza regole d'ingresso non aprirebbe mai una posizione:
+      // importarla creerebbe esattamente quel bot con configurazione a metà che
+      // il criterio di accettazione vuole evitare.
+      if (!Array.isArray(cfg.entryRules) || !cfg.entryRules.length) {
+        return void errors.push(`${where} (${it.coin}): nessuna regola d'ingresso (config.entryRules vuoto).`);
+      }
+      if (!it.payload.interval && !cfg.candleInterval) {
+        return void errors.push(`${where} (${it.coin}): intervallo delle candele non indicato.`);
+      }
+      items.push(it);
+    });
+
+    return { items, errors };
+  }
+
+  async importStrategiesFromFile(input) {
+    const file = input?.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      let parsed;
+      try { parsed = JSON.parse(text); }
+      catch (e) { return this.toast(`File non importato: JSON non valido (${e.message})`, 'error'); }
+
+      const { items, errors } = this._validateStrategiesFile(parsed);
+      if (errors.length) {
+        // Nessuna scrittura parziale: se una voce non passa, non si importa niente.
+        // Un import "quasi riuscito" lascerebbe l'utente a indovinare cosa è entrato.
+        const dettaglio = errors.slice(0, 3).join(' ');
+        const altri = errors.length > 3 ? ` (+${errors.length - 3} altri problemi)` : '';
+        return this.toast(`File non importato: ${dettaglio}${altri}`, 'error');
+      }
+
+      const r = await this.api('/api/agents/strategy-history/import', {
+        method: 'POST', body: JSON.stringify({ items })
+      });
+      const importate = r.imported ?? 0;
+      const scartate = r.skipped ?? 0;
+      if (importate) {
+        this.toast(`📥 ${importate} strateg${importate === 1 ? 'ia' : 'ie'} importate${scartate ? `, ${scartate} scartate dal server` : ''}`, 'success');
+      } else {
+        const perche = (r.errors || [])[0]?.reason;
+        this.toast(`Nessuna strategia importata${perche ? ` — ${perche}` : ''}`, 'warning');
+      }
+      await this.loadStrategyHistory();
+    } catch (e) {
+      this.toast(`Importazione fallita: ${e.message}`, 'error');
+    } finally {
+      if (input) input.value = '';
     }
   }
 
@@ -1269,10 +1615,10 @@ class PerpsApp {
         </tr>`).join('');
     }
 
-    app.showModal('estimateModal');
+    this._showModal('estimateModal');
     return new Promise(resolve => {
       this._estimateResolver = resolve;
-      // Il modale si chiude anche da backdrop o Escape (gestiti in app.js).
+      // Il modale si chiude anche da backdrop o Escape (gestiti in shell.js).
       // Senza intercettarli la Promise resterebbe pendente all'infinito.
       this._estimateDismiss = (e) => {
         if (e.type === 'keydown' && e.key !== 'Escape') return;
@@ -1294,7 +1640,7 @@ class PerpsApp {
     const resolve = this._estimateResolver;
     this._estimateResolver = null;
     if (!resolve) return;
-    app?.closeModal?.('estimateModal');
+    this._closeModal('estimateModal');
     resolve(ok);
   }
 
@@ -1391,7 +1737,7 @@ class PerpsApp {
         this._renderChart();
       };
     });
-    app.showModal('chartModal');
+    this._showModal('chartModal');
     setTimeout(() => this._renderChart(), 60); // attendi il layout del modal
     if (this.chartTimer) clearInterval(this.chartTimer);
     this.chartTimer = setInterval(() => this._renderChart(true), 6000);
@@ -1400,14 +1746,14 @@ class PerpsApp {
   closeChart() {
     if (this.chartTimer) { clearInterval(this.chartTimer); this.chartTimer = null; }
     this._destroyChart();
-    app.closeModal('chartModal');
+    this._closeModal('chartModal');
   }
 
   // ---- Monitor bot (cosa sta facendo, anche da fermo) ----
   async openBotMonitor(id) {
     this.monitorBotId = id;
     document.getElementById('monitorBody').innerHTML = '<div class="backtest-loading"><span class="spinner-sm"></span> Lettura stato del bot…</div>';
-    app.showModal('botMonitorModal');
+    this._showModal('botMonitorModal');
     await this._refreshMonitor();
     if (this.monitorTimer) clearInterval(this.monitorTimer);
     this.monitorTimer = setInterval(() => this._refreshMonitor(), 5000); // aggiornamento live
@@ -1416,7 +1762,7 @@ class PerpsApp {
   closeBotMonitor() {
     if (this.monitorTimer) { clearInterval(this.monitorTimer); this.monitorTimer = null; }
     this.monitorBotId = null;
-    app.closeModal('botMonitorModal');
+    this._closeModal('botMonitorModal');
   }
 
   async _refreshMonitor() {
@@ -1889,7 +2235,7 @@ class PerpsApp {
     if (optBox) optBox.innerHTML = '';
     this._lastOpt = null;
 
-    app.showModal('botModal');
+    this._showModal('botModal');
   }
 
   editBot(id) {
@@ -2366,7 +2712,7 @@ class PerpsApp {
       } else {
         this.toast('Bot salvato', 'success');
       }
-      app.closeModal('botModal');
+      this._closeModal('botModal');
       await this.loadBots();
       this.loadStrategyHistory?.();
     } catch (e) { this.toast('Errore salvataggio: ' + e.message, 'error'); }

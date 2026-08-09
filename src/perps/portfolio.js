@@ -52,7 +52,11 @@ class Portfolio {
 
     const until = this.cooldownInfo(botId);
     if (until) {
-      return { ok: false, reason: `In cooldown fino alle ${new Date(until).toLocaleTimeString('it-IT')}` };
+      // cooldownUntil (il timestamp grezzo, non la stringa formattata) è quello
+      // che il chiamante usa per capire se è ancora lo STESSO episodio di cooldown
+      // o uno nuovo — senza, un tick ogni 10s per un'ora intera manda la stessa
+      // notifica centinaia di volte (successo davvero, vedi bot.js).
+      return { ok: false, reason: `In cooldown fino alle ${new Date(until).toLocaleTimeString('it-IT')}`, cooldownUntil: until };
     }
 
     const positions = account.positions || [];

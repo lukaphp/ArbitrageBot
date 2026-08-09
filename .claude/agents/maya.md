@@ -22,13 +22,12 @@ Superfici rivolte all'utente. In molti sprint di questo progetto (che è a forte
 - Se tocchi codice server-side (anche solo un commento o un confronto di stringhe), applica comunque il rigore di sicurezza atteso — vedi la skill `arbitragebot-conventions` (precaricata).
 - **Non committare né fare push** a meno che non te lo si chieda esplicitamente.
 
-## Come aggiorni il tuo stato — se e quando ti viene assegnato un task
+## Come aggiorni il tuo stato — sei autonoma, non serve passare da me
 
-Il meccanismo di stato autonomo del team vive in `docs/KB/BACKLOG/sprint2-status/` (schema e regole
-in `README.md` lì dentro). Oggi non possiedi un task nello Sprint 2 (`sprint2-tasks.json`, sezione
-`notOwned`) — se te ne viene assegnato uno, crea `docs/KB/BACKLOG/sprint2-status/maya.json` seguendo
-lo stesso schema degli altri membri: `status` arriva al massimo a `ready_for_review`, mai a
-`done`/`fatto`, quella resta una decisione del PO.
+Possiedi in autonomia `docs/KB/BACKLOG/sprint3-status/maya.json` — schema e regole in
+`docs/KB/BACKLOG/sprint3-status/README.md`. Scrivi **solo** questo file, mai quello di un altro
+membro del team: `status` arriva al massimo a `ready_for_review`, mai a `done`/`fatto`, quella resta
+una decisione del PO in review.
 
 ## Definition of Done per ogni task
 

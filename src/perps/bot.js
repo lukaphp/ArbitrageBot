@@ -50,6 +50,7 @@ export class PerpsBot {
     this.lastError = null;
     this.lastTickAt = 0;       // per il watchdog (rileva bot "fermi")
     this.tickErrors = 0;       // contatore errori di tick (metriche)
+    this._lastCooldownNotifyUntil = null; // episodio di cooldown già notificato (una notifica per episodio, non per tick)
     this.dailyKey = this._todayKey();
     // PnL giornaliero PERSISTITO: sopravvive ai riavvii (il limite di perdita
     // giornaliera non riparte da zero dopo un restart a metà giornata).
@@ -57,20 +58,38 @@ export class PerpsBot {
 
     // Stato posizione locale (riallineato da Hyperliquid a ogni tick)
     this.position = null; // { id, side, size, entryPx, originalEntryPx, dcaCount, tpPx, slPx, slOid, openedAt }
+
+    // SEC-08: true mentre `_openPosition` sta piazzando l'ordine di mercato.
+    // Tra il fill sull'exchange e l'assegnazione di `this.position` la posizione
+    // è già "live" ma non ancora tracciata in memoria: senza questo flag
+    // `_reconcile` la leggerebbe come posizione estranea da adottare.
+    this._opening = false;
+
     const open = db.getOpenPositionByBot(this.id);
-    if (open) {
-      const trailing = open.trailing_json ? JSON.parse(open.trailing_json) : {};
-      this.position = {
-        id: open.id, side: open.side, size: open.size, entryPx: open.entry_px,
-        // originalEntryPx: retrocompat per posizioni aperte prima di SEC-01 (mai
-        // scritto in DB) → ripiega su entry_px, corretto finché non c'è stata
-        // ancora nessuna DCA (dopo la prima, il valore vero è persistito qui).
-        originalEntryPx: trailing.originalEntryPx ?? open.entry_px,
-        dcaCount: trailing.dcaCount || 0,
-        tpPx: open.tp_px, slPx: open.sl_px, openedAt: open.opened_at,
-        slOid: trailing.slOid || null
-      };
-    }
+    if (open) this.position = this._hydratePosition(open);
+  }
+
+  /**
+   * Costruisce lo stato posizione in memoria da una riga `positions`.
+   *
+   * Unico punto di conversione riga-DB → `this.position`: lo usano sia il
+   * costruttore (riavvio del processo) sia `_reconcile` quando ritrova una riga
+   * aperta già esistente (SEC-08). Averne due copie divergenti significherebbe
+   * che dopo un riavvio il bot gestisce una posizione con campi diversi da
+   * quelli con cui l'ha adottata.
+   */
+  _hydratePosition(row) {
+    const trailing = row.trailing_json ? JSON.parse(row.trailing_json) : {};
+    return {
+      id: row.id, side: row.side, size: row.size, entryPx: row.entry_px,
+      // originalEntryPx: retrocompat per posizioni aperte prima di SEC-01 (mai
+      // scritto in DB) → ripiega su entry_px, corretto finché non c'è stata
+      // ancora nessuna DCA (dopo la prima, il valore vero è persistito qui).
+      originalEntryPx: trailing.originalEntryPx ?? row.entry_px,
+      dcaCount: trailing.dcaCount || 0,
+      tpPx: row.tp_px, slPx: row.sl_px, openedAt: row.opened_at,
+      slOid: trailing.slOid || null
+    };
   }
 
   _todayKey() {
@@ -128,7 +147,7 @@ export class PerpsBot {
       // Riallinea lo stato posizione con Hyperliquid (fonte di verità)
       const account = await this.broker.getAccount(this.masterAddress, this.network);
       const livePos = account.positions.find(p => p.coin === this.coin || `${p.coin}-PERP` === this.coin);
-      await this._reconcile(livePos);
+      await this._reconcile(livePos, snapshot);
 
       const state = { inPosition: !!this.position, side: this.position?.side };
       const decision = strategyEngine.evaluate(this.config, snapshot, state);
@@ -153,8 +172,31 @@ export class PerpsBot {
     }
   }
 
-  /** Allinea this.position con la posizione reale su Hyperliquid. */
-  async _reconcile(livePos) {
+  /**
+   * Allinea this.position con la posizione reale su Hyperliquid.
+   *
+   * SEC-08 — "non tracciata" non è la stessa cosa di "non in memoria".
+   * La versione precedente trattava OGNI posizione live senza `this.position`
+   * come estranea e ne inseriva una nuova riga in `positions` con `tp_px`/`sl_px`
+   * nulli. Ma la posizione può essere già del bot e già registrata, e la memoria
+   * essere vuota solo temporaneamente:
+   *
+   *  1. `_openPosition` è a metà: l'ordine di mercato si è riempito (posizione
+   *     già live sull'exchange) ma `this.position` non è ancora assegnato → il
+   *     flag `_opening`;
+   *  2. l'istanza in memoria è stata sostituita mentre un tick era in volo
+   *     (`botManager.updateBot` costruisce un nuovo PerpsBot senza attendere il
+   *     tick precedente): la nuova istanza nasce con `position = null` e la riga
+   *     in DB compare subito dopo → il controllo sulla riga `open` in DB.
+   *
+   * Il risultato osservato sul VPS il 9 agosto era due righe in `positions` per
+   * una sola posizione da 1.31 SOL e tre trigger reduce-only vivi sull'exchange.
+   * L'adozione legittima (posizione aperta a mano, o ritrovata al riavvio senza
+   * stato locale) resta: qui si distingue il caso, non si rimuove la funzione.
+   *
+   * @param snapshot passato solo per l'ATR degli stop adattivi di una posizione adottata.
+   */
+  async _reconcile(livePos, snapshot = null) {
     if (!livePos && this.position) {
       // Posizione chiusa esternamente (TP/SL scattati o chiusura manuale)
       await this._registerClose('chiusa (TP/SL o esterna)', this.position.lastUnrealized || 0);
@@ -162,15 +204,59 @@ export class PerpsBot {
       this.position.size = livePos.size;
       this.position.lastUnrealized = livePos.unrealizedPnl;
     } else if (livePos && !this.position) {
-      // Posizione aperta non tracciata: adottala
+      // (1) Apertura in corso in questa stessa istanza: la posizione live è
+      // quella che stiamo aprendo noi. Lo stato lo scrive `_openPosition`.
+      if (this._opening) {
+        logger.debug(`Bot ${this.name}: posizione live durante un'apertura in corso, adozione saltata`);
+        return;
+      }
+
+      // (2) Riga aperta già presente in DB per questo bot+coin: la posizione è
+      // già tracciata, manca solo lo stato in memoria → si RIPRENDE quella riga,
+      // non se ne crea una seconda. Il controllo e l'eventuale INSERT stanno
+      // dentro un singolo metodo sincrono del DB (vedi insertPositionIfNoneOpen).
+      const { id, created, row } = db.insertPositionIfNoneOpen({
+        botId: this.id, coin: this.coin, side: livePos.side,
+        size: livePos.size, entryPx: livePos.entryPx, leverage: livePos.leverage
+      });
+
+      if (!created) {
+        this.position = this._hydratePosition(row);
+        this.position.size = livePos.size;           // l'exchange è la fonte di verità sulla size
+        this.position.lastUnrealized = livePos.unrealizedPnl;
+        if (this.position.entryPx == null) this.position.entryPx = livePos.entryPx;
+        // Non è un errore silenziabile: significa che la finestra di race si è
+        // aperta davvero. Loggato E notificato — una sola volta per episodio,
+        // perché dal tick successivo si passa dal ramo di semplice sync.
+        logger.warn(`Bot ${this.name}: posizione live già tracciata dalla riga #${id} (entry DB ${this.position.entryPx} · entry live ${livePos.entryPx}), riprendo quella invece di duplicarla`);
+        notifier.notify(`ℹ️ <b>${this.name}</b>: stato posizione ${this.coin} riagganciato alla riga esistente #${id} (nessun duplicato creato). Verificare che TP/SL attivi siano uno solo per tipo.`);
+        // La protezione viene comunque garantita dal giro di `_manageOpen`
+        // (`_ensureStopLoss`) di questo stesso tick.
+        return;
+      }
+
+      // (3) Adozione legittima: nessuna riga aperta, nessuna apertura in corso.
+      // Posizione aperta a mano fuori dal bot, o ritrovata dopo un riavvio senza
+      // stato locale. Riceve TP/SL PROPRI: senza, resterebbe con tp_px/sl_px
+      // nulli e protetta solo da eventuali trigger preesistenti (il difetto che
+      // ha prodotto la riga orfana sul VPS).
+      const atrVal = this._usesAtr() ? ind.atr(snapshot?.candles || [], this.config.atrPeriod || 14) : null;
+      const { tpPx, slPx } = riskManager.computeTpSl(livePos.entryPx, livePos.side, this.config, { atr: atrVal });
       this.position = {
-        id: db.insertPosition({
-          botId: this.id, coin: this.coin, side: livePos.side,
-          size: livePos.size, entryPx: livePos.entryPx, leverage: livePos.leverage
-        }),
-        side: livePos.side, size: livePos.size, entryPx: livePos.entryPx,
-        tpPx: null, slPx: null, slOid: null, openedAt: Date.now()
+        id, side: livePos.side, size: livePos.size, entryPx: livePos.entryPx,
+        originalEntryPx: livePos.entryPx, dcaCount: 0,
+        tpPx, slPx, slOid: null, openedAt: Date.now(),
+        lastUnrealized: livePos.unrealizedPnl
       };
+      db.updatePosition(id, { tp_px: tpPx, sl_px: slPx, trailing_json: this._trailingJson() });
+
+      logger.warn(`Bot ${this.name}: adottata posizione non tracciata ${livePos.side} ${livePos.size} ${this.coin} @ ${livePos.entryPx} (riga #${id})`);
+      notifier.notify(`🔎 <b>${this.name}</b>: adottata posizione non tracciata <b>${String(livePos.side).toUpperCase()}</b> ${livePos.size} ${this.coin} @ ${livePos.entryPx}\nTP ${tpPx ? tpPx.toFixed(2) : '—'} · SL ${slPx ? slPx.toFixed(2) : '—'}`);
+
+      // Piazza TP/SL e cancella eventuali trigger preesistenti (place-then-cancel):
+      // una posizione adottata può portarsi dietro ordini stale di chi l'ha aperta.
+      await this._replaceTpSl(tpPx, slPx, 'adozione posizione non tracciata');
+      await this._ensureStopLoss();
     }
   }
 
@@ -220,49 +306,85 @@ export class PerpsBot {
     if (!pf.ok) {
       logger.warn(`Bot ${this.name}: apertura bloccata (portafoglio)`, pf.reason);
       this.lastEval = { action: 'hold', reason: `Portafoglio: ${pf.reason}`, ts: Date.now() };
-      if (/cooldown/i.test(pf.reason)) notifier.notify(`⏸️ <b>${this.name}</b>: ${pf.reason}`);
+      // Una notifica per EPISODIO di cooldown, non per tick: senza `cooldownUntil`
+      // a distinguere un episodio dal successivo, un bot in cooldown per un'ora
+      // intera con un tick ogni pochi secondi manda la stessa notifica a raffica
+      // (incidente reale, 9-10 agosto — l'utente ha dovuto chiudere tutto per
+      // fermare il flusso). Stesso principio già applicato al watchdog WS (WS-01).
+      if (pf.cooldownUntil && pf.cooldownUntil !== this._lastCooldownNotifyUntil) {
+        this._lastCooldownNotifyUntil = pf.cooldownUntil;
+        notifier.notify(`⏸️ <b>${this.name}</b>: ${pf.reason}`);
+      }
       return;
     }
 
-    await this.broker.setLeverage(this.masterAddress, this.coin, leverage,
-      this.config.marginMode || 'cross', this.network);
+    // SEC-08: da qui in poi la posizione può esistere sull'exchange senza essere
+    // ancora in `this.position`. Il flag copre l'intera finestra (leva → fill →
+    // riga in DB → stato in memoria → trigger) e viene azzerato nel `finally`
+    // anche se l'apertura fallisce a metà: se restasse alzato, `_reconcile` non
+    // adotterebbe più nessuna posizione per il resto della vita del processo.
+    this._opening = true;
+    try {
+      await this.broker.setLeverage(this.masterAddress, this.coin, leverage,
+        this.config.marginMode || 'cross', this.network);
 
-    const isBuy = side === 'long';
-    const order = await this.broker.placeMarketOrder({
-      masterAddress: this.masterAddress, coin: this.coin, isBuy, size: plan.size,
-      slippage: this.config.slippage ?? 0.02
-    }, this.network);
+      const isBuy = side === 'long';
+      const order = await this.broker.placeMarketOrder({
+        masterAddress: this.masterAddress, coin: this.coin, isBuy, size: plan.size,
+        slippage: this.config.slippage ?? 0.02
+      }, this.network);
 
-    if (order.error) {
-      logger.error(`Bot ${this.name}: ordine rifiutato`, order.error);
-      return;
+      if (order.error) {
+        logger.error(`Bot ${this.name}: ordine rifiutato`, order.error);
+        return;
+      }
+
+      const entryPx = order.avgPx || snapshot.price;
+      // ATR corrente per gli stop adattivi (mode 'atr'); null se non configurati.
+      const atrVal = this._usesAtr() ? ind.atr(snapshot.candles, this.config.atrPeriod || 14) : null;
+      const { tpPx, slPx } = riskManager.computeTpSl(entryPx, side, this.config, { atr: atrVal });
+
+      // SEC-08: mai una seconda riga `open` per lo stesso bot+coin. Se una riga
+      // esiste già, qualcuno ha registrato questa stessa apertura mentre eravamo
+      // in attesa del fill (tipicamente un'altra istanza dello stesso bot, vedi
+      // botManager.updateBot): si riusa quella riga.
+      const { id: posId, created, row } = db.insertPositionIfNoneOpen({
+        botId: this.id, coin: this.coin, side, size: plan.size,
+        entryPx, leverage, tpPx, slPx
+      });
+      db.insertTrade({ botId: this.id, coin: this.coin, side, px: entryPx, sz: plan.size, hlOid: order.oid });
+
+      this.position = {
+        id: posId, side, size: plan.size, entryPx,
+        originalEntryPx: entryPx, // immutabile: riferimento per le soglie progressive del DCA (mai il prezzo medio)
+        dcaCount: 0,
+        tpPx, slPx, slOid: null, openedAt: Date.now()
+      };
+
+      if (created) {
+        // Piazza i trigger TP/SL (reduce-only). Ordine di chiusura: opposto al lato.
+        await this._placeTpSl();
+      } else {
+        // Riga preesistente allineata all'apertura appena eseguita, e trigger
+        // ri-piazzati con place-then-cancel: gli eventuali TP/SL già sul book
+        // (dimensionati su uno stato diverso) vengono rimossi solo DOPO che i
+        // nuovi sono attivi. Un allineamento del genere non passa in silenzio.
+        db.updatePosition(posId, {
+          entry_px: entryPx, size: plan.size, tp_px: tpPx, sl_px: slPx,
+          opened_at: this.position.openedAt, trailing_json: this._trailingJson()
+        });
+        logger.warn(`Bot ${this.name}: riga posizione #${posId} già aperta (side DB ${row?.side}) all'apertura di ${side} ${plan.size} ${this.coin} — riusata invece di duplicarla`);
+        notifier.notify(`⚠️ <b>${this.name}</b>: all'apertura su ${this.coin} esisteva già la riga posizione #${posId} — riusata (nessun duplicato). Verificare i trigger attivi sull'exchange.`);
+        await this._replaceTpSl(tpPx, slPx, 'riga posizione preesistente all\'apertura');
+      }
+      // Garanzia: nessuna posizione resta senza stop loss (chiude se non riesce a piazzarlo).
+      await this._ensureStopLoss();
+
+      logger.info(`🟢 Bot ${this.name}: aperta ${side} ${plan.size} ${this.coin} @ ${entryPx}`);
+      notifier.notify(`🟢 <b>${this.name}</b> ha aperto <b>${side.toUpperCase()}</b> ${plan.size} ${this.coin} @ ${entryPx}\nTP ${tpPx ? tpPx.toFixed(2) : '—'} · SL ${slPx ? slPx.toFixed(2) : '—'}`);
+    } finally {
+      this._opening = false;
     }
-
-    const entryPx = order.avgPx || snapshot.price;
-    // ATR corrente per gli stop adattivi (mode 'atr'); null se non configurati.
-    const atrVal = this._usesAtr() ? ind.atr(snapshot.candles, this.config.atrPeriod || 14) : null;
-    const { tpPx, slPx } = riskManager.computeTpSl(entryPx, side, this.config, { atr: atrVal });
-
-    const posId = db.insertPosition({
-      botId: this.id, coin: this.coin, side, size: plan.size,
-      entryPx, leverage, tpPx, slPx
-    });
-    db.insertTrade({ botId: this.id, coin: this.coin, side, px: entryPx, sz: plan.size, hlOid: order.oid });
-
-    this.position = {
-      id: posId, side, size: plan.size, entryPx,
-      originalEntryPx: entryPx, // immutabile: riferimento per le soglie progressive del DCA (mai il prezzo medio)
-      dcaCount: 0,
-      tpPx, slPx, slOid: null, openedAt: Date.now()
-    };
-
-    // Piazza i trigger TP/SL (reduce-only). Ordine di chiusura: opposto al lato.
-    await this._placeTpSl();
-    // Garanzia: nessuna posizione resta senza stop loss (chiude se non riesce a piazzarlo).
-    await this._ensureStopLoss();
-
-    logger.info(`🟢 Bot ${this.name}: aperta ${side} ${plan.size} ${this.coin} @ ${entryPx}`);
-    notifier.notify(`🟢 <b>${this.name}</b> ha aperto <b>${side.toUpperCase()}</b> ${plan.size} ${this.coin} @ ${entryPx}\nTP ${tpPx ? tpPx.toFixed(2) : '—'} · SL ${slPx ? slPx.toFixed(2) : '—'}`);
   }
 
   /** True se la strategia usa stop/trailing ATR (per calcolare l'ATR solo se serve). */
@@ -395,11 +517,17 @@ export class PerpsBot {
     }
   }
 
-  /** Trova l'ordine SL (trigger reduce-only) attivo per questa posizione, se c'è. */
-  async _findStopOrder() {
+  /** Tutti gli ordini SL (trigger reduce-only "stop") attivi per questo mercato. */
+  async _findStopOrders() {
     const orders = await this.broker.getFrontendOpenOrders(this.masterAddress, this.network);
     const sameCoin = o => o.coin === this.coin || `${o.coin}-PERP` === this.coin || o.coin === this.coin.replace('-PERP', '');
-    return (orders || []).find(o => sameCoin(o) && o.isTrigger && /stop/i.test(o.orderType || '')) || null;
+    return (orders || []).filter(o => sameCoin(o) && o.isTrigger && /stop/i.test(o.orderType || ''));
+  }
+
+  /** Trova l'ordine SL (trigger reduce-only) attivo per questa posizione, se c'è. */
+  async _findStopOrder() {
+    const stops = await this._findStopOrders();
+    return stops.find(o => o.oid === this.position?.slOid) || stops[0] || null;
   }
 
   /** Trova gli ordini TP (trigger reduce-only, non-stop) attivi per questa posizione — può essere più di uno con partialTp. */
@@ -413,13 +541,39 @@ export class PerpsBot {
    * GARANZIA DI PROTEZIONE: verifica che esista uno stop loss attivo sul book.
    * Se manca (ordine fallito, crash tra fill e trigger, cancellazione) prova a
    * ripiazzarlo; se ancora assente CHIUDE la posizione per non lasciarla nuda.
+   * Se invece ne trova PIÙ DI UNO, tiene quello tracciato e cancella gli altri
+   * (SEC-08): girando a ogni tick, è anche il punto in cui uno stato già sporco
+   * — come i 2 SL trovati sul VPS — rientra da solo, senza cancellazioni a mano.
    * No-op se la strategia non prevede SL.
    */
   async _ensureStopLoss() {
     if (!this.position || !this.position.slPx) return;
     try {
-      let stop = await this._findStopOrder();
-      if (stop) { this.position.slOid = stop.oid; return; }
+      // SEC-08 — pulizia degli SL orfani. Una posizione ha esattamente UN stop
+      // loss: più di uno significa che un ri-piazzamento ha lasciato indietro il
+      // precedente (è lo stato trovato sul VPS: 2 SL vivi per una posizione da
+      // 1.31 SOL). Ne teniamo uno — quello che stiamo tracciando, se c'è — e
+      // cancelliamo gli altri: l'ordine di cancellazione parte solo su ordini in
+      // eccesso, quindi la posizione non resta mai senza protezione.
+      const stops = await this._findStopOrders();
+      if (stops.length) {
+        const keep = stops.find(o => o.oid === this.position.slOid) || stops[0];
+        const previousOid = this.position.slOid;
+        this.position.slOid = keep.oid;
+        if (keep.oid !== previousOid) {
+          db.updatePosition(this.position.id, { trailing_json: this._trailingJson() });
+        }
+        const extra = stops.filter(o => o.oid !== keep.oid);
+        if (extra.length) {
+          logger.warn(`Bot ${this.name}: ${extra.length} stop loss in eccesso su ${this.coin} (oid ${extra.map(o => o.oid).join(', ')}), mantengo ${keep.oid} e cancello gli altri`);
+          notifier.notify(`🧹 <b>${this.name}</b>: trovati ${stops.length} stop loss attivi su ${this.coin} per una sola posizione — mantengo quello tracciato (${keep.oid}) e cancello ${extra.length} ordine/i orfano/i.`);
+          for (const o of extra) {
+            await this.broker.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: o.oid }, this.network)
+              .catch(err => logger.error(`Bot ${this.name}: cancellazione SL orfano ${o.oid} fallita`, err.message));
+          }
+        }
+        return;
+      }
 
       // SL assente: tentativo di ripiazzamento immediato.
       logger.warn(`Bot ${this.name}: stop loss assente, ripiazzo…`);
@@ -432,7 +586,7 @@ export class PerpsBot {
       db.updatePosition(this.position.id, { trailing_json: this._trailingJson() });
 
       // Verifica finale: se ancora non c'è, chiusura di sicurezza.
-      stop = await this._findStopOrder();
+      const stop = await this._findStopOrder();
       if (!stop && !res.oid) {
         logger.error(`Bot ${this.name}: impossibile garantire lo stop loss, chiusura di sicurezza`);
         notifier.notify(`⚠️ <b>${this.name}</b>: stop loss non piazzabile su ${this.coin} → chiudo la posizione per sicurezza.`);
@@ -532,28 +686,39 @@ export class PerpsBot {
       // TP/SL erano dimensionati sulla size PRECEDENTE: senza ri-piazzarli
       // sulla size totale aggiornata, la parte aggiunta con questa DCA
       // resterebbe scoperta da qualunque protezione.
-      await this._repriceTpSlAfterDca(updated.tpPx, updated.slPx);
+      await this._replaceTpSl(updated.tpPx, updated.slPx, `DCA #${this.position.dcaCount}`);
     } catch (error) {
       logger.debug(`Bot ${this.name}: DCA fallito`, error.message);
     }
   }
 
   /**
-   * Ri-piazza TP/SL con la size e i prezzi già ricalcolati (da
-   * riskManager.applyDcaFill) dopo un'aggiunta DCA. Segue la STESSA sequenza
-   * PLACE-THEN-CANCEL già usata dal trailing stop qui sotto: i nuovi trigger
-   * vengono piazzati PRIMA di cancellare i vecchi, così la posizione non
-   * resta mai scoperta nemmeno per un istante.
-   * Se il ri-piazzamento fallisce, i vecchi trigger (dimensionati sulla size
-   * precedente) restano intatti — meglio una protezione parziale che nessuna
-   * — e l'errore è loggato E notificato via Telegram, mai in silenzio.
+   * Sostituisce i trigger TP/SL della posizione con quelli passati, sulla size
+   * corrente. Segue la STESSA sequenza PLACE-THEN-CANCEL usata dal trailing stop
+   * qui sotto: i nuovi trigger vengono piazzati PRIMA di cancellare i vecchi,
+   * così la posizione non resta mai scoperta nemmeno per un istante.
+   * Se il ri-piazzamento fallisce, i vecchi trigger restano intatti — meglio una
+   * protezione parziale che nessuna — e l'errore è loggato E notificato via
+   * Telegram, mai in silenzio.
+   *
+   * Due chiamanti, stessa sequenza (SEC-01 + SEC-08):
+   *  - dopo un'aggiunta DCA, con size ed entry medio già ricalcolati da
+   *    `riskManager.applyDcaFill`;
+   *  - all'adozione di una posizione non tracciata, che può portarsi dietro
+   *    trigger stale di chi l'ha aperta.
+   * Nel secondo caso l'oid del vecchio SL non è noto (non l'abbiamo piazzato
+   * noi), quindi va cercato sul book invece di leggerlo da `this.position.slOid`:
+   * senza questo, un SL estraneo resterebbe vivo accanto a quello nuovo — cioè
+   * esattamente l'ordine orfano osservato sul VPS.
+   *
+   * @param reason contesto usato nei log/notifiche (es. 'DCA', 'adozione…').
    */
-  async _repriceTpSlAfterDca(tpPx, slPx) {
+  async _replaceTpSl(tpPx, slPx, reason = 'aggiornamento') {
     if (!this.position) return;
     const closeIsBuy = this.position.side === 'short';
     try {
       const oldTpOrders = await this._findTpOrders();
-      const oldSlOid = this.position.slOid;
+      const oldSlOid = this.position.slOid ?? (await this._findStopOrder())?.oid ?? null;
 
       // 1) PLACE: nuovi trigger sulla size totale aggiornata.
       const ladder = this.config.partialTp;
@@ -605,10 +770,10 @@ export class PerpsBot {
         await this.broker.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: oldSlOid }, this.network).catch(() => {});
       }
 
-      logger.info(`🎯 Bot ${this.name}: TP/SL ri-piazzati dopo DCA → size ${this.position.size} @ entry medio ${this.position.entryPx.toFixed(4)} (TP ${tpPx ?? '—'} · SL ${slPx ?? '—'})`);
+      logger.info(`🎯 Bot ${this.name}: TP/SL ri-piazzati (${reason}) → size ${this.position.size} @ entry ${this.position.entryPx.toFixed(4)} (TP ${tpPx ?? '—'} · SL ${slPx ?? '—'})`);
     } catch (error) {
-      logger.error(`Bot ${this.name}: ri-piazzamento TP/SL dopo DCA fallito`, error.message);
-      notifier.notify(`⚠️ <b>${this.name}</b>: ri-piazzamento TP/SL dopo DCA fallito su ${this.coin} — la size aggiunta potrebbe non essere protetta, verificare manualmente i trigger attivi.`);
+      logger.error(`Bot ${this.name}: ri-piazzamento TP/SL fallito (${reason})`, error.message);
+      notifier.notify(`⚠️ <b>${this.name}</b>: ri-piazzamento TP/SL fallito su ${this.coin} (${reason}) — la posizione potrebbe non essere protetta per intero, verificare manualmente i trigger attivi.`);
     }
   }
 

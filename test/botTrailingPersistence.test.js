@@ -84,7 +84,7 @@ test('trailing dopo un DCA: originalEntryPx e dcaCount sopravvivono al riavvio',
   assert.equal(bot.position.dcaCount, 1, 'precondizione: un DCA eseguito');
   const avgEntry = bot.position.entryPx;
 
-  // Dopo _repriceTpSlAfterDca il campo è già scritto correttamente (SEC-01).
+  // Dopo _replaceTpSl il campo è già scritto correttamente (SEC-01).
   let trailing = JSON.parse(db.getPosition(posId).trailing_json);
   assert.equal(trailing.dcaCount, 1);
   assert.equal(trailing.originalEntryPx, entryPx);

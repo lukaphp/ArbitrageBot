@@ -18,7 +18,7 @@
  * posizione è simulata manualmente riproducendo esattamente lo stato che
  * `_openPosition` lascerebbe (stesso paperBroker.placeMarketOrder + stesso
  * riskManager.computeTpSl + stesso db.insertPosition), poi si esercitano i
- * metodi reali `_maybeDca` e `_repriceTpSlAfterDca` così come li chiamerebbe
+ * metodi reali `_maybeDca` e `_replaceTpSl` così come li chiamerebbe
  * `_manageOpen` durante un tick vero. Il calcolo puro (media ponderata +
  * ricalcolo TP/SL) è testato anche in isolamento in test/riskManager.test.js.
  */

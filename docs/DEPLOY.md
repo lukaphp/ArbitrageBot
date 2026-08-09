@@ -84,11 +84,18 @@ mancano o sono troppo corte, `validateConfig()` **rifiuta l'avvio** con
 `process.exit(1)`. È un fail-fast voluto — meglio un server che non parte di uno
 che opera senza le protezioni attese.
 
-> ⚠️ **Fallback di sviluppo.** Senza `AGENT_ENCRYPTION_KEY`, `secretBox` usa una
-> chiave di sviluppo **hardcoded nel sorgente**. Serve a far girare i test e lo
-> sviluppo locale senza configurazione, ma significa che qualsiasi dato cifrato in
-> quello stato è cifrato con una chiave pubblica. Non usare mai un DB nato così
-> come base per la produzione.
+> ⚠️ **Fallback di sviluppo — solo fuori produzione.** Senza `AGENT_ENCRYPTION_KEY`,
+> `secretBox` usa una chiave di sviluppo **hardcoded nel sorgente**. Serve a far
+> girare i test e lo sviluppo locale senza configurazione, ma significa che
+> qualsiasi dato cifrato in quello stato è cifrato con una chiave pubblica. Non
+> usare mai un DB nato così come base per la produzione.
+>
+> Con `NODE_ENV=production` quel fallback **non esiste più** (SEC-07): `secretBox`
+> solleva un errore invece di cifrare con la chiave di sviluppo. Il controllo è
+> volutamente duplicato rispetto a `validateConfig()` perché copre anche i percorsi
+> che non passano dall'avvio del server — `scripts/rotate-encryption-key.js`
+> lanciato a mano nel container e la lettura/scrittura del token Telegram in
+> `notifier.js`.
 
 ### 2.2 Dove vivono i segreti
 
@@ -183,13 +190,19 @@ PERPS_WS_DOWN_NOTIFY_MS=300000        # downtime oltre il quale arriva una notif
 AGENTS_ENABLED=false               # Analyst AI: advisory, non esegue mai
 ANTHROPIC_API_KEY=
 AGENT_MAX_CALLS_PER_HOUR=8         # tetto di spesa dell'Analyst
+AGENT_CADENCE_MIN=30               # ogni quanto gira l'Analyst
+AGENT_SKIP_IF_PENDING=1            # salta la run periodica se ci sono già N proposte
+                                   # non decise (0 = disattivato). Misurato: −33% di
+                                   # spesa sullo storico, vedi MANUAL.md §12
 
-DEMO_EVM_ENABLED=false             # in produzione tieni la demo EVM DISATTIVATA
 ```
 
-> **Modulo Arbitraggio EVM**: è una *demo educativa* a prezzi simulati (non arbitraggio
-> reale). In produzione resta disattivata (`DEMO_EVM_ENABLED=false`, default): non vengono
-> registrate le sue route né avviati i suoi servizi. Il prodotto in produzione è **solo Perps**.
+> **Modulo Arbitraggio EVM — ritirato dal server web** (EVM-01, Sprint 3). Era una *demo
+> educativa* a prezzi simulati (non arbitraggio reale) che si accendeva con
+> `DEMO_EVM_ENABLED=true`. Quella variabile non esiste più e impostarla non ha effetto: il
+> server non registra le sue route (`/api/status`, `/api/prices`, `/api/opportunities`…) né
+> avvia i suoi servizi in nessuna condizione. Il prodotto in produzione è **solo Perps**.
+> La demo resta eseguibile a mano con `npm run cli`, che non fa parte del deploy.
 
 ### 2.5 Verifica prima di avviare
 

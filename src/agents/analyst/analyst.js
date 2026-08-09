@@ -174,10 +174,53 @@ class Analyst {
     return this.runTimestamps.length < (this.cfg.maxCallsPerHour || 8);
   }
 
-  /** Chiamato dal runtime sulla cadenza configurata. */
+  /**
+   * Proposte ancora in attesa di una decisione umana: né decise né scadute.
+   *
+   * `listProposals({status:'pending'})` restituisce anche quelle già oltre
+   * `expires_at` (la scadenza è applicata in modo lazy, all'approvazione), quindi
+   * il filtro temporale va fatto qui: contare come "arretrato" proposte già morte
+   * bloccherebbe l'Analyst per sempre.
+   */
+  _pendingBacklog() {
+    try {
+      const now = Date.now();
+      return db.listProposals({ status: 'pending', limit: 200 })
+        .filter(p => p.source === 'analyst' && (p.expires_at == null || p.expires_at > now))
+        .length;
+    } catch (e) {
+      // Se non riesco a leggere l'arretrato NON blocco la run (fail-open): il
+      // gate serve a risparmiare, non a fermare l'analisi. Ma non in silenzio.
+      logger.warn('🧠 Analyst: arretrato proposte non leggibile, procedo senza gate di cadenza', e.message);
+      return 0;
+    }
+  }
+
+  /**
+   * Chiamato dal runtime sulla cadenza configurata.
+   *
+   * COST-01 — cadenza adattiva. Oltre al cap orario c'è un secondo freno: se ci
+   * sono già almeno `skipIfPendingProposals` proposte in attesa di decisione, la
+   * run periodica viene saltata. Misura sui dati reali (68 run, $8.00 spesi):
+   * 127 delle 137 proposte sono scadute senza che nessuno le decidesse, cioè la
+   * spesa marginale di una run che si sovrappone a un arretrato non consumato è
+   * quasi tutta sprecata. Il gate non riduce la qualità delle proposte: riduce
+   * quante volte le si riscrive prima che l'operatore le abbia guardate.
+   *
+   * Vale SOLO per la cadenza automatica: `run()` chiamato on-demand dalla UI non
+   * passa da qui, perché un'analisi chiesta esplicitamente va eseguita.
+   */
   async tick() {
     if (!this.cfg.enabled || this.isPaused()) return;
     if (!this._underRateCap()) { logger.info('🧠 Analyst: cap orario raggiunto, salto'); return; }
+    const threshold = this.cfg.skipIfPendingProposals ?? 0;
+    if (threshold > 0) {
+      const backlog = this._pendingBacklog();
+      if (backlog >= threshold) {
+        logger.info(`🧠 Analyst: ${backlog} proposte ancora in attesa di decisione (soglia ${threshold}), run saltata per non spendere su un arretrato non consumato`);
+        return;
+      }
+    }
     await this.run();
   }
 
@@ -208,10 +251,15 @@ class Analyst {
     const messages = [{ role: 'user', content: [{ type: 'text', text: buildBriefing({ ...opts, maxProposals }) }] }];
 
     let tokensIn = 0, tokensOut = 0, cacheWrite = 0, cacheRead = 0;
+    // COST-01: quante iterazioni ha davvero consumato la run. Non era registrato
+    // da nessuna parte, quindi il cap MAX_TOOL_ITERATIONS non era tarabile su
+    // dati — solo a occhio. Ora finisce in usage e nell'audit di ogni run.
+    let iterations = 0;
     try {
       let final = null;
       for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
         if (controller.signal.aborted) throw new Error('Run annullata (stop)');
+        iterations = i + 1;
         moveCacheBreakpoint(messages);
         const res = await anthropic.messages.create({
           model,
@@ -245,6 +293,14 @@ class Analyst {
         break;
       }
 
+      // Cap di iterazioni esaurito senza risposta finale: la run è costata per
+      // intero e non produce nulla. Prima era indistinguibile da un output
+      // illeggibile — due cause diverse con rimedi opposti (alzare il cap vs
+      // correggere il prompt), quindi va detto esplicitamente.
+      if (final == null) {
+        logger.warn(`🧠 Analyst: cap di ${MAX_TOOL_ITERATIONS} iterazioni esaurito senza risposta finale — costo della run speso senza proposte`);
+      }
+
       // Costo stimato della run (con il modello effettivamente usato) e totale speso
       const cost = priceOf(model, { tokensIn, tokensOut, cacheWrite, cacheRead });
       this._addCost(cost);
@@ -254,7 +310,7 @@ class Analyst {
       // tariffa: è il numero che ha senso mostrare/persistere come "token in".
       const promptTokens = tokensIn + cacheWrite + cacheRead;
       const cacheHitRate = promptTokens ? cacheRead / promptTokens : 0;
-      const usage = { model, tokensIn: promptTokens, tokensOut, cost, cacheWrite, cacheRead, cacheHitRate };
+      const usage = { model, tokensIn: promptTokens, tokensOut, cost, cacheWrite, cacheRead, cacheHitRate, iterations };
       if (!parsed) { this.lastSummary = 'Nessuna proposta (output non interpretabile).'; this.lastProposalCount = 0; this.lastUsage = usage; return { summary: this.lastSummary, proposals: 0, ...usage }; }
 
       this.lastSummary = parsed.summary || '';
@@ -263,12 +319,12 @@ class Analyst {
       this.lastProposalCount = created;
       db.insertAudit('analyst', 'run.completed', {
         summary: this.lastSummary, proposals: created, model,
-        tokensIn: promptTokens, tokensOut, cacheWrite, cacheRead,
+        tokensIn: promptTokens, tokensOut, cacheWrite, cacheRead, iterations,
         cost: Number(cost.toFixed(5))
       });
       logger.info(
         `🧠 Analyst: run completato — ${created} proposte · ${model} · $${cost.toFixed(4)} ` +
-        `(${promptTokens}+${tokensOut} tok · cache ${(cacheHitRate * 100).toFixed(0)}% riletta)`,
+        `(${promptTokens}+${tokensOut} tok · ${iterations} iter · cache ${(cacheHitRate * 100).toFixed(0)}% riletta)`,
         { summary: this.lastSummary }
       );
       return { summary: this.lastSummary, proposals: created, ...usage };
@@ -388,6 +444,11 @@ class Analyst {
       hasApiKey: !!process.env.ANTHROPIC_API_KEY,
       runsThisHour: this.runTimestamps.length,
       maxCallsPerHour: this.cfg.maxCallsPerHour,
+      // COST-01: rende visibile PERCHÉ una run periodica non è partita — senza
+      // questi due numeri il gate di cadenza sembrerebbe un Analyst inattivo.
+      cadenceMin: this.cfg.cadenceMin,
+      skipIfPendingProposals: this.cfg.skipIfPendingProposals ?? 0,
+      pendingBacklog: this._pendingBacklog(),
       lastRunAt: this.lastRunAt,
       lastSummary: this.lastSummary,
       lastProposalCount: this.lastProposalCount,

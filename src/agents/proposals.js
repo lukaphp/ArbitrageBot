@@ -31,19 +31,35 @@ const RECYCLE = { lookbackDays: 45, minTrades: 10, minProfitFactor: 1.1 };
 const n2 = v => (Number.isFinite(v) ? v.toFixed(2) : '—');
 
 class Proposals {
-  /** Crea e accoda una proposta. */
-  create({ type, coin, payload, rationale, confidence, backtest, source = 'analyst', model, costUsd, tokensIn, tokensOut }) {
-    const ttlMin = HYPERLIQUID_CONFIG.agents?.proposalTtlMin || 30;
+  /**
+   * Crea e accoda una proposta.
+   *
+   * `ttlMin` e `notify` sono opzionali e servono all'import di strategie
+   * (STRAT-01), che ha esigenze diverse da una proposta dell'Analyst:
+   *  - **TTL**: una candidatura importata a mano non decade col mercato come un
+   *    "chiudi adesso", e con i 30 minuti di default scadrebbe mentre l'utente
+   *    legge il messaggio di conferma;
+   *  - **notify**: importare 20 strategie non deve produrre 20 messaggi Telegram.
+   *    Una notifica per episodio, non una per elemento — la manda il chiamante,
+   *    riassunta.
+   * Senza questi due parametri il comportamento è identico a prima.
+   */
+  create({ type, coin, payload, rationale, confidence, backtest, source = 'analyst', model, costUsd, tokensIn, tokensOut, ttlMin, notify = true }) {
+    const ttl = Number.isFinite(ttlMin) && ttlMin > 0
+      ? ttlMin
+      : (HYPERLIQUID_CONFIG.agents?.proposalTtlMin || 30);
     const id = crypto.randomUUID();
     const row = db.insertProposal({
       id, type, coin, payload, rationale, confidence, backtest, source,
       model, costUsd, tokensIn, tokensOut,
-      expiresAt: Date.now() + ttlMin * 60 * 1000
+      expiresAt: Date.now() + ttl * 60 * 1000
     });
-    db.insertAudit('analyst', 'proposal.created', { id, type, coin });
+    db.insertAudit('analyst', 'proposal.created', { id, type, coin, source });
     bus.publish(EVENTS.PROPOSAL_CREATED, { id, type, coin });
-    notifier.notify(`🧠 <b>Nuova proposta AI</b> [${type}] ${coin || ''}\n${rationale || ''}\nApprova con /approva ${id.slice(0, 8)}`);
-    logger.info(`🧠 Proposta creata: ${type} ${coin || ''}`, { id });
+    if (notify) {
+      notifier.notify(`🧠 <b>Nuova proposta AI</b> [${type}] ${coin || ''}\n${rationale || ''}\nApprova con /approva ${id.slice(0, 8)}`);
+    }
+    logger.info(`🧠 Proposta creata: ${type} ${coin || ''}`, { id, source });
     return row;
   }
 

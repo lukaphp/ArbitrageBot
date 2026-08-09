@@ -1,0 +1,23 @@
+{
+  "sprint": "Sprint 3",
+  "planningAt": "2026-08-09",
+  "source": "docs/KB/BACKLOG/sprint3.md",
+  "totalSp": 23,
+  "tasks": [
+    { "id": "SEC-08", "title": "_reconcile() duplica la posizione e lascia ordini orfani sull'exchange", "owner": "bruno", "reviewer": "annie", "sp": 3, "priority": "P0", "addedAfterPlanning": "2026-08-09, scoperta durante analisi live della piattaforma sul VPS" },
+    { "id": "SEC-07", "title": "secretBox.js: fail-fast invece di chiave di sviluppo", "owner": "joshua", "reviewer": "annie", "sp": 2, "priority": "P0" },
+    { "id": "EVM-01", "title": "Ritiro del modulo demo EVM legacy", "owner": ["maya", "joshua"], "reviewer": "annie", "sp": 3, "priority": "P0" },
+    { "id": "OPS-02", "title": "Verifica backup/restore sul VPS reale", "owner": "po", "reviewer": null, "sp": 1, "priority": "P0", "notDelegatedToAgent": true },
+    { "id": "TG-01", "title": "Comando Telegram per il kill-switch", "owner": "bruno", "reviewer": null, "sp": 2, "priority": "P1" },
+    { "id": "LINT-01", "title": "npm run lint copre public/*.js", "owner": "joshua", "reviewer": null, "sp": 1, "priority": "P1" },
+    { "id": "OPS-03", "title": "Monitoraggio esterno (uptime) collegato", "owner": "po", "reviewer": null, "sp": 2, "priority": "P1", "notDelegatedToAgent": true },
+    { "id": "STRAT-01", "title": "Archiviazione, esportazione e importazione delle strategie", "owner": ["bruno", "maya"], "reviewer": "annie", "sp": 3, "priority": "P2" },
+    { "id": "COST-01", "title": "Ottimizzazione dei costi Claude esistenti", "owner": "bruno", "reviewer": null, "sp": 2, "priority": "P2" },
+    { "id": "SPIKE-01", "title": "Spike consulente AI di portafoglio (analisi)", "owner": "joshua", "reviewer": null, "sp": 3, "priority": "P2", "deliverable": "documento, non codice di produzione" },
+    { "id": "BRAND-01", "title": "Branding stantio (Testnet Only con mainnet supportata)", "owner": "maya", "reviewer": null, "sp": 1, "priority": "P2" }
+  ],
+  "deferredToSprint4": [
+    "Gestione multivaluta USD/EUR (§0.2)",
+    "Astrazione multi-provider LLM (§0.3, punto 2)"
+  ]
+}

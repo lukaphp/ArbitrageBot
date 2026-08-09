@@ -120,15 +120,25 @@ export const ARBITRAGE_CONFIG = {
 };
 
 /**
- * Modulo Arbitraggio EVM — DEMO EDUCATIVA
- * =======================================
- * Prezzi simulati, opportunità casuali, "esecuzione" = self-transfer di 0 ETH.
- * NON è arbitraggio reale. Disattivato di default e fuori dalla build di produzione.
- * Attivare solo per dimostrazione con DEMO_EVM_ENABLED=true.
+ * EVM-01 (Sprint 3): la flag `DEMO_EVM` non esiste più.
+ * =====================================================
+ * Serviva ad accendere la demo educativa di arbitraggio EVM dentro il server web
+ * (prezzi simulati, "esecuzione" = self-transfer di 0 ETH). Quella demo condivideva
+ * pulsante e stato di connessione wallet con il pannello Perps, ed è la causa dei due
+ * bug MetaMask corretti il 9 agosto 2026: il PO ne ha deciso il ritiro completo.
+ *
+ * Il server web non ha più nulla di quel modulo. I moduli EVM (`src/blockchain/`,
+ * `src/data/priceFeeds.js`, `src/analysis/`, `src/execution/`) restano raggiungibili
+ * solo dalla CLI legacy `npm run cli` (`src/index.js`), che li avvia esplicitamente:
+ * un interruttore d'ambiente non serve più a decidere se caricarli, basta non
+ * lanciare quel comando.
+ *
+ * Le verifiche di sicurezza che stavano in `validateConfig()` sotto questa flag non
+ * sono state buttate: vivono in `validateEvmDemoConfig()` qui sotto, chiamata dalla
+ * CLI. Tenerle in `validateConfig()` senza la flag avrebbe imposto la presenza degli
+ * RPC URL EVM anche al server Perps in produzione — che non li ha configurati e
+ * quindi non sarebbe più partito.
  */
-export const DEMO_EVM = {
-  enabled: process.env.DEMO_EVM_ENABLED === 'true'
-};
 
 /**
  * Configurazione Perps Trading (Hyperliquid)
@@ -188,6 +198,16 @@ export const HYPERLIQUID_CONFIG = {
     analystModel: process.env.AGENT_ANALYST_MODEL || 'claude-sonnet-4-6',
     cadenceMin: parseInt(process.env.AGENT_CADENCE_MIN) || 30,        // ogni quanto gira l'Analyst
     maxCallsPerHour: parseInt(process.env.AGENT_MAX_CALLS_PER_HOUR) || 8, // cap costi/latenza
+    // COST-01 — cadenza "adattiva": salta una run periodica se ci sono già almeno
+    // N proposte in attesa di decisione (non decise e non scadute). Misurato sui
+    // dati reali: 127 delle 137 proposte prodotte finora sono SCADUTE senza
+    // decisione, quindi produrne altre sopra un arretrato non consumato è spesa
+    // senza destinatario. Il replay della cronologia con soglia 1 evita 23 run su
+    // 68 (−33% di spesa) senza toccare la qualità di quelle che restano.
+    // 0 = disattivato (comportamento pre-COST-01). Non si applica alle run
+    // on-demand chieste dall'operatore, solo alla cadenza automatica.
+    skipIfPendingProposals: Number.isFinite(parseInt(process.env.AGENT_SKIP_IF_PENDING))
+      ? parseInt(process.env.AGENT_SKIP_IF_PENDING) : 1,
     proposalTtlMin: parseInt(process.env.AGENT_PROPOSAL_TTL_MIN) || 30,   // scadenza proposte
     // Whitelist mercati per le azioni di apertura (vuota = tutti). Es: "ETH,BTC,SOL"
     marketWhitelist: (process.env.AGENT_MARKET_WHITELIST || '').split(',').map(s => s.trim()).filter(Boolean),
@@ -299,31 +319,51 @@ export function validateConfig() {
     console.warn('\n🔴🔴🔴 ATTENZIONE: Hyperliquid MAINNET ATTIVO — gli ordini useranno DENARO REALE 🔴🔴🔴\n');
   }
 
-  // --- Verifiche specifiche del modulo demo Arbitraggio EVM (solo se attivo) ---
-  if (DEMO_EVM.enabled) {
-    if (SECURITY_CONFIG.networkMode !== 'testnet') {
-      errors.push('ERRORE CRITICO: la demo EVM deve funzionare SOLO in modalità testnet (NETWORK_MODE=testnet)!');
-    }
-    Object.entries(NETWORKS).forEach(([network, config]) => {
-      if (!config.rpcUrl) {
-        errors.push(`RPC URL mancante per ${network}`);
-      }
-      if (!config.isTestnet) {
-        errors.push(`ERRORE CRITICO: ${network} non è configurato come testnet!`);
-      }
-    });
-    if (!process.env.WALLET_ADDRESS) {
-      errors.push('Indirizzo wallet mancante (richiesto dalla demo EVM)');
-    }
-  }
-
   if (errors.length > 0) {
     console.error('❌ Errori di configurazione:');
     errors.forEach(error => console.error(`  - ${error}`));
     process.exit(1);
   }
 
-  console.log(`✅ Configurazione validata — HL: ${hlNetwork}${DEMO_EVM.enabled ? ' · demo EVM attiva' : ''}`);
+  console.log(`✅ Configurazione validata — HL: ${hlNetwork}`);
+}
+
+/**
+ * Validazione specifica della demo di arbitraggio EVM (EVM-01).
+ *
+ * Prima queste verifiche stavano dentro `validateConfig()` dietro
+ * `if (DEMO_EVM.enabled)`. Con il ritiro della flag sono state spostate qui e le
+ * chiama solo chi avvia davvero la demo, cioè la CLI legacy `src/index.js`: sono
+ * protezioni sulla demo, non sul server Perps, e il server Perps non ha nessun RPC
+ * URL EVM configurato in produzione.
+ *
+ * Restano invariate nel merito — la demo può girare SOLO su testnet — perché il
+ * ritiro riguarda la sua presenza nel server web, non il livello di cautela di chi
+ * la esegue a mano.
+ */
+export function validateEvmDemoConfig() {
+  const errors = [];
+
+  if (SECURITY_CONFIG.networkMode !== 'testnet') {
+    errors.push('ERRORE CRITICO: la demo EVM deve funzionare SOLO in modalità testnet (NETWORK_MODE=testnet)!');
+  }
+  Object.entries(NETWORKS).forEach(([network, cfg]) => {
+    if (!cfg.rpcUrl) {
+      errors.push(`RPC URL mancante per ${network}`);
+    }
+    if (!cfg.isTestnet) {
+      errors.push(`ERRORE CRITICO: ${network} non è configurato come testnet!`);
+    }
+  });
+  if (!process.env.WALLET_ADDRESS) {
+    errors.push('Indirizzo wallet mancante (richiesto dalla demo EVM)');
+  }
+
+  if (errors.length > 0) {
+    console.error('❌ Errori di configurazione della demo EVM:');
+    errors.forEach(error => console.error(`  - ${error}`));
+    process.exit(1);
+  }
 }
 
 /**
@@ -334,10 +374,10 @@ export default {
   DEX_CONFIG,
   TOKENS,
   ARBITRAGE_CONFIG,
-  DEMO_EVM,
   HYPERLIQUID_CONFIG,
   SECURITY_CONFIG,
   LOGGING_CONFIG,
   API_CONFIG,
-  validateConfig
+  validateConfig,
+  validateEvmDemoConfig
 };

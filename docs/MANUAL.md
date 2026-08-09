@@ -3,7 +3,7 @@
 Guida completa all'uso della piattaforma di trading su **Hyperliquid DEX**: interfaccia,
 bot automatici, motore di rischio, agenti AI e integrazioni.
 
-**Versione 2.6** · Aggiornato: 7 agosto 2026
+**Versione 2.7** · Aggiornato: 10 agosto 2026
 
 > 📄 Esiste anche una **versione HTML navigabile** con ricerca integrata, servita
 > dall'app su `/manual.html`. Questo file ne è la versione testuale: stesso contenuto,
@@ -52,10 +52,11 @@ WebSocket, con polling REST come fallback automatico se la connessione cade.
 MetaMask. Il trading 24/7 usa un **Agent Wallet** dedicato, con permessi di solo
 trading: **non può prelevare né trasferire fondi all'esterno**.
 
-**Nota sul modulo Arbitraggio EVM.** La seconda vista dell'app (`Arbitrage`) è una
-*demo educativa a prezzi simulati*, non arbitraggio reale. È disattivata di default
-(`DEMO_EVM_ENABLED=false`) e va tenuta spenta in produzione. Il prodotto operativo è
-**solo Perps**.
+**Il modulo Arbitraggio EVM non esiste più.** Fino allo Sprint 2 l'app aveva una
+seconda vista (`Arbitrage`) con una demo educativa a prezzi simulati. È stata
+**ritirata**: condivideva pulsante e stato di connessione wallet con Perps, e questo
+ha già rotto due volte la connessione MetaMask di Perps, che con l'arbitraggio EVM
+non ha nulla a che fare. L'unico prodotto operativo è **Perps su Hyperliquid**.
 
 ---
 
@@ -63,7 +64,7 @@ trading: **non può prelevare né trasferire fondi all'esterno**.
 
 | Elemento UI | Funzione | Descrizione |
 |:---|:---|:---|
-| **🦊 Connetti MetaMask** | Connessione wallet master | Identifica il wallet titolare dei fondi. Su mainnet è **obbligatoria**: senza wallet connesso le operazioni sono bloccate. |
+| **🦊 MetaMask** (pill in alto a destra) | Connessione wallet master | Identifica il wallet titolare dei fondi. Si clicca il pill **MetaMask** nell'intestazione: un click connette, un secondo click dimentica l'indirizzo; da connesso mostra l'indirizzo abbreviato. Su mainnet la connessione è **obbligatoria**: senza wallet connesso le operazioni sono bloccate. |
 | **⚡ Abilita Trading Autonomo** | Firma EIP-712 `approveAgent` | Genera una coppia di chiavi agent e richiede **una sola** firma. Da quel momento il server invia ordini in background senza popup MetaMask. |
 | **Account unificato (USDC)** | Collaterale | Hyperliquid usa un account unificato: gli USDC nel saldo Spot fanno da margine per i Perps. |
 | **🔄 Trasferisci USDC a Perp** | Trasferimento interno | Sposta USDC tra saldo Spot e Perp tramite firma typed data. |
@@ -88,6 +89,7 @@ Quadro sintetico di capitale, posizioni e stato del sistema.
 | **UNREALIZED PnL** | Profitto/perdita potenziale sulle posizioni aperte. |
 | **MARGIN USED** | Capitale bloccato a garanzia delle posizioni attive. |
 | **ALERTS BADGE** | Contatore delle avvertenze di rischio. Cliccandolo si passa al tab Risk. |
+| **BADGE DI RETE** | Accanto al titolo: dice su quale rete Hyperliquid il server sta operando. Grigio `TESTNET` (fondi simulati) oppure rosso `MAINNET · FONDI REALI`. Rispecchia la rete effettiva, non la configurazione desiderata. |
 
 **Grafico Equity.** L'andamento del conto nel tempo. I campioni sono **persistiti su
 database** (`risk_equity_history`), quindi la curva e il calcolo del drawdown
@@ -188,9 +190,10 @@ per effetto collaterale di un click.
 **Da fuori dall'interfaccia.** L'attivazione è disponibile via API
 `POST /api/perps/killswitch`, la disattivazione via `POST /api/agents/killswitch` con
 body `{"on": false}`. Entrambe richiedono una **sessione autenticata** (cookie di login):
-non sono chiamabili da uno script esterno senza prima fare login. **Da Telegram il
-kill-switch non è raggiungibile**, né per attivarlo né per spegnerlo: `/chiuditutto`
-chiude le posizioni aperte ma non tocca il kill-switch e non ferma i bot (§16).
+non sono chiamabili da uno script esterno senza prima fare login. **Da Telegram** il
+kill-switch si comanda con `/killswitch on|off` (§16), con lo stesso comportamento del
+pannello: `on` ferma i bot senza chiudere le posizioni, `off` sblocca le aperture senza
+riavviare i bot. Risponde solo il chat id configurato.
 
 ---
 
@@ -359,13 +362,32 @@ un mercato di mezz'ora fa non deve poter essere eseguito ore dopo.
 
 ### Controllo dei costi
 
-L'Analyst consuma token a pagamento. Due protezioni:
+L'Analyst consuma token a pagamento. Tre protezioni:
 
 - **Cap di chiamate/ora** (`AGENT_MAX_CALLS_PER_HOUR`, default 8).
+- **Cadenza adattiva** (`AGENT_SKIP_IF_PENDING`, default 1): la run *periodica* viene
+  saltata se ci sono già almeno N proposte in attesa di una tua decisione (non decise e
+  non ancora scadute). Motivo, misurato sui dati reali dello storico: su 68 run e $8,00
+  spesi, **127 delle 137 proposte prodotte sono scadute senza che nessuno le decidesse**
+  — produrne altre sopra un arretrato che non hai ancora guardato è spesa senza
+  destinatario. Rifacendo la cronologia con soglia 1 si sarebbero evitate 23 run su 68
+  (**−33% di spesa**) senza cambiare nulla di come vengono prodotte le proposte che
+  restano. Metti `0` per tornare al comportamento precedente (nessun freno).
+  Non tocca le analisi **on-demand**: quelle che lanci tu partono sempre.
 - **Modale di stima costo**: prima di lanciare un'analisi on-demand ricevi un
   preventivo in dollari. Solo il primo input è misurato esattamente; il resto è un
   intervallo, perché il numero di iterazioni del loop agentico non è noto in anticipo.
   La stima tiene conto del *prompt caching* (scrivere in cache costa 1,25×, rileggere 0,1×).
+
+**Dove va la spesa, in pratica.** Su una run recente tipica ($0,19): ~66% è *scrittura*
+in cache del prompt (1,25×), ~32% sono i token di output, e la quota di input non cachato
+è trascurabile. Due conseguenze utili: (a) l'output conta, quindi chiedere 5 proposte
+invece di 3 si paga; (b) con cadenza 30 minuti e cache *ephemeral* (5 minuti) il prefisso
+system+tools **viene riscritto a ogni run**: fra una run e l'altra la cache non fa mai
+centro, il risparmio del caching è tutto dentro la singola run.
+
+Ogni run registra ora anche **quante iterazioni** ha consumato (log e audit
+`run.completed`): serve per tarare il cap di iterazioni su dati invece che a occhio.
 
 I prezzi per milione di token sono configurabili (`PRICE_SONNET_IN`, `PRICE_SONNET_OUT`…)
 e vanno aggiornati se i listini cambiano.
@@ -379,10 +401,65 @@ Ogni strategia proposta o testata viene archiviata, con:
 - **Categorizzazione** per esito e tipo;
 - **Riciclo**: recupera una strategia archiviata e la ripropone come candidata,
   senza doverla riscrivere;
-- **Eliminazione in blocco** per fare pulizia.
+- **Eliminazione in blocco** per fare pulizia;
+- **Esportazione e importazione** su file JSON.
 
 È la memoria di lungo periodo del sistema: serve a non ri-testare per la terza volta
 una strategia che era già stata scartata.
+
+### 13.1 Esportare e importare strategie
+
+| Comando | Dove | Cosa fa |
+|:---|:---|:---|
+| **📤** | Su ogni riga | Scarica quella singola strategia come file JSON. |
+| **📤 Esporta selezionate** | Barra dei comandi | Scarica in un unico file tutte le strategie spuntate. |
+| **📥 Importa da file** | Barra dei comandi | Carica un file JSON esportato in precedenza. |
+
+Il file esportato contiene la **configurazione completa** della strategia (regole
+d'ingresso e uscita, leva, sizing, TP/SL — lo stesso blob che un bot usa come
+configurazione) più i metadati che dicono da dove arriva: mercato, esito, motivazione,
+modello AI e costo di elaborazione. L'identificativo interno del database **non** viene
+esportato: non significa nulla su un'altra installazione.
+
+**Lo schema viene verificato prima di scrivere.** Un file che non è un export di
+ArbitrageBot, o di una versione di formato più recente, o con una strategia priva di
+regole d'ingresso, viene **rifiutato per intero** con la ragione: non esiste
+l'importazione a metà. È deliberato — una strategia senza regole d'ingresso è
+sintatticamente valida ma darebbe un bot che non aprirebbe mai una posizione.
+
+**Dove finisce ciò che importi.** Una strategia importata **non diventa un bot da
+sola**: entra nella coda come **candidatura in attesa di approvazione** (§12), con
+validità 24 ore invece dei 30 minuti delle proposte dell'AI — una strategia scritta a
+mano non decade col mercato come un "chiudi adesso", e coi 30 minuti scadrebbe mentre
+leggi la conferma. Per renderla operativa la approvi, e in quel momento passa dal
+**gate di rischio** (§6.3) come qualunque altra proposta. È voluto: un file importato è
+configurazione scritta da qualcun altro, non può creare bot che operano da sé.
+
+**Due controlli, uno solo decide.** L'interfaccia verifica il file prima di spedirlo,
+per darti un messaggio comprensibile; la verifica **autorevole** è quella del server,
+perché è il server che scrive. Il server è più severo, e rifiuta anche file che
+*sembrano* validi: una regola di tipo sconosciuto (a runtime verrebbe semplicemente
+ignorata, dandoti una strategia più permissiva di quella nel file), un sizing oltre il
+100% dell'equity, una **leva oltre il massimo consentito**. In quest'ultimo caso il file
+viene rifiutato, **non corretto in silenzio**: una leva ridotta di nascosto sarebbe una
+strategia diversa da quella che credevi di importare.
+
+**Da fuori dall'interfaccia** (script, backup, condivisione) ci sono anche:
+
+| Rotta | Cosa fa |
+|:---|:---|
+| `GET /api/agents/strategy-history/export?ids=…` (o `?status=…`) | Scarica le voci indicate dello storico come file JSON. |
+| `POST /api/agents/strategy-history/import` | Importa un file come candidature in attesa. |
+| `GET /api/perps/bots/:id/export` | Scarica la configurazione di un **bot esistente**, nello stesso formato. |
+| `POST /api/perps/bots/import` | Crea bot da un file. I bot nascono **fermi**: importare non è avviare. |
+
+L'export di un bot **non contiene l'indirizzo del wallet** né stato o PnL: descrive come
+si opera, non su quale conto — così un file si può condividere senza portarsi dietro
+l'account di chi l'ha esportato.
+
+> ⚠️ **L'esportazione non è un backup.** Copre le strategie dello storico, non
+> posizioni, trade, impostazioni o chiavi agent cifrate. Per quelli vedi
+> `scripts/backup.sh` in [DEPLOY.md](DEPLOY.md) §5.
 
 ---
 
@@ -446,7 +523,19 @@ comandare il bot dalla chat.
 | `/bot`, `/bots` | Elenco dei bot configurati e loro stato. |
 | `/avvia <bot>` | Avvia un bot. |
 | `/ferma <bot>` | Ferma un bot. |
-| `/chiuditutto` | Chiude a mercato tutte le posizioni aperte. **Non è il kill-switch**: non ferma i bot e non blocca le nuove aperture — quello si fa dal pannello Risk (§6.4). |
+| `/chiuditutto` | Chiude a mercato tutte le posizioni aperte. **Non è il kill-switch**: non ferma i bot e non blocca le nuove aperture — per quello c'è `/killswitch on`. |
+| `/killswitch` | Mostra se il kill-switch è attivo o spento. Non cambia nulla. |
+| `/killswitch on` | Attiva il kill-switch: ferma i bot in esecuzione e blocca ogni nuova apertura. **Non chiude le posizioni aperte** — per quello serve `/chiuditutto`, che resta un'azione separata. |
+| `/killswitch off` | Rimuove il blocco sulle aperture. **I bot fermati non ripartono da soli**: vanno riavviati con `/avvia <bot>` o dalla tab System (§7), esattamente come dal pannello web (§6.4). |
+
+> ⚠️ **Chi può eseguire questi comandi.** Il bot risponde **solo** al chat id configurato:
+> ogni messaggio proveniente da un'altra chat viene scartato e registrato nei log, senza
+> nemmeno una risposta. È il motivo per cui `/killswitch off` — che *sblocca* le aperture —
+> può stare in chat: l'allowlist è un singolo chat id, quello stesso a cui arrivano le
+> notifiche. Se condividi quella chat (o un gruppo) con altre persone, stai condividendo
+> anche il comando che riattiva le aperture. Un argomento non riconosciuto (es.
+> `/killswitch of`) non cambia nulla e mostra l'uso, così un errore di battitura non
+> sblocca il bot per sbaglio.
 | `/proposte` | Elenca le proposte dell'Analyst AI in attesa. |
 | `/approva <id>` | Approva una proposta. |
 | `/rifiuta <id>` | Rifiuta una proposta. |
@@ -491,9 +580,11 @@ trattati in [DEPLOY.md](DEPLOY.md).
 
 ## 19. FAQ e troubleshooting
 
-**Perché vedo ancora "Connetti MetaMask"?**
-Il wallet non è collegato. Clicca **🦊 Connetti MetaMask** in alto a destra. Su
-mainnet la connessione è obbligatoria per operare.
+**Dov'è il pulsante per collegare MetaMask?**
+È il pill **🦊 MetaMask** in alto a destra, accanto a quello del server: clicca lì.
+Finché è rosso il wallet non è collegato; da connesso diventa verde e mostra
+l'indirizzo abbreviato. Un secondo click lo scollega dall'interfaccia. Su mainnet la
+connessione è obbligatoria per operare.
 
 **Cosa significa "Agent Wallet pending approvazione"?**
 La coppia di chiavi agent è stata generata sul server, ma manca la tua firma EIP-712

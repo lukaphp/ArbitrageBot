@@ -78,6 +78,23 @@
   margin-right: 4px !important;
 }
 
+/* Il badge di rete dice quale rete Hyperliquid è attiva (BRAND-01), quindi il
+   rosso va riservato al caso che può costare: neutro in testnet, allarmato in
+   mainnet. La regola generica .testnet-badge qui sopra resta rossa perché serve
+   anche al pill PAPER dei bot, che è un avviso a sé. */
+.cockpit-mode #networkBadge {
+  border-color: var(--cockpit-line);
+  background: transparent;
+  color: var(--cockpit-muted);
+}
+
+.cockpit-mode #networkBadge.is-mainnet {
+  border-color: rgba(255, 91, 97, 0.45);
+  background: rgba(255, 91, 97, 0.12);
+  color: #ff9da1;
+  font-weight: 700;
+}
+
 .cockpit-mode .status-indicator {
   min-height: 32px;
   padding: 5px 9px;
@@ -121,10 +138,10 @@
   background: var(--cockpit-bg);
 }
 
-.cockpit-mode .wallet-section,
-.cockpit-mode .view-tabs {
-  display: none;
-}
+/* .wallet-section e .view-tabs non esistono più nel markup (EVM-01): erano la card
+   di connessione wallet in stile demo EVM e il selettore di vista Perps/Arbitraggio.
+   La regola è rimossa insieme a loro — era proprio il `display:none` di
+   .wallet-section a lasciare la cockpit senza alcun pulsante da premere. */
 
 .cockpit-mode #view-perps {
   min-width: 0;
@@ -881,7 +898,11 @@
 @media (max-width: 680px) {
   .cockpit-mode .header-content { align-items: flex-start; }
   .cockpit-mode .connection-status { flex-wrap: wrap; justify-content: flex-start; }
-  .cockpit-mode .connection-status .status-indicator { display: none; }
+  /* Su schermo stretto si nasconde solo il pill "Server", che è pura indicazione
+     di stato. Quello del wallet resta: dopo il ritiro di .wallet-section (EVM-01)
+     è l'unico modo di avviare la connessione MetaMask, e nasconderlo qui avrebbe
+     riprodotto sotto i 680px lo stesso vicolo cieco già corretto sul desktop. */
+  .cockpit-mode .connection-status #serverStatus { display: none; }
   .cockpit-dashboard-heading { align-items: flex-start; flex-direction: column; }
   .cockpit-kpi-grid,
   .cockpit-bottom-grid,

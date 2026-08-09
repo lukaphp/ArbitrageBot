@@ -30,10 +30,12 @@ import crypto from 'crypto';
 // Importa moduli bot
 import config from './config/config.js';
 import logger from './utils/logger.js';
-import blockchainConnection from './blockchain/connection.js';
-import priceFeedManager from './data/priceFeeds.js';
-import arbitrageAnalyzer from './analysis/arbitrageAnalyzer.js';
-import transactionExecutor from './execution/transactionExecutor.js';
+
+// EVM-01: qui c'erano gli import della demo di arbitraggio EVM
+// (blockchainConnection, priceFeedManager, arbitrageAnalyzer, transactionExecutor).
+// Il server web non espone più nulla di quella demo, quindi non li importa: i
+// moduli restano sul disco e continuano a servire la CLI legacy `npm run cli`,
+// ma non vengono più caricati nel processo che serve il pannello Perps.
 
 // Moduli Perps (Hyperliquid)
 import db from './db/database.js';
@@ -49,6 +51,7 @@ import metrics from './perps/metrics.js';
 import optimizer from './perps/optimizer.js';
 import predictor from './perps/predictor.js';
 import telegramControl from './perps/telegramControl.js';
+import strategySchema from './perps/strategySchema.js';
 import { runBacktest } from './perps/backtester.js';
 
 // Polyfill globale per la serializzazione di BigInt in JSON (Express, Socket.IO, logger)
@@ -73,6 +76,15 @@ const __dirname = path.dirname(__filename);
 
 // Carica configurazione
 dotenv.config();
+
+/**
+ * STRAT-01 — TTL delle candidature create da un import di strategie (24h).
+ * Volutamente diverso da `AGENT_PROPOSAL_TTL_MIN` (30 min, pensato per proposte
+ * legate allo stato del mercato di quel momento): una strategia importata a mano
+ * non decade col mercato, e coi 30 minuti scadrebbe mentre l'utente sta ancora
+ * leggendo la conferma dell'importazione.
+ */
+const IMPORT_PROPOSAL_TTL_MIN = 24 * 60;
 
 /**
  * Confronta due stringhe in tempo costante (evita che un attaccante deduca il secret
@@ -209,7 +221,9 @@ class ArbitrageBotServer {
     this.app.get('/api/auth/status', (req, res) => {
       const enabled = auth.isAuthEnabled();
       const authenticated = !enabled || auth.verifyToken(req.cookies?.[auth.COOKIE]);
-      res.json({ success: true, data: { enabled, authenticated, demoEvmEnabled: config.DEMO_EVM.enabled } });
+      // EVM-01: `demoEvmEnabled` non viene più esposto — serviva solo a public/boot.js
+      // per decidere se mostrare la vista Arbitrage, che non esiste più.
+      res.json({ success: true, data: { enabled, authenticated } });
     });
     this.app.post('/api/login', this.loginLimiter(), (req, res) => {
       if (!auth.isAuthEnabled()) return res.json({ success: true, data: { authDisabled: true } });
@@ -225,277 +239,13 @@ class ArbitrageBotServer {
       res.json({ success: true });
     });
 
-    // ====================== ROUTE DEMO ARBITRAGGIO EVM ======================
-    // Registrate solo se DEMO_EVM_ENABLED=true. È una demo simulata, non
-    // arbitraggio reale: in produzione resta disattivata.
-    if (config.DEMO_EVM.enabled) {
-
-    // API Status
-    this.app.get('/api/status', async (req, res) => {
-      try {
-        const status = {
-          bot: {
-            running: this.isRunning,
-            uptime: process.uptime(),
-            mode: config.SECURITY_CONFIG.networkMode,
-            executionMode: transactionExecutor.executionMode, // Aggiunto executionMode
-            version: '1.0.0'
-          },
-          blockchain: blockchainConnection.getConnectionStatus(),
-          priceFeeds: priceFeedManager.getStatus(),
-          analyzer: arbitrageAnalyzer.getStats(),
-          executor: transactionExecutor.getExecutionStats(),
-          perps: { network: hyperliquid.getNetwork(), ...marketData.getStatus(), bots: botManager.listStates().length }
-        };
-        
-        res.json({ success: true, data: status });
-      } catch (error) {
-        logger.error('Errore API status:', error);
-        res.status(500).json({ success: false, error: error.message });
-      }
-    });
-    
-    // API Prezzi
-    this.app.get('/api/prices', async (req, res) => {
-      try {
-        const { network, token } = req.query;
-        let prices;
-        
-        if (network && token) {
-          // Prezzi per un token specifico
-          prices = priceFeedManager.getTokenPrices(network, token);
-        } else if (network) {
-          // Prezzi per una rete specifica
-          const allPrices = priceFeedManager.getAllCurrentPrices();
-          prices = allPrices[network] || {};
-        } else {
-          // Tutti i prezzi
-          prices = priceFeedManager.getAllCurrentPrices();
-        }
-        
-        res.json({ success: true, data: prices });
-      } catch (error) {
-        logger.error('Errore API prices:', error);
-        res.status(500).json({ success: false, error: error.message });
-      }
-    });
-    
-    // API Opportunità
-    this.app.get('/api/opportunities', async (req, res) => {
-      try {
-        const opportunities = arbitrageAnalyzer.getBestOpportunities();
-        res.json({ success: true, data: opportunities });
-      } catch (error) {
-        logger.error('Errore API opportunities:', error);
-        res.status(500).json({ success: false, error: error.message });
-      }
-    });
-
-    // API Statistiche
-    this.app.get('/api/stats', async (req, res) => {
-      try {
-        const stats = arbitrageAnalyzer.getStats();
-        const execStats = transactionExecutor.getExecutionStats();
-        
-        const enhancedStats = {
-          totalOpportunities: stats.totalOpportunities || 0,
-          recentOpportunities: stats.recentOpportunities || 0,
-          executedTrades: execStats.totalExecutions || 0,
-          totalProfit: execStats.totalProfit24h || 0,
-          successRate: execStats.successRate || 0,
-          isRunning: stats.isRunning,
-          dailyLimit: stats.dailyLimit
-        };
-        res.json(enhancedStats);
-       } catch (error) {
-         logger.error('Errore API stats:', error);
-         res.status(500).json({ success: false, error: error.message });
-       }
-     });
-    
-    // API Wallet Connection
-    this.app.post('/api/wallet/connect', async (req, res) => {
-      try {
-        const { address, chainId } = req.body;
-        
-        if (!address || !chainId) {
-          return res.status(400).json({
-            success: false,
-            error: 'Address e chainId richiesti'
-          });
-        }
-        
-        // Connetti wallet tramite blockchain connection
-        const result = await blockchainConnection.connectMetaMaskFromBrowser(address, chainId);
-        
-        // Notifica tutti i client connessi
-        this.io.emit('walletConnected', result);
-        
-        res.json({
-          success: true,
-          data: result
-        });
-        
-      } catch (error) {
-        logger.error('Errore connessione wallet:', error);
-        res.status(400).json({
-          success: false,
-          error: error.message
-        });
-      }
-    });
-    
-    // API Opportunità Specifica
-    this.app.get('/api/opportunities/:id', async (req, res) => {
-      try {
-        const { id } = req.params;
-        const opportunity = arbitrageAnalyzer.getOpportunityById ? 
-          arbitrageAnalyzer.getOpportunityById(id) : null;
-        
-        if (!opportunity) {
-          return res.status(404).json({
-            success: false,
-            error: 'Opportunità non trovata'
-          });
-        }
-        
-        res.json({ success: true, data: opportunity });
-      } catch (error) {
-        logger.error('Errore API opportunity:', error);
-        res.status(500).json({ success: false, error: error.message });
-      }
-    });
-    
-    // API Simulazione
-    this.app.post('/api/simulate/:opportunityId', async (req, res) => {
-      try {
-        const { opportunityId } = req.params;
-        
-        if (!transactionExecutor.simulateArbitrage) {
-          return res.json({
-            success: true,
-            message: 'Simulazione non implementata - modalità demo'
-          });
-        }
-        
-        const result = await transactionExecutor.simulateArbitrage(opportunityId);
-        
-        res.json({
-          success: true,
-          message: 'Simulazione completata',
-          data: result
-        });
-      } catch (error) {
-        logger.error('Errore simulazione:', error);
-        res.status(400).json({
-          success: false,
-          error: error.message
-        });
-      }
-    });
-
-    // API Esecuzione
-    this.app.post('/api/execute/:opportunityId', async (req, res) => {
-      try {
-        const { opportunityId } = req.params;
-        const { walletAddress } = req.body;
-        
-        // In modalità testnet, permettiamo l'esecuzione senza wallet per la simulazione
-        if (config.SECURITY_CONFIG.networkMode !== 'testnet') {
-          if (!walletAddress) {
-            return res.status(400).json({ 
-              success: false, 
-              error: 'Wallet address richiesto' 
-            });
-          }
-          
-          if (!blockchainConnection.isConnected) {
-            return res.status(400).json({
-              success: false,
-              error: 'Wallet non connesso'
-            });
-          }
-        }
-        
-        const opportunity = arbitrageAnalyzer.getOpportunityById(opportunityId);
-        if (!opportunity) {
-          return res.status(404).json({ 
-            success: false, 
-            error: 'Opportunità non trovata' 
-          });
-        }
-        
-        if (!transactionExecutor.executeArbitrage) {
-          return res.status(400).json({
-            success: false,
-            error: 'Esecuzione non implementata - modalità demo'
-          });
-        }
-        
-        // In modalità testnet, usa un indirizzo fittizio se non fornito
-        const effectiveWalletAddress = walletAddress || (config.SECURITY_CONFIG.networkMode === 'testnet' ? '0x0000000000000000000000000000000000000000' : null);
-        
-        const result = await transactionExecutor.executeArbitrage(opportunity, effectiveWalletAddress);
-        
-        // Notifica tutti i client
-        this.io.emit('transactionUpdate', {
-          type: 'execution',
-          opportunityId,
-          result
-        });
-        
-        res.json({ success: true, data: result });
-        
-      } catch (error) {
-        logger.error('Errore API execute:', error);
-        res.status(500).json({ success: false, error: error.message });
-      }
-    });
-    
-    // API History
-    this.app.get('/api/history', async (req, res) => {
-      try {
-        const { limit = 100 } = req.query;
-        // Se limit è 'all', restituisce tutto (fino al limite interno del transactionExecutor)
-        const limitVal = limit === 'all' ? 1000 : parseInt(limit);
-        const history = transactionExecutor.getRecentExecutions(limitVal);
-        res.json({ success: true, data: history });
-      } catch (error) {
-        logger.error('Errore API history:', error);
-        res.status(500).json({ success: false, error: error.message });
-      }
-    });
-
-    // API Settings - Cambio modalità esecuzione
-    this.app.post('/api/settings', async (req, res) => {
-      try {
-        const { executionMode } = req.body;
-        
-        if (executionMode !== 'simulation' && executionMode !== 'testnet') {
-           return res.status(400).json({ success: false, error: 'Modalità non valida' });
-        }
-        
-        // Aggiorna modalità esecutore
-        transactionExecutor.setExecutionMode(executionMode);
-        
-        // Aggiorna modalità prezzi (Simulazione = Mock, Testnet = Reali)
-        const isSimulation = executionMode === 'simulation';
-        priceFeedManager.setSimulationMode(isSimulation);
-        
-        logger.info(`⚙️ Impostazioni aggiornate: Mode=${executionMode}`);
-        
-        res.json({ 
-            success: true, 
-            mode: executionMode,
-            message: `Modalità cambiata in ${executionMode.toUpperCase()}`
-        });
-      } catch (error) {
-        logger.error('Errore API settings:', error);
-        res.status(500).json({ success: false, error: error.message });
-      }
-    });
-
-    } // fine route demo EVM (config.DEMO_EVM.enabled)
+    // EVM-01: rimosse le ~270 righe di route della demo di arbitraggio EVM
+    // (/api/status, /api/prices, /api/opportunities, /api/stats, /api/wallet/connect,
+    // /api/simulate/:id, /api/execute/:id, /api/history, /api/settings). Erano
+    // registrate solo con DEMO_EVM_ENABLED=true, nessun client le chiamava più dopo
+    // il ritiro di public/app.js, e condividere con Perps lo stesso stato di
+    // connessione wallet è la causa dei due bug MetaMask corretti il 9 agosto.
+    // Il pannello Perps usa esclusivamente /api/perps/*.
 
     // Health check
     this.app.get('/health', (req, res) => {
@@ -980,6 +730,98 @@ class ArbitrageBotServer {
       }
     });
 
+    // STRAT-01 — Esportazione della configurazione di un bot come file scaricabile.
+    // Stesso formato dell'export dello storico strategie (una sola definizione in
+    // strategySchema), così un bot esportato è re-importabile dalla stessa strada.
+    // NON esporta master_address né stato/PnL: un file di strategia descrive come
+    // si opera, non su quale conto.
+    app.get('/api/perps/bots/:id/export', (req, res) => {
+      try {
+        const row = db.getBot(req.params.id);
+        if (!row) return res.status(404).json({ success: false, error: 'Bot non trovato' });
+        const envelope = strategySchema.buildEnvelope(
+          [strategySchema.botExportItem(row)],
+          { network: row.network, source: 'bot' }
+        );
+        const filename = strategySchema.exportFileName(row.name || row.coin, 1);
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(JSON.stringify(envelope, null, 2));
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // STRAT-01 — Creazione di bot da un file di strategie importato.
+    //
+    // È il percorso in cui il criterio "un file malformato non crea un bot con
+    // configurazione parzialmente vuota" si applica alla lettera: la validazione
+    // avviene TUTTA prima della prima createBot(), e se una sola voce non passa
+    // non viene creato nessun bot. Niente valori di default al posto dei campi
+    // mancanti, niente leva ridotta di nascosto per rientrare nei limiti.
+    //
+    // I bot nascono FERMI: importare una strategia non è deciderne l'avvio.
+    app.post('/api/perps/bots/import', (req, res) => {
+      try {
+        const body = req.body || {};
+        const result = Array.isArray(body.items) && body.kind === undefined
+          ? strategySchema.validateItemList(body.items, { maxItems: 25 })
+          : strategySchema.validateEnvelope(body, { maxItems: 25 });
+
+        if (!result.ok) {
+          return res.status(400).json({
+            success: false,
+            error: result.errors[0] || 'File di strategie non valido',
+            data: { imported: 0, errors: result.errors.map(reason => ({ reason })) }
+          });
+        }
+
+        const masterAddress = body.masterAddress || [...botManager.bots.values()][0]?.masterAddress;
+        if (!masterAddress) {
+          return res.status(400).json({ success: false, error: 'masterAddress richiesto: nessun wallet noto a cui collegare i bot importati' });
+        }
+
+        // Seconda validazione, questa volta di contesto: senza di essa il primo
+        // bot verrebbe creato e il secondo rifiutato, cioè esattamente l'import
+        // parziale che si vuole evitare.
+        const existing = new Set([...botManager.bots.values()].map(b => (b.name || '').toLowerCase()));
+        const clashes = [];
+        for (const it of result.items) {
+          const name = it.name || `${it.coin} importata`;
+          if (existing.has(name.toLowerCase())) clashes.push(name);
+          existing.add(name.toLowerCase());
+        }
+        if (clashes.length) {
+          return res.status(409).json({
+            success: false,
+            error: `Esiste già un bot con questo nome: ${clashes.join(', ')}. Rinominalo nel file o elimina quello esistente.`,
+            data: { imported: 0, errors: clashes.map(n => ({ reason: `nome già in uso: ${n}` })) }
+          });
+        }
+
+        const created = [];
+        for (const it of result.items) {
+          created.push(botManager.createBot({
+            name: it.name || `${it.coin} importata`,
+            coin: it.coin,
+            masterAddress,
+            network: hyperliquid.getNetwork(),
+            config: it.config
+          }));
+        }
+
+        db.insertAudit('human', 'bots.imported', { count: created.length, coins: result.items.map(i => i.coin) });
+        if (created.length) {
+          notifier.notify(`📥 <b>${created.length} bot importat${created.length === 1 ? 'o' : 'i'}</b> da file, ferm${created.length === 1 ? 'o' : 'i'}: ${created.map(b => b.name).join(', ')}. Avviali dalla tab System quando vuoi.`);
+        }
+        logger.info(`📥 Import bot: ${created.length} creati (fermi)`);
+        res.json({ success: true, data: { imported: created.length, errors: [], bots: created } });
+      } catch (error) {
+        logger.error('Errore import bot:', error.message);
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
     app.patch('/api/perps/bots/:id', (req, res) => {
       try {
         const state = botManager.updateBot(req.params.id, req.body);
@@ -1205,6 +1047,94 @@ class ArbitrageBotServer {
       });
     });
 
+    // STRAT-01 — Esportazione dello storico strategie come file scaricabile.
+    // La UI può già costruirsi il file da sola con i dati che ha a schermo; questa
+    // route serve per l'export che NON passa dalla UI (script, backup, condivisione)
+    // e per garantire che il formato del file abbia una sola definizione
+    // (strategySchema), non una per produttore.
+    app.get('/api/agents/strategy-history/export', (req, res) => {
+      try {
+        const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
+        const status = req.query.status;
+        const all = proposals.history({ status, limit: 1000 });
+        const items = ids.length ? all.filter(h => ids.includes(h.id)) : all;
+        if (!items.length) {
+          return res.status(404).json({ success: false, error: 'Nessuna strategia da esportare per i criteri indicati' });
+        }
+        const envelope = strategySchema.buildEnvelope(
+          items.map(strategySchema.historyExportItem),
+          { network: hyperliquid.getNetwork(), source: 'strategy-history' }
+        );
+        const filename = strategySchema.exportFileName(items.length === 1 ? items[0].coin : 'storico', items.length);
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(JSON.stringify(envelope, null, 2));
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // STRAT-01 — Importazione nello storico strategie.
+    //
+    // Accetta la busta completa (`{kind, version, items}`) o la sola lista
+    // `items` già estratta dalla UI. La validazione qui è quella che DECIDE:
+    // quella del client è solo il primo filtro, perché è il server che scrive.
+    //
+    // Tutto-o-nulla: se una sola voce non passa, non viene scritto niente. Un
+    // import parziale lascerebbe l'utente a indovinare cosa è entrato, ed è la
+    // via più diretta a una strategia con configurazione a metà.
+    //
+    // Le strategie importate entrano come CANDIDATURE pendenti, non come bot:
+    // per diventare operative devono passare dall'approvazione e quindi dal gate
+    // deterministico di riskAgent, esattamente come una proposta dell'Analyst.
+    // Un file importato è codice di qualcun altro: non può creare bot da solo.
+    app.post('/api/agents/strategy-history/import', (req, res) => {
+      try {
+        const body = req.body || {};
+        const result = Array.isArray(body.items) && body.kind === undefined
+          ? strategySchema.validateItemList(body.items)
+          : strategySchema.validateEnvelope(body);
+
+        if (!result.ok) {
+          return res.status(400).json({
+            success: false,
+            error: result.errors[0] || 'File di strategie non valido',
+            data: { imported: 0, skipped: result.errors.length, errors: result.errors.map(reason => ({ reason })) }
+          });
+        }
+
+        const created = [];
+        for (const it of result.items) {
+          const row = proposals.create({
+            type: 'new_strategy_candidate',
+            coin: it.coin,
+            payload: { coin: it.coin, interval: it.interval, config: it.config },
+            rationale: it.rationale || 'Strategia importata da file',
+            confidence: it.confidence,
+            source: 'import',
+            model: it.model || null,
+            // TTL lungo: una candidatura importata a mano non decade col mercato
+            // come un "chiudi adesso", e coi 30 minuti di default scadrebbe
+            // mentre l'utente legge la conferma dell'import.
+            ttlMin: IMPORT_PROPOSAL_TTL_MIN,
+            // Una notifica per import, non una per strategia (vedi sotto).
+            notify: false
+          });
+          created.push({ id: row?.id, coin: it.coin });
+        }
+
+        db.insertAudit('human', 'strategies.imported', { count: created.length, coins: created.map(c => c.coin) });
+        if (created.length) {
+          notifier.notify(`📥 <b>${created.length} strateg${created.length === 1 ? 'ia' : 'ie'} importate</b> come candidature in attesa di approvazione: ${created.map(c => c.coin).join(', ')}`);
+        }
+        logger.info(`📥 Import strategie: ${created.length} candidature create`);
+        res.json({ success: true, data: { imported: created.length, skipped: 0, errors: [], items: created, target: 'pending_proposals' } });
+      } catch (error) {
+        logger.error('Errore import strategie:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // Riciclo di strategie scadute: ri-backtest locale e riproposta se l'edge
     // regge. Nessun costo AI. Le rifiutate non sono riciclabili per scelta.
     app.post('/api/agents/strategy-history/recycle', async (req, res) => {
@@ -1323,44 +1253,19 @@ class ArbitrageBotServer {
       this.connectedClients.add(socket.id);
       
       // Invia stato iniziale
-      socket.emit('status', {
-        bot: { running: this.isRunning },
-        blockchain: blockchainConnection.getConnectionStatus()
-      });
-      
+      socket.emit('status', { bot: { running: this.isRunning } });
+
       // Gestisci disconnessione
       socket.on('disconnect', () => {
         logger.info('🔌 Client disconnesso', { socketId: socket.id });
         this.connectedClients.delete(socket.id);
       });
-      
-      // Gestisci richieste client
-      socket.on('requestPrices', async (data) => {
-        try {
-          let prices;
-          
-          if (data.network && data.token) {
-            // Prezzi per un token specifico
-            prices = priceFeedManager.getTokenPrices(data.network, data.token);
-          } else {
-            // Tutti i prezzi
-            prices = priceFeedManager.getAllCurrentPrices();
-          }
-          
-          socket.emit('pricesUpdate', prices);
-        } catch (error) {
-          socket.emit('error', { message: error.message });
-        }
-      });
-      
-      socket.on('requestOpportunities', () => {
-        try {
-          const opportunities = arbitrageAnalyzer.getBestOpportunities();
-          socket.emit('opportunitiesUpdate', opportunities);
-        } catch (error) {
-          socket.emit('error', { message: error.message });
-        }
-      });
+
+      // EVM-01: rimossi gli handler `requestPrices`/`requestOpportunities` e il
+      // campo `blockchain` dallo stato iniziale — erano l'unico canale WebSocket
+      // della demo EVM e, a differenza delle route REST, non erano nemmeno dietro
+      // DEMO_EVM_ENABLED: restavano registrati sempre. Nessun client li usava
+      // (la cockpit ascolta solo gli eventi `perps:*`).
     });
   }
   
@@ -1397,18 +1302,10 @@ class ArbitrageBotServer {
       logger.info('🔧 Validazione configurazione...');
       config.validateConfig();
       
-      // Inizializzazione modulo demo Arbitraggio EVM (solo se abilitato)
-      if (config.DEMO_EVM.enabled) {
-        logger.info('🔗 Inizializzazione connessioni blockchain (demo EVM)...');
-        await blockchainConnection.initializeProviders();
-        logger.info('📊 Avvio sistema raccolta prezzi (demo EVM)...');
-        await priceFeedManager.start();
-        logger.info('🔍 Avvio analizzatore arbitraggio (demo EVM)...');
-        await arbitrageAnalyzer.start();
-        logger.info('⚡ Executor demo pronto...');
-      } else {
-        logger.info('🔵 Modulo Arbitraggio EVM disabilitato (DEMO_EVM_ENABLED non attivo)');
-      }
+      // EVM-01: qui partivano provider RPC, price feed e analizzatore della demo
+      // EVM quando DEMO_EVM_ENABLED=true. Il server web non avvia più nulla di
+      // quel modulo: senza route né canale WebSocket, tenerlo in piedi avrebbe
+      // significato far girare tre sottosistemi che nessuno può più osservare.
 
       // Inizializzazione sottosistema Perps (Hyperliquid)
       try {
@@ -1432,9 +1329,11 @@ class ArbitrageBotServer {
         logger.error('⚠️ Errore inizializzazione Perps:', perpsError.message);
       }
 
-      // Setup eventi per WebSocket
-      this.setupBotEvents();
-      
+      // EVM-01: qui c'era `this.setupBotEvents()`, che serviva solo a trasmettere
+      // ogni 15s le statistiche dell'analizzatore EVM (`statsUpdate`,
+      // `opportunitiesUpdate`). Gli eventi Perps li emette marketData/botManager
+      // direttamente, quindi il metodo è stato rimosso, non svuotato.
+
       // Avvia server HTTP
       this.server.listen(this.port, this.bindHost, () => {
         this.isRunning = true;
@@ -1447,7 +1346,7 @@ class ArbitrageBotServer {
         console.log(`🌐 Web Interface: http://localhost:${this.port}`);
         console.log(`📊 API Endpoint: http://localhost:${this.port}/api`);
         console.log(`🔌 WebSocket: ws://localhost:${this.port}`);
-        console.log(`🟢 HL network: ${config.HYPERLIQUID_CONFIG.defaultNetwork}${config.DEMO_EVM.enabled ? ' · demo EVM ON' : ''}`);
+        console.log(`🟢 HL network: ${config.HYPERLIQUID_CONFIG.defaultNetwork}`);
         console.log(`=====================================\n`);
       });
       
@@ -1469,42 +1368,6 @@ class ArbitrageBotServer {
       }
     }
   
-    /**
-     * Setup eventi bot per WebSocket
-     * NOTA: Commentato perché i moduli non estendono EventEmitter
-     */
-    setupBotEvents() {
-    // Aggiornamenti periodici statistiche demo EVM (solo se il modulo è attivo)
-    if (!config.DEMO_EVM.enabled) return;
-    setInterval(() => {
-      if (this.connectedClients.size > 0) {
-        try {
-          const stats = arbitrageAnalyzer.getStats();
-          const execStats = transactionExecutor.getExecutionStats();
-          
-          const enhancedStats = {
-            totalOpportunities: stats.totalOpportunities || 0,
-            recentOpportunities: stats.recentOpportunities || 0,
-            executedTrades: execStats.totalExecutions || 0,
-            totalProfit: execStats.totalProfit24h || 0,
-            successRate: execStats.successRate || 0,
-            isRunning: stats.isRunning,
-            dailyLimit: stats.dailyLimit
-          };
-          
-          this.io.emit('statsUpdate', enhancedStats);
-          
-          // Invia anche aggiornamento opportunità
-          const opportunities = arbitrageAnalyzer.getBestOpportunities();
-          this.io.emit('opportunitiesUpdate', opportunities);
-          
-        } catch (error) {
-          logger.error('Errore invio aggiornamenti WebSocket:', error);
-        }
-      }
-    }, 15000); // Ogni 15 secondi
-  }
-  
   /**
    * Arresta il server gracefully
    */
@@ -1512,12 +1375,6 @@ class ArbitrageBotServer {
     logger.info('🛑 Arresto server...');
     
     this.isRunning = false;
-
-    // Arresta moduli demo EVM (se attivi)
-    if (config.DEMO_EVM.enabled) {
-      await priceFeedManager.stop();
-      await arbitrageAnalyzer.stop();
-    }
 
     // Arresta sottosistema Perps
     try {

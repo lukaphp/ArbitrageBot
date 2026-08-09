@@ -14,8 +14,13 @@ ri-piazzati sulla size aggiornata, lasciando parte della posizione scoperta. Can
 piazzare apre una finestra — anche di un solo istante — in cui la posizione è nuda: su un perpetuo con
 leva quella finestra è denaro.
 
-**How to apply:** le implementazioni canoniche sono `_updateTrailing`/`_repriceTpSlAfterDca` in
-`src/perps/bot.js` — replicale, non reinventarle. Se il ri-piazzamento fallisce a metà, i vecchi
+**How to apply:** le implementazioni canoniche sono il blocco trailing dentro `_manageOpen` e
+`_replaceTpSl` in `src/perps/bot.js` — replicale, non reinventarle. (`_replaceTpSl` è
+l'ex `_repriceTpSlAfterDca`, generalizzato in SEC-08 perché serve anche all'adozione di una
+posizione non tracciata; `_updateTrailing` come metodo separato non esiste più. La skill
+`arbitragebot-conventions` cita ancora i nomi vecchi.) Se l'oid del vecchio trigger non è
+noto — perché non l'abbiamo piazzato noi — va **cercato sul book**, non dato per assente:
+è così che nasce un ordine orfano. Se il ri-piazzamento fallisce a metà, i vecchi
 trigger restano intatti (protezione parziale meglio di nessuna) e il fallimento va loggato **e**
 notificato: vedi [[feedback-fallimenti-money-path-non-silenziosi]]. Un test onesto verifica sul book
 che ci sia **un solo** trigger attivo dopo la sostituzione (nessun doppione, nessun buco): vedi

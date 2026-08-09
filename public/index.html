@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🤖 Arbitrage Bot - Testnet Only</title>
+    <!-- Titolo neutro: la rete reale (testnet/mainnet) viene appesa da perps.js
+         appena `/api/perps/network` risponde. Prima diceva "Testnet Only", che
+         con ALLOW_MAINNET=true è falso (BRAND-01). -->
+    <title>🤖 ArbitrageBot Perps</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🤖</text></svg>">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -12,7 +15,9 @@
     <link rel="stylesheet" href="styles_perps.css">
     <link rel="stylesheet" href="styles_cockpit.css">
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+    <!-- ethers.js rimosso con la demo EVM (EVM-01): lo usava solo app.js per
+         leggere rete e saldo delle testnet EVM. Le firme Hyperliquid passano da
+         window.ethereum.request (eth_signTypedData_v4) in perps.js. -->
     <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body class="cockpit-mode">
@@ -21,8 +26,11 @@
         <div class="container">
             <div class="header-content">
                 <div class="logo">
-                    <h1>🤖 Arbitrage Bot</h1>
-                    <span class="testnet-badge">TESTNET ONLY</span>
+                    <h1>🤖 ArbitrageBot Perps</h1>
+                    <!-- Testo e colore impostati da perps._applyNetworkBranding() sulla
+                         rete effettiva di Hyperliquid: "TESTNET ONLY" fisso affermava
+                         il falso appena ALLOW_MAINNET=true (BRAND-01). -->
+                    <span class="testnet-badge" id="networkBadge">RETE —</span>
                 </div>
                 <div class="connection-status">
                     <div class="cockpit-header-summary" aria-label="Equity account">
@@ -35,12 +43,15 @@
                         <span class="cockpit-header-badge" id="cockpitHeaderAlertBadge">0</span>
                     </button>
                     <a href="manual.html" target="_blank" rel="noopener" class="btn btn-sm btn-outline" style="margin-right: 10px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;" title="Apri il manuale utente in un nuovo tab">📖 Manuale</a>
-                    <button id="openSettings" class="btn btn-sm btn-outline" style="margin-right: 15px;">⚙️ Impostazioni</button>
                     <div id="serverStatus" class="status-indicator offline">
                         <span class="dot"></span>
                         <span class="text">Server</span>
                     </div>
-                    <div id="walletStatus" class="status-indicator offline">
+                    <!-- Unico punto di ingresso alla connessione MetaMask da quando la
+                         card .wallet-section è stata ritirata: il click è agganciato in
+                         perps.initWallet(), non più in app.js. -->
+                    <div id="walletStatus" class="status-indicator offline" role="button" tabindex="0"
+                         title="Clicca per collegare MetaMask">
                         <span class="dot"></span>
                         <span class="text">MetaMask</span>
                     </div>
@@ -52,200 +63,11 @@
     <!-- Main Content -->
     <main class="main">
         <div class="container">
-            <!-- Wallet Connection -->
-            <section class="wallet-section">
-                <div class="card">
-                    <div class="card-header">
-                        <h2>🦊 Connessione Wallet</h2>
-                    </div>
-                    <div class="card-content">
-                        <div id="walletInfo" class="wallet-info hidden">
-                            <div class="wallet-details">
-                                <div class="detail">
-                                    <span class="label">Indirizzo:</span>
-                                    <span id="walletAddress" class="value"></span>
-                                </div>
-                                <div class="detail">
-                                    <span class="label">Rete:</span>
-                                    <span id="walletNetwork" class="value"></span>
-                                </div>
-                                <div class="detail">
-                                    <span class="label">Saldo:</span>
-                                    <span id="walletBalance" class="value"></span>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="wallet-actions">
-                            <button id="connectWallet" class="btn btn-primary">
-                                🦊 Connetti MetaMask
-                            </button>
-                            <button id="disconnectWallet" class="btn btn-secondary hidden">
-                                Disconnetti
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </section>
+            <!-- La card "Connessione Wallet" e l'intera vista Arbitraggio EVM (demo
+                 educativa a prezzi simulati) sono state ritirate con EVM-01: erano
+                 servite solo da app.js, ora rimosso. La connessione MetaMask vive nel
+                 pill #walletStatus in header, gestito da perps.js. -->
 
-            <!-- Navigazione viste: Perps (principale) | Arbitraggio (demo) -->
-            <nav class="view-tabs">
-                <button class="view-tab active" data-view="perps" onclick="switchView('perps')">📈 Perps Trading</button>
-                <button id="tab-arbitrage" class="view-tab" data-view="arbitrage" onclick="switchView('arbitrage')" style="display:none">🔍 Arbitraggio <span class="testnet-badge" style="font-size:.65em;vertical-align:middle">DEMO</span></button>
-            </nav>
-
-            <!-- ====================== VISTA ARBITRAGGIO (demo educativa) ====================== -->
-            <div id="view-arbitrage" class="hidden">
-            <!-- Dashboard -->
-            <section class="dashboard">
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-icon">📊</div>
-                        <div class="stat-content">
-                            <div class="stat-value" id="totalOpportunities">0</div>
-                            <div class="stat-label">Opportunità Trovate</div>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">⚡</div>
-                        <div class="stat-content">
-                            <div class="stat-value" id="executedTrades">0</div>
-                            <div class="stat-label">Trade Eseguiti</div>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">💰</div>
-                        <div class="stat-content">
-                            <div class="stat-value" id="totalProfit">0.000</div>
-                            <div class="stat-label">Profitto Totale (ETH)</div>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">📈</div>
-                        <div class="stat-content">
-                            <div class="stat-value" id="successRate">0%</div>
-                            <div class="stat-label">Tasso Successo</div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Opportunities -->
-            <section class="opportunities-section">
-                <div class="card">
-                    <div class="card-header">
-                        <h2>🔍 Opportunità di Arbitraggio</h2>
-                        <div class="card-actions">
-                            <button id="refreshOpportunities" class="btn btn-outline">
-                                🔄 Aggiorna
-                            </button>
-                            <div class="auto-refresh">
-                                <input type="checkbox" id="autoRefresh" checked>
-                                <label for="autoRefresh">Auto-refresh</label>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="card-content">
-                        <div id="opportunitiesLoading" class="loading">
-                            <div class="spinner"></div>
-                            <span>Ricerca opportunità...</span>
-                        </div>
-                        <div id="opportunitiesList" class="opportunities-list hidden">
-                            <!-- Le opportunità verranno inserite qui dinamicamente -->
-                        </div>
-                        <div id="noOpportunities" class="no-data hidden">
-                            <div class="no-data-icon">🔍</div>
-                            <div class="no-data-text">Nessuna opportunità trovata</div>
-                            <div class="no-data-subtitle">Il bot continua a monitorare i prezzi...</div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Price Monitor -->
-            <section class="prices-section">
-                <div class="card">
-                    <div class="card-header">
-                        <h2>💹 Monitor Prezzi</h2>
-                        <div class="network-selector">
-                            <select id="networkSelect">
-                                <option value="ethereum">Ethereum (Goerli)</option>
-                                <option value="bsc">BSC (Testnet)</option>
-                                <option value="polygon">Polygon (Amoy)</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="card-content">
-                        <div id="pricesGrid" class="prices-grid">
-                            <!-- I prezzi verranno inseriti qui dinamicamente -->
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Transaction History -->
-            <section class="history-section">
-                <div class="card">
-                    <div class="card-header">
-                        <h2>📜 Storico Transazioni</h2>
-                        <div class="card-actions">
-                            <button id="clearHistory" class="btn btn-outline btn-danger">
-                                🗑️ Pulisci
-                            </button>
-                        </div>
-                    </div>
-                    <div class="card-content">
-                        <!-- Filtri Storico -->
-                        <div class="history-filters">
-                            <div class="filter-group">
-                                <label for="dateFilterStart">Da:</label>
-                                <input type="date" id="dateFilterStart" class="form-input">
-                            </div>
-                            <div class="filter-group">
-                                <label for="dateFilterEnd">A:</label>
-                                <input type="date" id="dateFilterEnd" class="form-input">
-                            </div>
-                            <div class="filter-group">
-                                <label for="sortFilter">Ordina:</label>
-                                <select id="sortFilter" class="form-select">
-                                    <option value="date-desc">Data (Recenti)</option>
-                                    <option value="date-asc">Data (Meno recenti)</option>
-                                    <option value="profit-desc">Profitto (Alto-Basso)</option>
-                                    <option value="profit-asc">Profitto (Basso-Alto)</option>
-                                </select>
-                            </div>
-                            <div class="filter-actions">
-                                <button id="resetFilters" class="btn btn-sm btn-outline">Reset</button>
-                            </div>
-                        </div>
-
-                        <div class="table-container">
-                            <table class="history-table">
-                                <thead>
-                                    <tr>
-                                        <th>Data</th>
-                                        <th>Coppia</th>
-                                        <th>Network</th>
-                                        <th>Profitto</th>
-                                        <th>Gas</th>
-                                        <th>Stato</th>
-                                        <th>Azioni</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="historyList">
-                                    <!-- Lo storico verrà inserito qui dinamicamente -->
-                                </tbody>
-                            </table>
-                        </div>
-                        
-                        <div id="noHistory" class="no-data">
-                            <div class="no-data-icon">📜</div>
-                            <div class="no-data-text">Nessuna transazione</div>
-                            <div class="no-data-subtitle">Le transazioni eseguite appariranno qui</div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-            </div><!-- /view-arbitrage -->
 
             <!-- ====================== VISTA PERPS ====================== -->
             <div id="view-perps">
@@ -261,7 +83,7 @@
                 <section id="cockpit-panel-dashboard" class="cockpit-panel cockpit-dashboard" role="tabpanel" aria-labelledby="cockpit-tab-dashboard">
                     <div class="cockpit-dashboard-heading">
                         <div>
-                            <div class="cockpit-eyebrow">OPERATING OVERVIEW · TESTNET</div>
+                            <div class="cockpit-eyebrow" id="cockpitNetworkEyebrow">OPERATING OVERVIEW</div>
                             <h2 class="cockpit-title">Dashboard</h2>
                         </div>
                         <span class="cockpit-updated">Updated <span id="cockpitUpdatedAt">—</span></span>
@@ -341,7 +163,7 @@
                             <div class="cockpit-health-list"><div class="cockpit-health-row"><span><i class="cockpit-health-dot"></i>CME</span><span class="cockpit-health-meta">28ms</span></div><div class="cockpit-health-row"><span><i class="cockpit-health-dot"></i>ICE</span><span class="cockpit-health-meta" id="cockpitIceLatency">—</span></div><div class="cockpit-health-row"><span><i class="cockpit-health-dot"></i>COMEX</span><span class="cockpit-health-meta">31ms</span></div><div class="cockpit-health-row"><span><span>API / database</span></span><span class="cockpit-health-meta cockpit-positive">4ms · healthy</span></div></div>
                         </section>
                     </div>
-                    <div class="cockpit-command-strip"><span><strong>F1</strong> BUY <span aria-hidden="true">·</span> <strong>F2</strong> SELL <span aria-hidden="true">·</span> <strong>F3</strong> FLATTEN <span aria-hidden="true">·</span> <strong>ESC</strong> CANCEL</span><span>Testnet only · verify before submitting</span></div>
+                    <div class="cockpit-command-strip"><span><strong>F1</strong> BUY <span aria-hidden="true">·</span> <strong>F2</strong> SELL <span aria-hidden="true">·</span> <strong>F3</strong> FLATTEN <span aria-hidden="true">·</span> <strong>ESC</strong> CANCEL</span><span id="cockpitOrderNotice">Verifica prima di inviare</span></div>
                 </section>
 
                 <div id="cockpit-panel-system" class="cockpit-panel" role="tabpanel" aria-labelledby="cockpit-tab-system" hidden>
@@ -733,8 +555,14 @@
                             <label class="sh-selectall"><input type="checkbox" id="shSelectAll" onchange="perps.toggleSelectAllStrategies(this.checked)"> Seleziona tutte</label>
                             <span id="shSelCount" class="muted"></span>
                             <button class="btn btn-sm btn-primary hidden" id="shRecycleBtn" onclick="perps.recycleSelectedStrategies()" title="Rilancia il backtest sui dati correnti e ripropone solo quelle che hanno ancora edge (nessun costo AI)">♻️ Ricicla selezionate</button>
+                            <button class="btn btn-sm btn-outline" onclick="perps.exportSelectedStrategies()" title="Scarica le strategie selezionate come file JSON (configurazione completa + metadati)">📤 Esporta selezionate</button>
                             <button class="btn btn-sm btn-outline" onclick="perps.deleteSelectedStrategies()">🗑️ Elimina selezionate</button>
                             <button class="btn btn-sm btn-danger" onclick="perps.clearStrategyTab()">🧹 Svuota categoria</button>
+                            <!-- L'input file resta nascosto: il pulsante lo apre, così lo stile
+                                 è coerente con gli altri comandi della barra. -->
+                            <button class="btn btn-sm btn-outline" onclick="perps.pickStrategiesFile()" title="Carica un file JSON esportato in precedenza: lo schema viene verificato prima di scrivere">📥 Importa da file</button>
+                            <input type="file" id="shImportFile" class="hidden" accept="application/json,.json"
+                                   onchange="perps.importStrategiesFromFile(this)">
                         </div>
 
                         <div id="strategyHistory" class="strategy-history"></div>
@@ -761,101 +589,27 @@
         <div class="container">
             <div class="footer-content">
                 <div class="footer-info">
-                    <span>⚠️ Solo per uso su testnet</span>
-                    <span>•</span>
-                    <span>Non utilizzare su mainnet</span>
+                    <!-- Avvertenza impostata da perps._applyNetworkBranding(): in mainnet
+                         "Solo per uso su testnet / Non utilizzare su mainnet" era falso
+                         (BRAND-01). -->
+                    <span id="footerNetworkNotice">Rete Hyperliquid: —</span>
                     <span>•</span>
                     <span>Versione 1.0.0</span>
                 </div>
                 <div class="footer-links">
-                    <a href="https://github.com" target="_blank">GitHub</a>
-                    <a href="#" onclick="showSecurityInfo()">Sicurezza</a>
-                    <a href="#" onclick="showHelp()">Aiuto</a>
+                    <!-- "Sicurezza" e "Aiuto" aprivano un modale e un toast serviti da
+                         app.js, con contenuti della demo EVM ("modalità testnet forzata"):
+                         ritirati con EVM-01, il posto giusto per entrambi è il manuale. -->
+                    <a href="manual.html" target="_blank" rel="noopener">Manuale utente</a>
                 </div>
             </div>
         </div>
     </footer>
 
     <!-- Modals -->
-    <div id="executeModal" class="modal hidden">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>⚡ Esegui Arbitraggio</h3>
-                <button class="modal-close" onclick="closeModal('executeModal')">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div id="executeDetails"></div>
-            </div>
-        </div>
-    </div>
-
-    <div id="settingsModal" class="modal hidden">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>⚙️ Impostazioni Avanzate</h3>
-                <button class="modal-close" onclick="closeModal('settingsModal')">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="settings-section">
-                    <h4>Modalità Esecuzione</h4>
-                    <p class="settings-desc">Scegli come il bot deve operare. La modalità Testnet richiede un wallet configurato lato server.</p>
-                    
-                    <div class="mode-selector">
-                        <div class="mode-option selected" id="modeSim" onclick="app.setExecutionMode('simulation')">
-                            <div class="mode-icon">🧪</div>
-                            <div class="mode-info">
-                                <span class="mode-title">Simulazione</span>
-                                <span class="mode-desc">Dati simulati, nessuna interazione reale con la blockchain. Sicuro per test.</span>
-                            </div>
-                            <div class="mode-check">✓</div>
-                        </div>
-                        
-                        <div class="mode-option" id="modeTestnet" onclick="app.setExecutionMode('testnet')">
-                            <div class="mode-icon">🌐</div>
-                            <div class="mode-info">
-                                <span class="mode-title">Testnet Reale</span>
-                                <span class="mode-desc">Prezzi reali, transazioni reali su Goerli/Sepolia. Richiede Gas.</span>
-                            </div>
-                            <div class="mode-check">✓</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="settings-actions">
-                    <button class="btn btn-secondary" onclick="closeModal('settingsModal')">Annulla</button>
-                    <button class="btn btn-primary" onclick="app.saveSettings()">Salva Modifiche</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="securityModal" class="modal hidden">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>🛡️ Informazioni Sicurezza</h3>
-                <button class="modal-close" onclick="closeModal('securityModal')">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="security-info">
-                    <h4>🔒 Protezioni Attive</h4>
-                    <ul>
-                        <li>✅ Modalità testnet forzata</li>
-                        <li>✅ Nessuna gestione chiavi private</li>
-                        <li>✅ Integrazione MetaMask sicura</li>
-                        <li>✅ Simulazione pre-esecuzione</li>
-                        <li>✅ Limiti automatici</li>
-                    </ul>
-                    <h4>⚠️ Avvertenze</h4>
-                    <ul>
-                        <li>Solo per uso educativo e testing</li>
-                        <li>Non utilizzare mai su mainnet</li>
-                        <li>Verificare sempre le transazioni</li>
-                        <li>Mantenere fondi testnet limitati</li>
-                    </ul>
-                </div>
-            </div>
-        </div>
-    </div>
+    <!-- Rimossi con EVM-01: executeModal (esecuzione arbitraggio), settingsModal
+         (modalità simulazione/testnet del bot EVM) e securityModal, tutti serviti da
+         app.js e riferiti alla demo ritirata. -->
 
     <!-- Modal grafico posizione -->
     <!-- Preventivo costo analisi: sostituisce il confirm() nativo, che tronca il testo -->
@@ -1164,8 +918,11 @@
     <div id="toastContainer" class="toast-container"></div>
 
     <!-- Scripts -->
-    <script src="boot.js?v=2.0.0"></script>
-    <script src="app.js?v=1.3.0"></script>
-    <script src="perps.js?v=2.1.0"></script>
+    <!-- shell.js prima di perps.js: espone window.shell (login, socket, toast, modali)
+         e i globali showModal/closeModal usati dagli onclick inline qui sopra.
+         boot.js e app.js sono stati rimossi con EVM-01: il primo serviva solo a
+         mostrare/nascondere il tab della demo, il secondo era la demo stessa. -->
+    <script src="shell.js?v=3.0.0"></script>
+    <script src="perps.js?v=3.0.0"></script>
 </body>
 </html>

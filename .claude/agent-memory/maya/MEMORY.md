@@ -5,4 +5,5 @@
 - [Segnalare le incoerenze fuori perimetro](feedback_segnalare-fuori-perimetro.md) — nel report, non di nascosto; un residuo non è mai una riga sola
 - [Sprint 1 consegnato in un commit bundled](project_sprint1-consegna-bundled.md) — `git diff` vuoto non vuol dire lavoro assente
 - [`window.confirm` nativo va bene](feedback_confirm-nativo-ok.md) — il precedente di confirm bloccato era un artifact sandboxed, non questa app
-- [Come verificare davvero la DoD frontend](feedback_verifica-dod-frontend.md) — `npm run lint` non copre `public/`; check tag e harness `node:vm`
+- [Come verificare davvero la DoD frontend](feedback_verifica-dod-frontend.md) — check tag, harness `node:vm`, assert sul markup; da Sprint 3 il lint copre `public/`
+- [Ritirare un file legacy senza portarsi via il vivo](feedback_ritiro-legacy-superficie-condivisa.md) — censire la superficie condivisa prima di cancellare; caso `app.js`/EVM-01

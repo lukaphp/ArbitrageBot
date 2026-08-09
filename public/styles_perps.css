@@ -389,14 +389,17 @@
 .sh-bulkbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 9px; }
 .sh-selectall { display: flex; gap: 5px; align-items: center; font-size: 12px; color: #4a5568; cursor: pointer; }
 .sh-check { cursor: pointer; }
-.sh-del, .sh-recycle {
+.sh-del, .sh-recycle, .sh-export {
   margin-left: auto; background: transparent; border: none; cursor: pointer;
   font-size: 13px; opacity: 0.5; padding: 2px 4px; border-radius: 5px;
 }
 .sh-del:hover { opacity: 1; background: rgba(229,62,62,0.12); }
 .sh-recycle:hover { opacity: 1; background: rgba(56,161,105,0.15); }
-/* Quando ci sono entrambi, è il riciclo a spingere il gruppo a destra */
-.sh-recycle + .sh-del { margin-left: 0; }
+.sh-export:hover { opacity: 1; background: rgba(99,102,241,0.15); }
+/* Il primo pulsante del gruppo spinge tutti gli altri a destra; quelli che lo
+   seguono restano attaccati a lui. L'ordine nella riga è ♻️ 📤 🗑️, ma il riciclo
+   c'è solo sulle scadute: entrambe le catene vanno coperte. */
+.sh-recycle + .sh-export, .sh-recycle + .sh-del, .sh-export + .sh-del { margin-left: 0; }
 .sh-row.is-recycling { opacity: 0.55; pointer-events: none; }
 
 /* ===== Bot: badge strategia AI d'origine ===== */

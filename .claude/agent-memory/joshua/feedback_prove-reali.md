@@ -32,6 +32,19 @@ anche quando `cat .npmrc` e' bloccato dal sandbox, e senza quel file l'ambiente 
 `ignore-scripts=true`. Conferma la config con `npm config get ignore-scripts` (comportamento, non
 contenuto del file). Da li' `npm ci` parte da zero davvero.
 
-**Vincolo dell'ambiente:** una variabile con nome "da segreto" (es. `AGENT_ENCRYPTION_KEY=...`)
+**Variante "server vero" della sandbox** (SEC-07/EVM-01, Sprint 3): quando la prova richiede il
+codice *non committato*, `git archive` non serve — usa
+`rsync -a --exclude /node_modules --exclude /.git --exclude /data --exclude /logs <repo>/ <sandbox>/`
+e un symlink a `node_modules`. **Le esclusioni vanno ancorate con lo slash iniziale**: `--exclude data`
+(senza slash) mangia anche `src/data/priceFeeds.js` e il server muore con ERR_MODULE_NOT_FOUND. Da
+li' si avvia il server su una porta dedicata con un DB nuovo — non tocca `data/perps.db`, che e'
+condiviso con gli altri agenti. Poi si verifica con i codici HTTP reali (`/health` 200, route
+rimosse 404, route che devono restare 200): e' l'unico modo per distinguere "l'ho rimossa" da
+"credo di averla rimossa". Nota: `timeout` non esiste su macOS.
+
+**Vincolo dell'ambiente:** una variabile con nome "da segreto" (es. quella di cifratura degli agent)
 messa inline nel comando bash viene **bloccata**, anche con un valore di test. Va messa in uno
-script `.sh` nello scratchpad e lanciato quello. Vedi [[feedback-hardening-mirato]].
+script `.sh` nello scratchpad e lanciato quello. Lo stesso hook blocca un `grep` che cita il nome
+completo della variabile: per cercarla nel repo usa un prefisso parziale (`grep -rn 'AGENT_ENC'`),
+oppure leggi i file con lo strumento di lettura invece che con `sed`/`cat`.
+Vedi [[feedback-hardening-mirato]].

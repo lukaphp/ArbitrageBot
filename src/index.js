@@ -17,7 +17,7 @@
 
 import chalk from 'chalk';
 import cron from 'node-cron';
-import { validateConfig } from './config/config.js';
+import { validateConfig, validateEvmDemoConfig } from './config/config.js';
 import blockchainConnection from './blockchain/connection.js';
 import priceFeeds from './data/priceFeeds.js';
 import arbitrageAnalyzer from './analysis/arbitrageAnalyzer.js';
@@ -50,7 +50,12 @@ class ArbitrageBot {
       // 1. Validazione configurazione
       logger.info('🔧 Validazione configurazione...');
       validateConfig();
-      
+      // EVM-01: le verifiche della demo EVM (solo testnet, RPC URL presenti,
+      // WALLET_ADDRESS) stavano in validateConfig() dietro DEMO_EVM_ENABLED. Con la
+      // flag ritirata le chiama questa CLI, che è l'unico avvio della demo rimasto —
+      // il cambiamento è di posizione, non di severità.
+      validateEvmDemoConfig();
+
       // 2. Inizializzazione connessioni blockchain
       logger.info('🔗 Inizializzazione connessioni blockchain...');
       await this.initializeBlockchainConnections();
@@ -93,7 +98,14 @@ class ArbitrageBot {
    * Inizializza connessioni blockchain
    */
   async initializeBlockchainConnections() {
-    // Le connessioni RPC sono già inizializzate nel costruttore
+    // EVM-01: prima il commento diceva "le connessioni RPC sono già inizializzate
+    // nel costruttore" — vero solo con DEMO_EVM_ENABLED=true, quindi lanciando la
+    // CLI con la flag spenta questo metodo raccontava provider che non esistevano.
+    // Ora l'inizializzazione è esplicita qui, che è l'unico punto in cui la demo
+    // parte davvero.
+    await blockchainConnection.initializeProviders();
+    blockchainConnection.initializeWallet();
+
     const status = blockchainConnection.getConnectionStatus();
     
     logger.info('✅ Provider blockchain inizializzati', {

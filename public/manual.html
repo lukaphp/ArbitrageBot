@@ -435,7 +435,7 @@
     <nav class="sidebar" aria-label="Sommario della guida">
         <div class="sidebar-brand">
             <h2>🤖 ArbitrageBot</h2>
-            <span>v2.6</span>
+            <span>v2.7</span>
         </div>
 
         <div class="search-box">
@@ -513,7 +513,7 @@
                 <div class="alert alert-info">
                     <span class="alert-icon">ℹ️</span>
                     <div>
-                        <strong>Sul modulo "Arbitrage".</strong> La seconda vista dell'app è una <em>demo educativa a prezzi simulati</em>, non arbitraggio reale. È disattivata di default (<code>DEMO_EVM_ENABLED=false</code>) e va tenuta spenta in produzione. Il prodotto operativo è <strong>solo Perps</strong>.
+                        <strong>Il modulo "Arbitrage" non esiste più.</strong> Fino allo Sprint 2 l'app aveva una seconda vista con una demo educativa di arbitraggio EVM a prezzi simulati. È stata <strong>ritirata</strong>: condivideva pulsante e stato di connessione wallet con Perps, e questo ha già rotto due volte la connessione MetaMask di Perps, che con l'arbitraggio EVM non ha nulla a che fare. L'unico prodotto operativo è <strong>Perps su Hyperliquid</strong>.
                     </div>
                 </div>
             </div>
@@ -540,9 +540,9 @@
                     </thead>
                     <tbody>
                         <tr>
-                            <td><span class="btn-demo btn-demo-primary">🦊 Connetti MetaMask</span></td>
+                            <td><span class="ui-element">🦊 MetaMask</span> <span class="muted">(pill in alto a destra)</span></td>
                             <td>Connessione wallet master</td>
-                            <td>Identifica il wallet titolare dei fondi. <strong>Su mainnet è obbligatoria</strong>: senza wallet connesso le operazioni sono bloccate.</td>
+                            <td>Identifica il wallet titolare dei fondi. <strong>Si clicca il pill "MetaMask" nell'intestazione</strong>: un click connette, un secondo click dimentica l'indirizzo. Quando è connesso mostra l'indirizzo abbreviato. <strong>Su mainnet la connessione è obbligatoria</strong>: senza wallet le operazioni sono bloccate.</td>
                         </tr>
                         <tr>
                             <td><span class="ui-element">⚡ Abilita Trading Autonomo</span></td>
@@ -612,6 +612,10 @@
                         <tr>
                             <td><span class="ui-element">ALERTS BADGE</span></td>
                             <td>Contatore in tempo reale delle avvertenze di rischio (margine elevato, perdita giornaliera, feed disconnessi). Cliccandolo si passa al tab Risk.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">BADGE DI RETE</span></td>
+                            <td>Accanto al titolo dell'app: dice su quale rete Hyperliquid il server sta operando — grigio <code>TESTNET</code> (fondi simulati) oppure rosso <code>MAINNET · FONDI REALI</code>. Rispecchia la rete <strong>effettiva</strong>, non la configurazione desiderata: titolo della tab, badge e avvertenza nel footer cambiano insieme.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -831,7 +835,7 @@
                     </div>
                 </div>
 
-                <p style="margin:14px 0 0"><strong>Da fuori dall'interfaccia.</strong> L'attivazione è disponibile via API <code>POST /api/perps/killswitch</code>, la disattivazione via <code>POST /api/agents/killswitch</code> con body <code>{"on": false}</code>. Entrambe richiedono una <strong>sessione autenticata</strong> (cookie di login): non sono chiamabili da uno script esterno senza prima fare login. <strong>Da Telegram il kill-switch non è raggiungibile</strong>, né per attivarlo né per spegnerlo: <code>/chiuditutto</code> chiude le posizioni aperte ma non tocca il kill-switch e non ferma i bot.</p>
+                <p style="margin:14px 0 0"><strong>Da fuori dall'interfaccia.</strong> L'attivazione è disponibile via API <code>POST /api/perps/killswitch</code>, la disattivazione via <code>POST /api/agents/killswitch</code> con body <code>{"on": false}</code>. Entrambe richiedono una <strong>sessione autenticata</strong> (cookie di login): non sono chiamabili da uno script esterno senza prima fare login. <strong>Da Telegram</strong> il kill-switch si comanda con <code>/killswitch on|off</code>, con lo stesso comportamento del pannello: <code>on</code> ferma i bot senza chiudere le posizioni, <code>off</code> sblocca le aperture senza riavviare i bot. Risponde solo il chat id configurato.</p>
             </div>
         </section>
 
@@ -1140,9 +1144,59 @@
                 <ul>
                     <li><strong>Categorizzazione</strong> per esito e tipo;</li>
                     <li><strong>Riciclo</strong>: recupera una strategia archiviata e la ripropone come candidata, senza doverla riscrivere;</li>
-                    <li><strong>Eliminazione in blocco</strong> per fare pulizia.</li>
+                    <li><strong>Eliminazione in blocco</strong> per fare pulizia;</li>
+                    <li><strong>Esportazione e importazione</strong> su file JSON.</li>
                 </ul>
                 <p style="margin-bottom:0">È la memoria di lungo periodo del sistema: serve a non ri-testare per la terza volta una strategia che era già stata scartata.</p>
+            </div>
+
+            <div class="card">
+                <h3>Esportare e importare strategie</h3>
+
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Comando</th>
+                            <th>Dove</th>
+                            <th>Cosa fa</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="ui-element">📤</span></td>
+                            <td>Su ogni riga dello storico</td>
+                            <td>Scarica quella singola strategia come file JSON.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-outline">📤 Esporta selezionate</span></td>
+                            <td>Barra dei comandi</td>
+                            <td>Scarica in un unico file tutte le strategie spuntate.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="btn-demo btn-demo-outline">📥 Importa da file</span></td>
+                            <td>Barra dei comandi</td>
+                            <td>Carica un file JSON esportato in precedenza.</td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+
+                <p>Il file esportato contiene la <strong>configurazione completa</strong> della strategia (regole d'ingresso e uscita, leva, sizing, TP/SL — lo stesso blob che un bot usa come configurazione) più i metadati che dicono da dove arriva: mercato, esito, motivazione, modello AI e costo di elaborazione. L'identificativo interno del database <strong>non</strong> viene esportato: non significa nulla su un'altra installazione.</p>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">🛡️</span>
+                    <div>
+                        <strong>Lo schema viene verificato prima di scrivere.</strong> Un file che non è un export di ArbitrageBot, o di una versione di formato più recente, o con una strategia priva di regole d'ingresso, viene <strong>rifiutato per intero</strong> con la ragione: non esiste l'importazione a metà. È deliberato — una strategia senza regole d'ingresso è sintatticamente valida ma darebbe un bot che non aprirebbe mai una posizione.
+                    </div>
+                </div>
+
+                <div class="alert alert-warning">
+                    <span class="alert-icon">⚠️</span>
+                    <div>
+                        <strong>L'esportazione non è un backup.</strong> Copre le strategie dello storico, non posizioni, trade, impostazioni o chiavi agent cifrate. Per quelli serve <code>scripts/backup.sh</code>, descritto in <code>docs/DEPLOY.md</code> §5.
+                    </div>
+                </div>
             </div>
         </section>
 
@@ -1191,12 +1245,16 @@
                         <tr><td><code>/bot</code>, <code>/bots</code></td><td>Elenco dei bot configurati e loro stato.</td></tr>
                         <tr><td><code>/avvia &lt;bot&gt;</code></td><td>Avvia un bot.</td></tr>
                         <tr><td><code>/ferma &lt;bot&gt;</code></td><td>Ferma un bot.</td></tr>
-                        <tr><td><code>/chiuditutto</code></td><td>Chiude a mercato tutte le posizioni aperte. <strong>Non è il kill-switch</strong>: non ferma i bot e non blocca le nuove aperture — quello si fa dal pannello Risk.</td></tr>
+                        <tr><td><code>/chiuditutto</code></td><td>Chiude a mercato tutte le posizioni aperte. <strong>Non è il kill-switch</strong>: non ferma i bot e non blocca le nuove aperture — per quello c'è <code>/killswitch on</code>.</td></tr>
+                        <tr><td><code>/killswitch</code></td><td>Mostra se il kill-switch è attivo o spento. Non cambia nulla.</td></tr>
+                        <tr><td><code>/killswitch on</code></td><td>Attiva il kill-switch: ferma i bot in esecuzione e blocca ogni nuova apertura. <strong>Non chiude le posizioni aperte</strong> — per quello serve <code>/chiuditutto</code>, che resta un'azione separata.</td></tr>
+                        <tr><td><code>/killswitch off</code></td><td>Rimuove il blocco sulle aperture. <strong>I bot fermati non ripartono da soli</strong>: vanno riavviati con <code>/avvia &lt;bot&gt;</code> o dalla tab System, esattamente come dal pannello web.</td></tr>
                         <tr><td><code>/proposte</code></td><td>Elenca le proposte dell'Analyst AI in attesa.</td></tr>
                         <tr><td><code>/approva &lt;id&gt;</code></td><td>Approva una proposta.</td></tr>
                         <tr><td><code>/rifiuta &lt;id&gt;</code></td><td>Rifiuta una proposta.</td></tr>
                     </tbody>
                 </table>
+                <p style="margin:14px 0 0"><strong>⚠️ Chi può eseguire questi comandi.</strong> Il bot risponde <strong>solo</strong> al chat id configurato: ogni messaggio proveniente da un'altra chat viene scartato e registrato nei log, senza nemmeno una risposta. È il motivo per cui <code>/killswitch off</code> — che <em>sblocca</em> le aperture — può stare in chat: l'allowlist è un singolo chat id, quello stesso a cui arrivano le notifiche. Se condividi quella chat (o un gruppo) con altre persone, stai condividendo anche il comando che riattiva le aperture. Un argomento non riconosciuto (es. <code>/killswitch of</code>) non cambia nulla e mostra l'uso, così un errore di battitura non sblocca il bot per sbaglio.</p>
                 </div>
             </div>
         </section>
@@ -1259,8 +1317,8 @@
 
             <div class="card">
                 <div class="faq-item">
-                    <h4>Perché vedo ancora "Connetti MetaMask"?</h4>
-                    <p>Il wallet non è collegato. Clicca <span class="btn-demo btn-demo-primary">🦊 Connetti MetaMask</span> in alto a destra. Su mainnet la connessione è obbligatoria per operare.</p>
+                    <h4>Dov'è il pulsante per collegare MetaMask?</h4>
+                    <p>È il pill <span class="ui-element">🦊 MetaMask</span> in alto a destra, accanto a quello del server: clicca lì. Finché è rosso il wallet non è collegato; quando è connesso diventa verde e mostra l'indirizzo abbreviato. Un secondo click lo scollega dall'interfaccia. Su mainnet la connessione è obbligatoria per operare.</p>
                 </div>
 
                 <div class="faq-item">
@@ -1302,7 +1360,7 @@
 
         <footer class="doc-footer">
             <div>🤖 <strong>ArbitrageBot Platform</strong> — Manuale Utente · versione testuale in <code>docs/MANUAL.md</code></div>
-            <div>Aggiornato: 7 agosto 2026 · Versione 2.6</div>
+            <div>Aggiornato: 10 agosto 2026 · Versione 2.7</div>
         </footer>
 
     </main>

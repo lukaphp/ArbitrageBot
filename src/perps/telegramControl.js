@@ -10,8 +10,13 @@
  * import: qui importiamo botManager + client. Avviato da server.js dopo il load
  * dei bot, e (ri)avviato quando la configurazione Telegram cambia.
  *
- * 🔒 SICUREZZA: risponde SOLO al chatId configurato. I comandi distruttivi
- * (chiusura posizioni) confermano l'esito via messaggio.
+ * 🔒 SICUREZZA: risponde SOLO al chatId configurato — l'allowlist è un singolo
+ * chat id (quello delle notifiche), verificata in `_dispatchUpdate` prima di
+ * qualunque dispatch; i messaggi da altre chat vengono scartati e loggati, senza
+ * nemmeno una risposta (chi scrive non deve sapere che il bot esiste). È il
+ * prerequisito di TG-01: `/killswitch off` SBLOCCA le aperture, quindi senza
+ * questo controllo sarebbe un interruttore in mano a chiunque scriva al bot.
+ * I comandi distruttivi (chiusura posizioni) confermano l'esito via messaggio.
  */
 
 import axios from 'axios';
@@ -19,6 +24,7 @@ import botManager from './botManager.js';
 import client from './hyperliquidClient.js';
 import notifier from './notifier.js';
 import proposals from '../agents/proposals.js';
+import riskAgent from '../agents/riskAgent.js';
 import logger from '../utils/logger.js';
 
 const HELP = [
@@ -30,6 +36,9 @@ const HELP = [
   '/avvia &lt;id|nome&gt; — avvia un bot',
   '/ferma &lt;id|nome&gt; — ferma un bot',
   '/chiuditutto — chiude tutte le posizioni aperte',
+  '/killswitch — stato del kill-switch',
+  '/killswitch on — ferma i bot e blocca ogni nuova apertura',
+  '/killswitch off — sblocca le aperture (i bot fermati NON ripartono)',
   '/proposte — proposte AI in attesa',
   '/approva &lt;id&gt; — approva una proposta AI',
   '/rifiuta &lt;id&gt; — rifiuta una proposta AI',
@@ -89,14 +98,7 @@ class TelegramControl {
           signal: this._aborter.signal
         });
         for (const upd of res.data.result || []) {
-          this.offset = upd.update_id + 1;
-          const msg = upd.message;
-          if (!msg || !msg.text) continue;
-          if (String(msg.chat.id) !== this.chatId) {
-            logger.warn('Telegram: comando da chat non autorizzata ignorato', { chat: msg.chat.id });
-            continue;
-          }
-          await this._handle(msg.text.trim());
+          await this._dispatchUpdate(upd);
         }
       } catch (e) {
         if (!this.running) break;
@@ -106,6 +108,27 @@ class TelegramControl {
         await new Promise(r => setTimeout(r, 5000));
       }
     }
+  }
+
+  /**
+   * Avanza l'offset e smista UN update, applicando l'allowlist.
+   *
+   * Estratto dal loop di polling per essere esercitabile in test senza HTTP:
+   * l'autorizzazione è la parte che non può essere verificata "a occhio" da
+   * quando esiste `/killswitch off` (TG-01), che sblocca le aperture.
+   * Un messaggio da una chat non autorizzata è scartato e loggato, e NON riceve
+   * risposta; l'offset avanza comunque, altrimenti lo stesso update verrebbe
+   * riproposto a ogni giro di polling.
+   */
+  async _dispatchUpdate(upd) {
+    this.offset = upd.update_id + 1;
+    const msg = upd.message;
+    if (!msg || !msg.text) return;
+    if (String(msg.chat?.id) !== this.chatId) {
+      logger.warn('Telegram: comando da chat non autorizzata ignorato', { chat: msg.chat?.id });
+      return;
+    }
+    return this._handle(msg.text.trim());
   }
 
   async _send(text) {
@@ -147,6 +170,8 @@ class TelegramControl {
           return this._cmdToggleBot(arg, false);
         case '/chiuditutto':
           return this._cmdCloseAll();
+        case '/killswitch':
+          return this._cmdKillSwitch(arg);
         case '/proposte':
           return this._cmdProposals();
         case '/approva':
@@ -232,6 +257,69 @@ class TelegramControl {
     }
     const r = proposals.reject(p.id);
     return this._send(r.ok ? `🚫 Proposta rifiutata` : `⚠️ ${r.reason}`);
+  }
+
+  /**
+   * TG-01 — kill-switch da Telegram: `/killswitch`, `/killswitch on|off`.
+   *
+   * Simmetrico ai due controlli web, e con le STESSE due asimmetrie volute:
+   *  - `on` (come `POST /api/perps/killswitch`): alza il flag persistito e ferma
+   *    i bot in esecuzione, ma NON chiude le posizioni — per quello c'è
+   *    `/chiuditutto`, che resta un'azione separata e dichiarata;
+   *  - `off` (come `POST /api/agents/killswitch {on:false}`): rimuove SOLO il
+   *    blocco sulle aperture. I bot fermati NON ripartono, e la risposta lo dice
+   *    esplicitamente invece di lasciar credere il contrario (stesso vincolo di
+   *    UI-01): dopo un arresto d'emergenza si riprende a operare
+   *    deliberatamente, non per effetto collaterale di un comando.
+   *
+   * Senza argomento è una lettura di stato: un comando che *sblocca* le aperture
+   * non deve poter partire per errore di battitura, quindi qualunque argomento
+   * non riconosciuto mostra l'uso e non cambia nulla.
+   */
+  async _cmdKillSwitch(arg) {
+    const mode = (arg || '').trim().toLowerCase();
+    const isOn = riskAgent.isKillSwitchOn();
+    const stateLine = `Stato attuale: ${isOn ? '🛑 <b>ATTIVO</b> (aperture bloccate)' : '✅ spento (aperture consentite)'}`;
+
+    if (!mode) {
+      return this._send([`🛑 <b>Kill-switch</b>`, stateLine, '', 'Usa /killswitch on oppure /killswitch off.'].join('\n'));
+    }
+    if (mode !== 'on' && mode !== 'off') {
+      return this._send([`⚠️ Argomento "${arg}" non valido.`, stateLine, '', 'Usa /killswitch on oppure /killswitch off.'].join('\n'));
+    }
+
+    if (mode === 'on') {
+      if (isOn) return this._send(`🛑 Il kill-switch è <b>già attivo</b>. Le nuove aperture restano bloccate.`);
+      riskAgent.setKillSwitch(true);
+      // Ferma i bot in esecuzione, come fa il pulsante del pannello Risk.
+      const running = botManager.listStates().filter(s => s.status === 'running');
+      const stopped = [];
+      for (const s of running) {
+        try { botManager.stopBot(s.id); stopped.push(s.name); }
+        catch (e) { logger.error(`Telegram /killswitch on: stop del bot ${s.name} fallito`, e.message); }
+      }
+      const failed = running.length - stopped.length;
+      logger.warn(`🛑 Kill-switch attivato da Telegram: ${stopped.length}/${running.length} bot fermati`);
+      // Notifica anche sul canale principale: un kill-switch non è un'azione
+      // "privata" di chi l'ha digitata, deve risultare nello storico delle notifiche.
+      notifier.notify(`🛑 <b>KILL-SWITCH</b> attivato da Telegram: ${stopped.length} bot fermati, nuove aperture bloccate.`);
+      return this._send([
+        '🛑 <b>Kill-switch ATTIVATO</b>',
+        `Bot fermati: ${stopped.length}${stopped.length ? ` (${stopped.join(', ')})` : ''}`,
+        failed ? `⚠️ Non fermati: ${failed} — verifica dal pannello.` : null,
+        'Le nuove aperture sono bloccate. Le posizioni aperte NON sono state chiuse: usa /chiuditutto se vuoi chiuderle.'
+      ].filter(Boolean).join('\n'));
+    }
+
+    if (!isOn) return this._send('✅ Il kill-switch è <b>già spento</b>. Le aperture sono consentite.');
+    riskAgent.setKillSwitch(false);
+    logger.warn('✅ Kill-switch disattivato da Telegram: aperture di nuovo consentite');
+    notifier.notify('✅ <b>Kill-switch disattivato</b> da Telegram: nuove aperture di nuovo consentite. I bot fermati non sono stati riavviati.');
+    return this._send([
+      '✅ <b>Kill-switch disattivato</b>',
+      'Le nuove aperture sono di nuovo consentite.',
+      'I bot fermati <b>non</b> ripartono da soli: riavviali con /avvia &lt;id|nome&gt; (o dalla tab System).'
+    ].join('\n'));
   }
 
   async _cmdCloseAll() {

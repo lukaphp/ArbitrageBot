@@ -1,12 +1,17 @@
 # Deploy di produzione: app (Node) + Caddy (reverse proxy HTTPS).
 # L'app NON è esposta all'host: solo Caddy pubblica 80/443. L'app è raggiungibile
 # solo sulla rete interna Docker. SQLite persiste su un volume nominato.
+#
+# Segreti via Infisical (cloud o self-hosted), non .env in chiaro: .infisical-bootstrap.env
+# contiene solo le 1-4 variabili di bootstrap (INFISICAL_TOKEN e affini, vedi DEPLOY.md §9),
+# mai i segreti applicativi veri. Lo legge scripts/docker-entrypoint.sh, non l'app
+# direttamente. File creato a mano sul VPS, root-only (0600), mai committato.
 
 services:
   app:
     build: .
     restart: unless-stopped
-    env_file: .env
+    env_file: .infisical-bootstrap.env
     environment:
       - NODE_ENV=production
       - BIND_HOST=0.0.0.0       # raggiungibile da Caddy sulla rete interna

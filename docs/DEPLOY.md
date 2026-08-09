@@ -38,7 +38,11 @@ persistente** → VPS o container. Il vecchio `vercel.json` non va usato per l'a
 ## 1. Provisioning del VPS
 
 - Provider consigliato: **Hetzner CX22** (~4€/mese) o DigitalOcean (1 vCPU/2GB bastano).
-- SO: Debian 12 / Ubuntu 22.04.
+- SO: **Debian 13** (consigliata, supporto più lungo) · Debian 12 · Ubuntu 22.04. Il repository
+  apt ufficiale di Docker supporta tutti e tre i codename (`trixie`, `bookworm`, `bullseye`); lo
+  script d'installazione sotto li gestisce automaticamente. Nota per Debian 13: preferisce il
+  formato `deb822` (`.sources`) per i repository apt — lo script ufficiale `get.docker.com` lo
+  usa già correttamente, serve attenzione solo se configuri il repository a mano.
 - Accesso **solo a chiave SSH** (niente password). Crea un utente non-root:
 
 ```bash

@@ -1,7 +1,34 @@
 {
-  "producedBy": "roger",
-  "updatedAt": null,
+  "producedBy": "claude",
+  "updatedAt": "2026-08-10T00:00:00Z",
   "sprint": "Sprint 3",
-  "note": "Placeholder — popolato da Roger dopo l'esecuzione dei task, come per lo Sprint 2.",
-  "tasks": []
+  "reviewedAt": "2026-08-10",
+  "disclaimer": "Aggregato prodotto direttamente da Claude in sessione di review col PO (non da Roger, questo giro) — sintesi dei file per-agente più le due scoperte corrette in review stessa (SEC-09, SEC-10).",
+  "statusCounts": { "done": 13, "pending_po_action": 2 },
+  "sprintSpCompleted": 22,
+  "sprintSpPendingHuman": 3,
+  "tasks": [
+    { "id": "SEC-08", "title": "_reconcile() duplica posizione, ordini orfani", "owner": "bruno", "sp": 3, "status": "done", "note": "Fix + pulizia live eseguita (ordine orfano cancellato, riga duplicata rimossa dal DB) durante la review, 10 agosto." },
+    { "id": "SEC-09", "title": "ALLOW_MAINNET non verificata a runtime", "owner": "claude", "sp": 1, "status": "done", "note": "Scoperta da Maya durante EVM-01, corretta in review su decisione del PO." },
+    { "id": "SEC-10", "title": "Notifica cooldown a raffica", "owner": "claude", "sp": 1, "status": "done", "note": "Incidente reale del 9 agosto (l'utente ha dovuto chiudere tutte le posizioni). Corretto e testato prima della review." },
+    { "id": "SEC-07", "title": "secretBox fail-fast", "owner": "joshua", "sp": 2, "status": "done" },
+    { "id": "EVM-01", "title": "Ritiro demo EVM legacy", "owner": ["maya", "joshua"], "sp": 3, "status": "done", "note": "Firma reale MetaMask sul VPS non ancora provata a mano — unica verifica non automatizzabile." },
+    { "id": "OPS-02", "title": "Verifica backup/restore VPS", "owner": "po", "sp": 1, "status": "pending_po_action", "notDelegatedToAgent": true },
+    { "id": "TG-01", "title": "Comando Telegram kill-switch", "owner": "bruno", "sp": 2, "status": "done" },
+    { "id": "LINT-01", "title": "Lint copre public/*.js", "owner": "joshua", "sp": 1, "status": "done" },
+    { "id": "OPS-03", "title": "Monitoraggio esterno", "owner": "po", "sp": 2, "status": "pending_po_action", "notDelegatedToAgent": true },
+    { "id": "STRAT-01", "title": "Export/import strategie", "owner": ["bruno", "maya"], "sp": 3, "status": "done" },
+    { "id": "COST-01", "title": "Ottimizzazione costi Claude", "owner": "bruno", "sp": 2, "status": "done", "note": "-33% di spesa stimata con gate di cadenza adattiva, verificato con replay dello storico reale." },
+    { "id": "SPIKE-01", "title": "Spike consulente AI", "owner": "joshua", "sp": 3, "status": "done", "note": "Documento di analisi, nessun codice di produzione. Stima Sprint 4: 13 SP in 4 fasi." },
+    { "id": "BRAND-01", "title": "Branding stantio", "owner": "maya", "sp": 1, "status": "done" }
+  ],
+  "refinementCandidates": [
+    "botManager.updateBot() sostituisce l'istanza PerpsBot senza attendere il tick in volo — meccanismo concreto dietro la race di SEC-08, reso innocuo ma non eliminato. (Bruno)",
+    "Asimmetria di notifica del kill-switch: risolta per Telegram (TG-01), il percorso WEB di disattivazione continua a non notificare. (Bruno)",
+    "Nessun percorso ricompone i TP in eccesso su una posizione già tracciata, solo gli SL (sweep aggiunto in SEC-08). (Bruno)",
+    "rotate-encryption-key.js termina con uno stack trace non catturato invece di un messaggio pulito, dopo SEC-07. (Joshua)",
+    "actions/checkout e actions/setup-node in CI su tag mobili, non SHA — stesso vettore chiuso per harden-runner in SEC-03. (Joshua, residuo da Sprint 2)",
+    "secretBox.js: rotate-encryption-key.js confronta solo l'id della chiave, non il materiale. (residuo Sprint 2, Annie)",
+    "check-secrets.js: solo 3 variabili su 12 esercitate dai test. (residuo Sprint 2, Annie)"
+  ]
 }

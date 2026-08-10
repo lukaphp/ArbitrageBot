@@ -509,9 +509,78 @@ qui il buco è nell'adozione di posizioni "non tracciate", non nel DCA.
 | **Origine** | Claude, deploy 9 agosto — vedi §0.9 |
 
 **Criteri di accettazione**
-- [ ] Titolo pagina e badge riflettono la rete reale (`HYPERLIQUID_NETWORK`/`ALLOW_MAINNET`), non un
+- [x] Titolo pagina e badge riflettono la rete reale (`HYPERLIQUID_NETWORK`/`ALLOW_MAINNET`), non un
       "TESTNET ONLY" fisso.
-- [ ] Nessuna affermazione falsa quando l'app gira in mainnet.
+- [x] Nessuna affermazione falsa quando l'app gira in mainnet.
+
+**Approvato dal PO** il 10 agosto, badge rosso "MAINNET · FONDI REALI" confermato (deviazione
+dall'esempio verde del planning, per coerenza con l'enfasi su ciò che può costare denaro).
+
+---
+
+### 🔴 SEC-09 · `POST /api/perps/network` non verifica `ALLOW_MAINNET` lato server
+
+| | |
+|:---|:---|
+| **Tipo** | 🔒 security |
+| **Story Point** | **1** |
+| **Priorità** | P0 |
+| **Owner** | Claude (fix diretto in review, 10 agosto) |
+| **File** | `src/config/config.js` (`isMainnetAllowed`, nuovo), `src/server.js` |
+| **Origine** | Maya, durante EVM-01 — aggiunta il 10 agosto su decisione del PO in review, stesso trattamento di SEC-08 |
+
+**Descrizione.** `validateConfig()` blocca l'avvio se la rete di *default* è mainnet senza
+`ALLOW_MAINNET=true` — ma lo switch a **runtime** dal pannello (`POST /api/perps/network`)
+verificava solo un flag `confirm` che il client si autoassegna dopo un dialogo di conferma nel
+browser. Su un deploy con `ALLOW_MAINNET` assente (quindi dichiaratamente "solo testnet"), bastava
+cliccare "Mainnet" e confermare il dialogo per passarci comunque — nessun gate lato server.
+
+**Fix.** Nuova `isMainnetAllowed()` in `config.js`, unica fonte di verità, usata sia da
+`validateConfig()` (refactored per non duplicare il controllo) sia dalla rotta, che ora rifiuta con
+403 lo switch a mainnet se il flag non è `"true"`.
+
+**Criteri di accettazione**
+- [x] `POST /api/perps/network` rifiuta lo switch a mainnet se `ALLOW_MAINNET !== 'true'`, a
+      prescindere dal dialogo di conferma lato client.
+- [x] Stessa logica di `validateConfig()`, non una copia — un solo punto da mantenere.
+- [x] Test dedicato (`test/mainnetGate.test.js`, 3 casi: assente, valore non esatto, `"true"` esatto).
+- [x] `npm test` (197/197) e `npm run lint` verdi, nessuna regressione.
+
+**Approvato dal PO** il 10 agosto.
+
+---
+
+### 🔴 SEC-10 · Notifica di cooldown a raffica, una per tick invece che per episodio
+
+| | |
+|:---|:---|
+| **Tipo** | 🐛 bug — operativo, ha causato un incidente reale |
+| **Story Point** | **1** |
+| **Priorità** | P0 |
+| **Owner** | Claude (fix diretto, 9-10 agosto) |
+| **File** | `src/perps/portfolio.js`, `src/perps/bot.js` |
+| **Origine** | PO — incidente reale il pomeriggio del 9 agosto |
+
+**Descrizione.** Dopo 3 perdite consecutive, `portfolio.js` apre un cooldown di 60 minuti per quel
+bot. `canOpen()` ritornava lo stesso messaggio "In cooldown fino alle…" a **ogni** tick bloccato —
+senza alcun filtro, `bot.js` lo notificava via Telegram ogni volta. Con un tick ogni 10s e un
+cooldown di un'ora, fino a **360 notifiche identiche**: il PO ha dovuto chiudere tutte le posizioni
+solo per fermare il flusso, un pomeriggio di questo sprint.
+
+**Fix.** `canOpen()` espone ora anche `cooldownUntil` (il timestamp grezzo, non solo la stringa
+formattata). `bot.js` lo confronta con l'ultimo episodio già notificato: una notifica per episodio,
+non per tick — stesso principio già applicato al watchdog WS (WS-01, Sprint 2).
+
+**Criteri di accettazione**
+- [x] Una sola notifica per episodio di cooldown, verificato con 5 tick consecutivi sullo stesso
+      episodio → 1 notifica.
+- [x] Un nuovo episodio (nuove 3 perdite consecutive) notifica di nuovo normalmente.
+- [x] Test dedicato (`test/portfolioCooldownNotify.test.js`, 2 casi), verificato che fallisca senza
+      il fix.
+- [x] `npm test`/`npm run lint` verdi, nessuna regressione.
+
+**Approvato dal PO** il 10 agosto — priorità massima per essere stato l'incidente che ha aperto la
+review.
 
 ---
 
@@ -628,20 +697,22 @@ qui il buco è nell'adozione di posizioni "non tracciate", non nel DCA.
 
 ### 3.1 Story point e ordine di esecuzione
 
-| ID | Titolo | Owner | SP | Priorità |
-|:---|:---|:---|:--:|:---:|
-| SEC-08 | `_reconcile()` duplica posizione, ordini orfani | Bruno | 3 | P0 |
-| SEC-07 | secretBox fail-fast | Joshua | 2 | P0 |
-| EVM-01 | Ritiro demo EVM legacy | Maya + Joshua | 3 | P0 |
-| OPS-02 | Verifica backup/restore VPS | PO/Claude | 1 | P0 |
-| TG-01 | Comando Telegram kill-switch | Bruno | 2 | P1 |
-| LINT-01 | Lint copre `public/*.js` | Joshua | 1 | P1 |
-| OPS-03 | Monitoraggio esterno | PO/Claude | 2 | P1 |
-| STRAT-01 | Export/import strategie | Bruno + Maya | 3 | P2 |
-| COST-01 | Ottimizzazione costi Claude | Bruno | 2 | P2 |
-| SPIKE-01 | Spike consulente AI | Joshua | 3 | P2 |
-| BRAND-01 | Branding stantio | Maya | 1 | P2 |
-| | **Totale** | | **23** | |
+| ID | Titolo | Owner | SP | Priorità | Stato |
+|:---|:---|:---|:--:|:---:|:---|
+| SEC-08 | `_reconcile()` duplica posizione, ordini orfani | Bruno | 3 | P0 | ✅ Fatto — pulizia live eseguita |
+| SEC-09 | `ALLOW_MAINNET` non verificata a runtime | Claude | 1 | P0 | ✅ Fatto |
+| SEC-10 | Notifica cooldown a raffica | Claude | 1 | P0 | ✅ Fatto |
+| SEC-07 | secretBox fail-fast | Joshua | 2 | P0 | ✅ Fatto |
+| EVM-01 | Ritiro demo EVM legacy | Maya + Joshua | 3 | P0 | ✅ Fatto — firma reale MetaMask da provare a mano |
+| OPS-02 | Verifica backup/restore VPS | PO/Claude | 1 | P0 | ⏳ Non ancora eseguito |
+| TG-01 | Comando Telegram kill-switch | Bruno | 2 | P1 | ✅ Fatto |
+| LINT-01 | Lint copre `public/*.js` | Joshua | 1 | P1 | ✅ Fatto |
+| OPS-03 | Monitoraggio esterno | PO/Claude | 2 | P1 | ⏳ Non ancora eseguito |
+| STRAT-01 | Export/import strategie | Bruno + Maya | 3 | P2 | ✅ Fatto |
+| COST-01 | Ottimizzazione costi Claude | Bruno | 2 | P2 | ✅ Fatto |
+| SPIKE-01 | Spike consulente AI | Joshua | 3 | P2 | ✅ Fatto (analisi) |
+| BRAND-01 | Branding stantio | Maya | 1 | P2 | ✅ Fatto |
+| | **Totale** | | **25** | | **22/25 SP fatti, 3 in attesa (OPS-02/03)** |
 
 **Sequenza consigliata:** SEC-08 per primo (capitale a rischio, priorità sopra tutto), poi SEC-07 e
 OPS-02 (rischio operativo reale su un sistema già live) → EVM-01 (sblocca terreno pulito su

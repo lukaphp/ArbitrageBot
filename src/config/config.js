@@ -267,6 +267,17 @@ export const API_CONFIG = {
 let secretManagerWarningShown = false;
 
 /**
+ * Unico punto di verità per "mainnet è consentita su questo deploy". Usata sia
+ * da validateConfig() (blocca l'avvio se la rete di DEFAULT è mainnet senza il
+ * flag) sia da POST /api/perps/network (bloccava solo con un dialogo di
+ * conferma lato browser, mai lato server — lo switch a runtime restava aperto
+ * anche con ALLOW_MAINNET assente: scoperto durante EVM-01, non ipotizzato).
+ */
+export function isMainnetAllowed() {
+  return process.env.ALLOW_MAINNET === 'true';
+}
+
+/**
  * Validazione configurazione critica
  */
 export function validateConfig() {
@@ -312,10 +323,10 @@ export function validateConfig() {
   }
 
   // --- Guard mainnet Hyperliquid: conferma esplicita per denaro reale ---
-  if (hlNetwork === 'mainnet' && process.env.ALLOW_MAINNET !== 'true') {
+  if (hlNetwork === 'mainnet' && !isMainnetAllowed()) {
     errors.push('Hyperliquid MAINNET richiede ALLOW_MAINNET=true (conferma esplicita per operare con denaro reale).');
   }
-  if (hlNetwork === 'mainnet' && process.env.ALLOW_MAINNET === 'true') {
+  if (hlNetwork === 'mainnet' && isMainnetAllowed()) {
     console.warn('\n🔴🔴🔴 ATTENZIONE: Hyperliquid MAINNET ATTIVO — gli ordini useranno DENARO REALE 🔴🔴🔴\n');
   }
 

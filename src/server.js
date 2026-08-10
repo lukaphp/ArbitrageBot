@@ -28,7 +28,7 @@ import { ethers } from 'ethers';
 import crypto from 'crypto';
 
 // Importa moduli bot
-import config from './config/config.js';
+import config, { isMainnetAllowed } from './config/config.js';
 import logger from './utils/logger.js';
 
 // EVM-01: qui c'erano gli import della demo di arbitraggio EVM
@@ -293,6 +293,13 @@ class ArbitrageBotServer {
         const { network, confirm } = req.body;
         if (network === 'mainnet' && !confirm) {
           return res.status(400).json({ success: false, error: 'Conferma richiesta per passare a MAINNET (fondi reali)' });
+        }
+        // Stesso gate di validateConfig() per la rete di default all'avvio: qui
+        // mancava, quindi il flag decideva solo il boot mentre lo switch a
+        // runtime restava aperto — bastava confermare il dialogo del browser.
+        // Trovato durante EVM-01, non ipotizzato.
+        if (network === 'mainnet' && !isMainnetAllowed()) {
+          return res.status(403).json({ success: false, error: 'MAINNET disattivata su questo deploy (ALLOW_MAINNET non è "true"). Impostala nei segreti e riavvia per abilitarla.' });
         }
         hyperliquid.setNetwork(network);
         await marketData.refreshMarkets().catch(() => {});

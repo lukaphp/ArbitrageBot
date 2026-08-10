@@ -20,6 +20,12 @@ services:
     environment:
       - NODE_ENV=production
       - BIND_HOST=0.0.0.0       # raggiungibile da Caddy sulla rete interna
+      # Senza questa, il container risolve UTC (immagine base) e ogni orario
+      # formattato per l'utente (notifiche Telegram, "In cooldown fino alle…",
+      # date nella UI) esce sbagliato di 1-2 ore secondo la stagione — non è
+      # un problema di sincronizzazione (l'NTP dell'host è corretto), solo di
+      # fuso. Europe/Rome, non un offset fisso: gestisce da sola CET/CEST.
+      - TZ=Europe/Rome
     volumes:
       - perps-data:/app/data     # persistenza SQLite (bot, posizioni, chiavi agent cifrate)
     expose:

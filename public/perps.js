@@ -1740,7 +1740,20 @@ class PerpsApp {
     this._showModal('chartModal');
     setTimeout(() => this._renderChart(), 60); // attendi il layout del modal
     if (this.chartTimer) clearInterval(this.chartTimer);
-    this.chartTimer = setInterval(() => this._renderChart(true), 6000);
+    this.chartTimer = setInterval(() => {
+      // Il modale si può chiudere anche da sfondo o Escape (shell.js), che non
+      // passa da closeChart(): senza questo controllo il timer resta vivo
+      // all'infinito, continuando a interrogare /api/perps/candles ogni 6s
+      // anche a modale nascosto.
+      const modal = document.getElementById('chartModal');
+      if (!modal || !modal.classList.contains('show')) {
+        clearInterval(this.chartTimer);
+        this.chartTimer = null;
+        this._destroyChart();
+        return;
+      }
+      this._renderChart(true);
+    }, 6000);
   }
 
   closeChart() {
@@ -1859,6 +1872,12 @@ class PerpsApp {
       })).filter(c => !isNaN(c.close));
       if (!candles.length) return;
 
+      // setData() sostituisce tutto il dataset e, di suo, azzera lo zoom/pan
+      // impostato dall'utente. Sugli aggiornamenti periodici (isUpdate) lo
+      // salviamo prima e lo ripristiniamo dopo, così il grafico non "salta"
+      // da solo ogni 6 secondi mentre lo si sta guardando.
+      const savedRange = (isUpdate && this.chart) ? this.chart.timeScale().getVisibleLogicalRange() : null;
+
       if (!this.chart) {
         this.chart = LightweightCharts.createChart(container, {
           width: container.clientWidth, height: 420,
@@ -1928,6 +1947,7 @@ class PerpsApp {
       legend.push(`<span class="lg-ema">● EMA20</span>`);
       document.getElementById('chartLegend').innerHTML = legend.join(' ');
       if (!isUpdate) this.chart.timeScale().fitContent();
+      else if (savedRange) this.chart.timeScale().setVisibleLogicalRange(savedRange);
     } catch (e) {
       if (!isUpdate) this.toast('Errore caricamento grafico: ' + e.message, 'error');
     }

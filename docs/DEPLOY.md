@@ -197,6 +197,17 @@ AGENT_SKIP_IF_PENDING=1            # salta la run periodica se ci sono già N pr
 
 ```
 
+> ⚠️ **`APP_PASSWORD_HASH` non va messa in un file letto da `env_file:` di Docker
+> Compose.** Compose **interpola** i `$VAR` dentro i valori di un `env_file`, e un
+> hash scrypt ha la forma `scrypt$salt$hash`: le parti che iniziano con una lettera
+> vengono lette come nomi di variabile, non esistono, e sparisce quel pezzo. Il risultato è
+> un login che rifiuta la password **giusta** con "Password errata", senza alcun
+> errore nei log. Verificato con Compose v2.29.7 il 2026-08-10; `docker run
+> --env-file` invece non tocca il valore.
+> Il percorso documentato qui è al sicuro: `.env` viene letto da `dotenv` **dentro
+> il processo**, che non interpola. Se proprio devi passare l'hash via `env_file`,
+> raddoppia i dollari (`scrypt$$salt$$hash`), oppure — meglio — usa Infisical (§9).
+
 > **Modulo Arbitraggio EVM — ritirato dal server web** (EVM-01, Sprint 3). Era una *demo
 > educativa* a prezzi simulati (non arbitraggio reale) che si accendeva con
 > `DEMO_EVM_ENABLED=true`. Quella variabile non esiste più e impostarla non ha effetto: il
@@ -369,6 +380,9 @@ storage, o `restic`).
   curl -H "Authorization: Bearer $METRICS_TOKEN" https://.../metrics
   ```
 
+  Questo è il controllo a mano. Per il cruscotto vero (raccolta, grafici e alert,
+  spenti per default) vedi **§6.1**.
+
 - **Feed di mercato (WebSocket)**: `perps_ws_connected` deve stare a `1`. Se resta
   a `0` il bot non è fermo — lavora sul fallback REST, con prezzi validi ma meno
   freschi. Un watchdog verifica la connessione ogni `PERPS_WS_WATCHDOG_MS` e la
@@ -380,6 +394,97 @@ storage, o `restic`).
   `Hyperliquid WS …` in `logs/app.log`.
 
 - Log: `docker compose logs` (Docker) o `logs/app.log` (script di riavvio).
+
+### 6.1 Cruscotto Prometheus + Grafana (profilo `monitoring`)
+
+`/metrics` espone 14 famiglie di metriche, ma da sole sono solo testo: il profilo
+`monitoring` aggiunge chi le raccoglie (Prometheus) e chi le disegna (Grafana),
+con dashboard e regole di alert **provisionate da file nel repository**.
+
+**È spento per default.** Chi non lo attiva non ha alcun cambiamento: un
+`docker compose up -d` continua a portare su esattamente `app` + `caddy`.
+
+```bash
+docker compose --profile monitoring up -d      # accende anche prometheus + grafana
+docker compose --profile monitoring ps         # 4 servizi
+docker compose --profile monitoring down       # li spegne (i volumi restano)
+docker compose up -d                           # senza profilo: solo app + caddy
+```
+
+**Niente porte pubbliche nuove.** Come Caddy, entrambi pubblicano solo su
+loopback: Grafana su `127.0.0.1:3001`, Prometheus su `127.0.0.1:9090`. Tra loro
+si parlano per nome sulla rete Docker interna, e Prometheus interroga
+`app:3000/metrics` direttamente, senza passare da Caddy.
+
+**Accesso dalla tailnet** — stesso schema del pannello (§3, opzione A), con
+`tailscale serve` sull'host che termina HTTPS reale e inoltra al loopback:
+
+```bash
+sudo tailscale serve --bg --https=8443 127.0.0.1:3001
+tailscale serve status
+```
+
+Grafana diventa `https://<hostname>.<tuo-tailnet>.ts.net:8443`. Conviene allineare
+anche l'URL che Grafana usa nei propri link:
+
+```bash
+GRAFANA_ROOT_URL=https://<hostname>.<tuo-tailnet>.ts.net:8443 \
+  docker compose --profile monitoring up -d grafana
+```
+
+**Credenziali iniziali: `admin` / `admin`, da cambiare al primo accesso** —
+Grafana chiede il cambio da sé al primo login proprio perché la password è quella
+di default. Per impostarne una prima di partire (in quel caso Grafana *non* chiede
+il cambio, la password è già tua):
+
+```bash
+GRAFANA_ADMIN_PASSWORD='...' docker compose --profile monitoring up -d grafana
+```
+
+**Cosa si vede.** Un'unica dashboard, *ArbitrageBot Perps — operativo*, nella
+cartella `ArbitrageBot`: raccolta metriche attiva, WebSocket, posizioni aperte,
+bot in esecuzione, uptime, PnL giornaliero per bot, età dell'ultimo tick per bot,
+errori nell'ultimo intervallo, alert attivi. È **provisionata da file**
+(`deploy/monitoring/grafana/dashboards/arbitragebot-perps.json`): un salvataggio
+dal browser viene rifiutato con *"Cannot save provisioned dashboard"*. Si modifica
+il JSON nel repository e si riavvia il container; per esperimenti usa
+"Save as copy", che crea una dashboard separata.
+
+**Alert.** Cinque regole in `deploy/monitoring/alerts.yml`, valutate da Prometheus
+e visibili in Grafana (*Alerting → Alert rules*, sezione della datasource, in sola
+lettura) oltre che nel pannello "Alert attivi":
+
+| Regola | Condizione |
+|:---|:---|
+| `ArbitrageBotTargetDown` | metriche non raccolte da 2 min |
+| `PerpsWebSocketDown` | `perps_ws_connected == 0` da 2 min |
+| `PerpsBotTickStale` | bot **in esecuzione** che non ticca da >180s |
+| `PerpsApiErrorsSpike` | >10 errori API in 10 min, persistenti da 5 |
+| `PerpsTickErrorsSpike` | >5 errori di tick in 10 min, persistenti da 5 |
+
+> ⚠️ **Nessun inoltro esterno**: senza Alertmanager, un alert "firing" non manda
+> niente a nessuno — si vede solo aprendo Grafana. Non resta scoperto il caso
+> urgente, perché WS giù e bot fermo sono già notificati su Telegram dall'app
+> (§6). L'inoltro è un raffinamento previsto, non incluso.
+
+**Se i pannelli sono vuoti, guarda prima "Raccolta metriche".** Se è `DOWN`, il
+problema è la raccolta, non il bot. La causa più comune è `METRICS_TOKEN`
+impostato per l'app ma non disponibile a Prometheus: lo scrape prende 401.
+Prometheus legge il token dal proprio ambiente e lo scrive in un file di
+credenziali all'avvio, quindi al momento del `docker compose` la variabile deve
+essere visibile — con i segreti in Infisical:
+
+```bash
+infisical run -- docker compose --profile monitoring up -d
+curl -s localhost:9090/api/v1/targets | grep -o '"health":"[a-z]*"'   # atteso: up
+```
+
+**Ritenzione e spazio.** 30 giorni o 1 GB, quello che scade prima
+(`--storage.tsdb.retention.*` nel compose), su volumi dedicati
+`prometheus-data` e `grafana-data`: i dati sopravvivono a `down`/`up` e agli
+aggiornamenti d'immagine. Per buttare via lo storico delle metriche senza
+toccare il DB dei bot: `docker volume rm arbitragebot_prometheus-data` (a
+container spento).
 
 ---
 

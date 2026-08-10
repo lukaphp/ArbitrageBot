@@ -1,0 +1,52 @@
+# Prometheus — raccolta delle metriche del bot (OBS-01)
+# ======================================================
+#
+# Attivo solo con il profilo `monitoring` (docker compose --profile monitoring),
+# quindi il deploy standard a 2 servizi non cambia di una virgola.
+#
+# Il target è `app:3000` sulla rete Docker interna `web`: lo stesso nome che usa
+# già Caddy in Caddyfile. Non passa da Caddy né da `tailscale serve` — nessuna
+# porta nuova, nessun hop in più, e /metrics resta non raggiungibile da fuori
+# l'host esattamente come prima.
+#
+# AUTENTICAZIONE
+# --------------
+# `GET /metrics` (src/server.js) accetta il token come header Bearer oppure come
+# query `?token=`. Qui si usa l'header via `credentials_file`, non un valore
+# inline: il token è un segreto e questo file sta nel repository.
+# Il file viene scritto all'avvio del container dal valore di METRICS_TOKEN
+# (vedi il `command` del servizio prometheus in docker-compose.yml). Se
+# METRICS_TOKEN non è impostato, il file contiene un segnaposto: l'app in quel
+# caso non controlla affatto l'header, quindi lo scrape funziona comunque e non
+# serve una seconda configurazione. Se invece l'app HA un token e Prometheus no,
+# lo scrape riceve 401 e il target risulta DOWN: la regola
+# ArbitrageBotTargetDown lo rende evidente subito, invece di lasciare pannelli
+# vuoti da interpretare.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: arbitragebot-perps
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: arbitragebot
+    metrics_path: /metrics
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics_token
+    static_configs:
+      - targets: ['app:3000']
+        labels:
+          instance: arbitragebot
+
+  # Prometheus stesso: serve per distinguere "il bot è giù" da "la raccolta è
+  # giù", che sul cruscotto hanno lo stesso aspetto (pannelli vuoti).
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

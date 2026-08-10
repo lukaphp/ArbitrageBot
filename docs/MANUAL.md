@@ -3,7 +3,7 @@
 Guida completa all'uso della piattaforma di trading su **Hyperliquid DEX**: interfaccia,
 bot automatici, motore di rischio, agenti AI e integrazioni.
 
-**Versione 2.7** · Aggiornato: 10 agosto 2026
+**Versione 2.8** · Aggiornato: 10 agosto 2026
 
 > 📄 Esiste anche una **versione HTML navigabile** con ricerca integrata, servita
 > dall'app su `/manual.html`. Questo file ne è la versione testuale: stesso contenuto,
@@ -20,20 +20,22 @@ bot automatici, motore di rischio, agenti AI e integrazioni.
 3. [Tab Dashboard](#3-tab-dashboard)
 4. [Tab Execution — ordini manuali](#4-tab-execution--ordini-manuali)
 5. [Tab Positions](#5-tab-positions)
-6. [Tab Risk & Alerts](#6-tab-risk--alerts)
-7. [Tab System — bot automatici](#7-tab-system--bot-automatici)
-8. [Configurazione avanzata dei bot](#8-configurazione-avanzata-dei-bot)
-9. [Paper trading (forward-test)](#9-paper-trading-forward-test)
-10. [Backtest e ottimizzazione walk-forward](#10-backtest-e-ottimizzazione-walk-forward)
-11. [Modello ML (predictor) e gate probabilistico](#11-modello-ml-predictor-e-gate-probabilistico)
-12. [Analyst AI e coda delle proposte](#12-analyst-ai-e-coda-delle-proposte)
-13. [Storico strategie](#13-storico-strategie)
-14. [Indicatori tecnici](#14-indicatori-tecnici)
-15. [Segnali esterni via webhook](#15-segnali-esterni-via-webhook)
-16. [Controllo via Telegram](#16-controllo-via-telegram)
-17. [Sicurezza e gestione dei segreti](#17-sicurezza-e-gestione-dei-segreti)
-18. [Monitoraggio e metriche](#18-monitoraggio-e-metriche)
-19. [FAQ e troubleshooting](#19-faq-e-troubleshooting)
+6. [Tab Performance — storico e aggregazioni](#6-tab-performance--storico-e-aggregazioni)
+7. [Tab Risk & Alerts](#7-tab-risk--alerts)
+8. [Tab System — bot automatici](#8-tab-system--bot-automatici)
+9. [Configurazione avanzata dei bot](#9-configurazione-avanzata-dei-bot)
+10. [Paper trading (forward-test)](#10-paper-trading-forward-test)
+11. [Backtest e ottimizzazione walk-forward](#11-backtest-e-ottimizzazione-walk-forward)
+12. [Modello ML (predictor) e gate probabilistico](#12-modello-ml-predictor-e-gate-probabilistico)
+13. [Analyst AI e coda delle proposte](#13-analyst-ai-e-coda-delle-proposte)
+14. [Consulente AI (drawer di chat)](#14-consulente-ai-drawer-di-chat)
+15. [Storico strategie](#15-storico-strategie)
+16. [Indicatori tecnici](#16-indicatori-tecnici)
+17. [Segnali esterni via webhook](#17-segnali-esterni-via-webhook)
+18. [Controllo via Telegram](#18-controllo-via-telegram)
+19. [Sicurezza e gestione dei segreti](#19-sicurezza-e-gestione-dei-segreti)
+20. [Monitoraggio e metriche](#20-monitoraggio-e-metriche)
+21. [FAQ e troubleshooting](#21-faq-e-troubleshooting)
 
 ---
 
@@ -95,6 +97,29 @@ Quadro sintetico di capitale, posizioni e stato del sistema.
 database** (`risk_equity_history`), quindi la curva e il calcolo del drawdown
 **sopravvivono ai riavvii** dell'applicazione — non ripartono da zero a ogni restart.
 
+### 3.1 Secondo valore in euro
+
+Accanto a **equity**, **PnL giornaliero** e **PnL di ogni posizione** compare un
+secondo importo in euro, più piccolo e in grigio, preceduto da `≈`. Sotto
+l'intestazione della dashboard una riga dichiara il tasso usato e la sua età
+(`EUR indicativo · EURUSD 1.0925 · aggiornato 12 min fa`).
+
+> ⚠️ **È un numero di comodo, non una conversione di sistema.** Il dollaro resta
+> l'unica valuta con cui l'applicazione ragiona: l'euro è calcolato al momento
+> della visualizzazione, per comodità di lettura, e non entra in nessun calcolo.
+> In particolare **nessun limite di rischio viene convertito**:
+> `maxDailyLossUsd`, `maxPositionUsd` e `maxTotalExposureUsd` sono e restano in
+> USD. Se leggi "≈ €90" accanto a una perdita giornaliera di $100, il limite che
+> il server applica è quello in dollari.
+
+**Se il tasso non è fresco, l'euro sparisce.** Quando la fonte del cambio (BCE via
+Frankfurter, nessuna chiave richiesta) non risponde, oppure il tasso in cache è
+più vecchio della soglia consentita, l'interfaccia mostra **solo l'importo in
+dollari** e la riga sul tasso sparisce insieme all'euro. È deliberato: un euro
+calcolato con un tasso vecchio sarebbe indistinguibile da uno giusto, e su un
+pannello di trading vale la stessa regola del grafico equity — un numero
+plausibile ma sbagliato è peggio di un numero assente.
+
 ---
 
 ## 4. Tab Execution — ordini manuali
@@ -139,16 +164,74 @@ Elenco delle posizioni aperte sull'account Hyperliquid.
 
 ---
 
-## 6. Tab Risk & Alerts
+## 6. Tab Performance — storico e aggregazioni
+
+Il consuntivo di quello che i bot hanno fatto davvero. Non introduce nessuna
+misura nuova: mostra dati che l'applicazione registra da sempre (posizioni chiuse
+con il loro motivo di chiusura, storico equity, qualità del modello ML) e che
+finora non erano visibili da nessuna parte.
+
+| Riquadro | Cosa mostra |
+|:---|:---|
+| **CURVA EQUITY STORICA** | L'andamento del conto su tutto lo storico persistito, non solo la sessione corrente. |
+| **MOTIVI DI CHIUSURA** | Quanti trade sono stati chiusi da take profit, da stop loss, da una mano esterna o da una regola della strategia, in valore assoluto e in percentuale. Vedi sotto per come vengono distinti. |
+| **QUALITÀ DEL MODELLO ML NEL TEMPO** | Accuratezza del modello contro la sua *baseline*, un punto per ogni retraining. Il mercato si scegli dal menu in alto a destra del riquadro. |
+| **CONFRONTO PER BOT** | Una riga per bot: numero di trade chiusi, win rate, PnL totale, expectancy, media delle operazioni vinte e delle perse. |
+
+**Come si legge la qualità ML.** La *baseline* è la percentuale della classe
+maggioritaria: è quanto otterrebbe un modello che risponde sempre la stessa cosa.
+Una curva di accuratezza **sotto la baseline** significa che il modello non sta
+aggiungendo niente, e che il gate ML di quel mercato sta filtrando ingressi senza
+una ragione statistica. Una accuratezza che scende verso la baseline nel tempo è
+il decadimento dell'edge: il segnale che il modello va riaddestrato o che quella
+strategia ha smesso di funzionare su quel mercato.
+
+**Come si leggono i motivi di chiusura.** Quando una posizione sparisce
+dall'exchange, il bot guarda **quale ordine si è riempito** e lo confronta con i
+trigger che aveva piazzato lui. Da lì i motivi:
+
+| Motivo | Significato |
+|:---|:---|
+| **take profit** | È scattato un trigger di take profit del bot (anche un gradino della scala `partialTp`). |
+| **stop loss** | È scattato il trigger di stop loss del bot. |
+| **chiusura manuale o esterna** | La posizione è stata chiusa da un ordine che non è un trigger del bot: il pulsante del pannello, `/chiuditutto`, o il kill-switch con l'opzione di chiudere le posizioni. Questi tre casi **non sono distinguibili tra loro** e il nome lo dice. |
+| **regola di uscita** | Il bot ha chiuso lui, perché una regola di uscita della strategia si è verificata. |
+| **chiusura di sicurezza** | Il bot ha chiuso per non restare senza stop loss (§9). È un guasto, non un'uscita normale: ha un motivo suo apposta per non confonderlo con uno stop scattato. |
+| **chiusa (TP/SL o esterna)** | **Non si è potuto stabilire** quale ordine abbia chiuso: i fill non erano ancora visibili, oppure la posizione era stata aperta prima che l'applicazione tracciasse gli identificativi dei trigger. |
+
+> ⚠️ **Lo storico precedente non è stato riscritto.** I trade chiusi prima di
+> questa versione restano nel motivo generico *"chiusa (TP/SL o esterna)"*: quel
+> dato non è più ricostruibile a posteriori, e assegnarlo a take profit o stop
+> loss guardando il segno del PnL sarebbe un numero inventato messo accanto a
+> numeri veri. Il breakdown diventa completo man mano che si chiudono nuove
+> operazioni.
+
+**Expectancy** è il guadagno atteso per singolo trade
+(`win rate × media vinta − loss rate × media persa`). Un bot con expectancy
+negativa perde denaro nel lungo periodo anche se ha avuto qualche operazione
+molto positiva.
+
+**Stati vuoti.** Un bot senza trade chiusi resta in tabella con i valori a `—`, e
+non scompare: i numeri comparirebbero solo dopo la prima chiusura. Lo stesso per
+la qualità ML, che si popola dal primo retraining del modello.
+
+> 💡 **La sezione non è in polling.** I dati si caricano quando apri il tab e
+> quando premi **↻ Aggiorna**, non a intervalli. Le altre parti del cockpit si
+> aggiornano da sole; questa è un'aggregazione storica e non ha ragione di
+> ricalcolarsi ogni pochi secondi.
+
+---
+
+## 7. Tab Risk & Alerts
 
 Il rischio è controllato su **tre livelli indipendenti**, tutti applicati lato server
 prima di ogni esecuzione.
 
-### 6.1 Limiti per singolo bot
+### 7.1 Limiti per singolo bot
 
 Configurabili nel form del bot: **Max Daily Loss** e **Max Position** propri di quel bot.
 
-### 6.2 Limiti globali di portafoglio
+### 7.2 Limiti globali di portafoglio
 
 Validi per **tutti** i bot e per gli ordini manuali:
 
@@ -159,19 +242,19 @@ Validi per **tutti** i bot e per gli ordini manuali:
 | Max perdite consecutive | 3 | Oltre la soglia scatta un cooldown. |
 | Cooldown | 60 min | Durata dello stop forzato dopo le perdite consecutive. |
 
-### 6.3 Gate deterministico unico
+### 7.3 Gate deterministico unico
 
 **Ogni** esecuzione — che venga da un bot a regole o da una proposta approvata
 dell'Analyst AI — attraversa lo stesso gate di rischio. È deterministico: stesse
 condizioni, stesso esito. **L'AI non lo può aggirare.** Le azioni che *riducono* il
 rischio (chiusure, pausa, stop più stretti) non vengono bloccate dai cap.
 
-### 6.4 Kill-switch
+### 7.4 Kill-switch
 
 | Controllo | Funzione |
 |:---|:---|
 | **Risk Score Gauge** | Valutazione sintetica da 0 (basso) a 100 (critico). |
-| **Limiti di Portafoglio** | Pannello di configurazione dei limiti del §6.2. |
+| **Limiti di Portafoglio** | Pannello di configurazione dei limiti del §7.2. |
 | **🛑 KILL-SWITCH** | Ferma istantaneamente tutti i bot e blocca ogni nuova operazione. Opzionalmente chiude a mercato tutte le posizioni. |
 | **✅ Riattiva le aperture** | Toglie il blocco: le nuove aperture sono di nuovo consentite. Compare **solo quando il kill-switch è attivo**. |
 
@@ -184,20 +267,28 @@ disattivi esplicitamente. Per farlo, nel pannello Risk premi **✅ Riattiva le a
 sulle nuove aperture. I bot che il kill-switch aveva fermato restano fermi — il loro
 stato è stato persistito come `stopped`, quindi non ripartono nemmeno dopo un riavvio
 del server. Riavviarli è una scelta separata, da fare bot per bot nella tab **System**
-(§7). È voluto: dopo un arresto d'emergenza si riprende a operare deliberatamente, non
+(§8). È voluto: dopo un arresto d'emergenza si riprende a operare deliberatamente, non
 per effetto collaterale di un click.
 
 **Da fuori dall'interfaccia.** L'attivazione è disponibile via API
 `POST /api/perps/killswitch`, la disattivazione via `POST /api/agents/killswitch` con
 body `{"on": false}`. Entrambe richiedono una **sessione autenticata** (cookie di login):
 non sono chiamabili da uno script esterno senza prima fare login. **Da Telegram** il
-kill-switch si comanda con `/killswitch on|off` (§16), con lo stesso comportamento del
+kill-switch si comanda con `/killswitch on|off` (§18), con lo stesso comportamento del
 pannello: `on` ferma i bot senza chiudere le posizioni, `off` sblocca le aperture senza
 riavviare i bot. Risponde solo il chat id configurato.
 
+**Ogni cambio di stato arriva su Telegram, da qualunque canale sia partito.** Anche
+premere **✅ Riattiva le aperture** dal pannello web manda una notifica sul canale delle
+notifiche: un kill-switch non è un'azione privata di chi l'ha premuta, e riattivare le
+aperture senza lasciarne traccia dove guardi davvero era un punto cieco. La notifica
+arriva **una volta per cambio effettivo** — premerlo due volte non manda due messaggi —
+e dichiara solo quello che quell'azione ha fatto davvero: la riattivazione dal pannello
+Risk scrive il flag e **non** riavvia i bot fermati.
+
 ---
 
-## 7. Tab System — bot automatici
+## 8. Tab System — bot automatici
 
 Un bot = **un mercato + una strategia**. Esegue un ciclo periodico:
 
@@ -212,7 +303,7 @@ try/catch: un errore non ferma il bot né il processo.
 |:---|:---|
 | **▶️ Avvia Bot** | Il bot inizia a valutare le candele a ogni intervallo ed esegue secondo le regole. |
 | **⏸️ Pausa / Stop** | Sospende il monitoraggio senza cancellare la configurazione. |
-| **⚙️ Ottimizza Parametri** | Lancia una Walk-Forward Optimization (vedi §10). |
+| **⚙️ Ottimizza Parametri** | Lancia una Walk-Forward Optimization (vedi §11). |
 | **📊 Monitor** | Apre il dettaglio live del bot: ultima valutazione, motivo della decisione, gate attivi. |
 
 I bot che erano in stato `running` **ripartono da soli** dopo un riavvio del server.
@@ -224,14 +315,14 @@ I bot che erano in stato `running` **ripartono da soli** dopo un riavvio del ser
 | `indicator` | RSI, EMA, SMA, MACD, Bollinger, ADX — con periodo, operatore e soglia. |
 | `price` | Confronto diretto sul prezzo (`<`, `>`, `<=`, `>=`). |
 | `funding` | Confronto sul funding rate previsto. Utile per strategie carry o contrarian. |
-| `external` | Soddisfatta da un segnale ricevuto via webhook (§15). |
+| `external` | Soddisfatta da un segnale ricevuto via webhook (§17). |
 
 Le regole d'ingresso si combinano con `logic: any` (default — basta una) oppure
 `logic: all` (devono valere tutte).
 
 ---
 
-## 8. Configurazione avanzata dei bot
+## 9. Configurazione avanzata dei bot
 
 Oltre alle regole base, ogni bot espone i seguenti moduli.
 
@@ -254,7 +345,7 @@ Oltre alle regole base, ogni bot espone i seguenti moduli.
 | Modulo | Descrizione |
 |:---|:---|
 | **Conferma multi-timeframe (MTF)** | Prima di aprire, verifica che un timeframe superiore concordi (confronto con una EMA, periodo default 50). Se non concorda, il bot resta fermo e lo scrive nella motivazione. |
-| **Gate ML** | Apre solo se il modello statistico stima una probabilità superiore a `minProb` (default 0.55). Vedi §11. |
+| **Gate ML** | Apre solo se il modello statistico stima una probabilità superiore a `minProb` (default 0.55). Vedi §12. |
 
 ### DCA (mediazione del prezzo d'ingresso)
 
@@ -274,7 +365,7 @@ progressive:
 
 ---
 
-## 9. Paper trading (forward-test)
+## 10. Paper trading (forward-test)
 
 Ogni bot ha un flag **PAPER**. Attivandolo:
 
@@ -288,7 +379,7 @@ mostrano un badge **PAPER** nella lista.
 
 ---
 
-## 10. Backtest e ottimizzazione walk-forward
+## 11. Backtest e ottimizzazione walk-forward
 
 ### Backtest
 
@@ -316,7 +407,7 @@ sovra-ottimizzati.
 
 ---
 
-## 11. Modello ML (predictor) e gate probabilistico
+## 12. Modello ML (predictor) e gate probabilistico
 
 Un modello statistico leggero — regressione logistica, senza dipendenze pesanti —
 stima la probabilità che il prezzo salga nelle prossime candele a partire da feature
@@ -339,14 +430,14 @@ gate smette di filtrare e ricevi un avviso Telegram.
 
 ---
 
-## 12. Analyst AI e coda delle proposte
+## 13. Analyst AI e coda delle proposte
 
 L'agente Analyst (basato su Claude) gira periodicamente, raccoglie evidenze con
 strumenti **read-only** e produce **proposte**.
 
 **Non esegue mai nulla.** Ogni proposta finisce in una coda di approvazione e diventa
 operativa solo dopo il tuo consenso esplicito — e comunque dopo essere passata dal
-gate di rischio deterministico (§6.3).
+gate di rischio deterministico (§7.3).
 
 Tipi di proposta ammessi: `pause_bot`, `close`, `tighten_sl`, `open`,
 `new_strategy_candidate`.
@@ -394,7 +485,75 @@ e vanno aggiornati se i listini cambiano.
 
 ---
 
-## 13. Storico strategie
+## 14. Consulente AI (drawer di chat)
+
+Il pulsante **💬 CONSULENTE** nell'intestazione, accanto al pill MetaMask, apre un
+pannello laterale da destra: una conversazione sul tuo portafoglio, che resta
+visibile insieme a posizioni, PnL e rischio. Su schermo stretto occupa tutta la
+pagina. Si chiude con la **×**, con un secondo click sul pulsante o con `Esc`.
+
+È una cosa diversa dall'Analyst della sezione precedente: l'Analyst gira da solo e
+produce proposte, il consulente risponde a te e **non propone niente**.
+
+| Elemento | Funzione |
+|:---|:---|
+| **Menu delle conversazioni** | Passa da una conversazione all'altra; ognuna ha il suo transcript. |
+| **+ Nuova** | Apre una conversazione vuota. |
+| **🗑** | Elimina la conversazione corrente, previa conferma. Il transcript non è recuperabile. |
+| **Campo di invio** | `Invio` invia, `Shift+Invio` va a capo. |
+| **Badge del budget** | Speso del mese e budget mensile, **in sola lettura**. |
+
+> ⚠️ **Sola consultazione: legge e risponde, non tocca niente.** Il consulente ha
+> accesso ai soli strumenti di lettura (conto, posizioni, snapshot di rischio,
+> limiti di portafoglio, storico operazioni, stato del kill-switch). **Non può**
+> aprire o chiudere posizioni, modificare stop, avviare o fermare bot, creare
+> proposte o disattivare il kill-switch — e non perché il prompt gliel'ha chiesto
+> gentilmente: gli strumenti di scrittura non gli vengono nemmeno presentati, e il
+> server rifiuta un nome fuori dalla lista consentita. Se gli chiedi di chiudere
+> tutto, ti spiega come farlo tu.
+
+**Sotto ogni risposta** compaiono gli strumenti che ha consultato per formularla e
+il costo del turno. Serve a poter distinguere una risposta basata su dati letti
+adesso da un'affermazione generica.
+
+**Il budget si cambia solo da Telegram.** Il badge nel drawer mostra quanto hai
+speso nel mese e il tetto (default **$10/mese**), ma **nessun controllo della
+pagina web può modificarlo**: si alza o si abbassa con `/advisorbudget <importo>`
+dalla chat Telegram autorizzata, con conferma in due passi. È voluto — chi
+riuscisse a entrare nella sessione web non può alzarsi il budget da solo, esattamente
+come per il kill-switch (§18).
+
+**Al raggiungimento del tetto la chat si ferma e lo dice**, con l'importo speso e
+quello disponibile: non degrada in silenzio in risposte più povere. Nello stesso
+modo, se il consulente è disattivato lato server (`AGENTS_ENABLED=false`) o manca
+la chiave API, il drawer mostra il motivo per esteso e disabilita il campo di
+invio — **il resto del cockpit continua a funzionare normalmente**.
+
+**Con quale modello parla.** Di default Claude, tramite `ANTHROPIC_API_KEY`. Il
+consulente può però essere puntato su un altro fornitore compatibile con il
+formato OpenAI — DeepSeek diretto oppure OpenRouter, che fa da gateway verso
+molti modelli — impostando `AGENT_ADVISOR_PROVIDER` e la chiave corrispondente
+(`DEEPSEEK_API_KEY` o `OPENROUTER_API_KEY`). È una scelta di **deploy**, non un
+controllo dell'interfaccia: sposta dove finiscono i tuoi dati e i tuoi soldi, e
+resta una decisione deliberata da prendere sui segreti del server. Nessuna di
+quelle chiavi è obbligatoria: senza, tutto funziona come prima.
+
+> ⚠️ **Se cambi fornitore, il modello va provato prima di fidarsi.** In questo
+> sistema ogni azione passa da una chiamata di strumento controllata, quindi un
+> modello che gestisce male quel formato non è un problema di qualità delle
+> risposte ma di correttezza. Il budget e i guardrail restano attivi identici su
+> qualunque fornitore — il costo viene calcolato sul listino di *quel* modello,
+> non su quello di Claude — ma la bontà del modello in sé va verificata sul
+> campo, e i modelli di default non sono stati cambiati proprio per questo.
+
+> 💡 **Cosa questa versione non fa.** Non propone azioni e non parla: sono state
+> escluse deliberatamente da questa iterazione. Prima il consulente deve dimostrare
+> di dire cose vere sui tuoi dati; dargli la possibilità di proporre operazioni è
+> un passo successivo, con le sue verifiche.
+
+---
+
+## 15. Storico strategie
 
 Ogni strategia proposta o testata viene archiviata, con:
 
@@ -407,7 +566,7 @@ Ogni strategia proposta o testata viene archiviata, con:
 È la memoria di lungo periodo del sistema: serve a non ri-testare per la terza volta
 una strategia che era già stata scartata.
 
-### 13.1 Esportare e importare strategie
+### 15.1 Esportare e importare strategie
 
 | Comando | Dove | Cosa fa |
 |:---|:---|:---|
@@ -428,11 +587,11 @@ l'importazione a metà. È deliberato — una strategia senza regole d'ingresso 
 sintatticamente valida ma darebbe un bot che non aprirebbe mai una posizione.
 
 **Dove finisce ciò che importi.** Una strategia importata **non diventa un bot da
-sola**: entra nella coda come **candidatura in attesa di approvazione** (§12), con
+sola**: entra nella coda come **candidatura in attesa di approvazione** (§13), con
 validità 24 ore invece dei 30 minuti delle proposte dell'AI — una strategia scritta a
 mano non decade col mercato come un "chiudi adesso", e coi 30 minuti scadrebbe mentre
 leggi la conferma. Per renderla operativa la approvi, e in quel momento passa dal
-**gate di rischio** (§6.3) come qualunque altra proposta. È voluto: un file importato è
+**gate di rischio** (§7.3) come qualunque altra proposta. È voluto: un file importato è
 configurazione scritta da qualcun altro, non può creare bot che operano da sé.
 
 **Due controlli, uno solo decide.** L'interfaccia verifica il file prima di spedirlo,
@@ -463,7 +622,7 @@ l'account di chi l'ha esportato.
 
 ---
 
-## 14. Indicatori tecnici
+## 16. Indicatori tecnici
 
 | Indicatore | Cosa misura | Uso tipico |
 |:---|:---|:---|
@@ -476,7 +635,7 @@ l'account di chi l'ha esportato.
 
 ---
 
-## 15. Segnali esterni via webhook
+## 17. Segnali esterni via webhook
 
 Il tipo di regola `external` è pensato per innescare l'operatività da un segnale
 ricevuto via HTTP:
@@ -506,7 +665,7 @@ verrebbe comunque accettato come nuovo).
 
 ---
 
-## 16. Controllo via Telegram
+## 18. Controllo via Telegram
 
 Configura token e chat id **dal pannello** (vengono salvati **cifrati** sul database)
 oppure via `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
@@ -526,7 +685,7 @@ comandare il bot dalla chat.
 | `/chiuditutto` | Chiude a mercato tutte le posizioni aperte. **Non è il kill-switch**: non ferma i bot e non blocca le nuove aperture — per quello c'è `/killswitch on`. |
 | `/killswitch` | Mostra se il kill-switch è attivo o spento. Non cambia nulla. |
 | `/killswitch on` | Attiva il kill-switch: ferma i bot in esecuzione e blocca ogni nuova apertura. **Non chiude le posizioni aperte** — per quello serve `/chiuditutto`, che resta un'azione separata. |
-| `/killswitch off` | Rimuove il blocco sulle aperture. **I bot fermati non ripartono da soli**: vanno riavviati con `/avvia <bot>` o dalla tab System (§7), esattamente come dal pannello web (§6.4). |
+| `/killswitch off` | Rimuove il blocco sulle aperture. **I bot fermati non ripartono da soli**: vanno riavviati con `/avvia <bot>` o dalla tab System (§8), esattamente come dal pannello web (§7.4). |
 
 > ⚠️ **Chi può eseguire questi comandi.** Il bot risponde **solo** al chat id configurato:
 > ogni messaggio proveniente da un'altra chat viene scartato e registrato nei log, senza
@@ -539,10 +698,24 @@ comandare il bot dalla chat.
 | `/proposte` | Elenca le proposte dell'Analyst AI in attesa. |
 | `/approva <id>` | Approva una proposta. |
 | `/rifiuta <id>` | Rifiuta una proposta. |
+| `/advisorbudget` | Mostra il budget mensile del consulente AI (§14), quanto hai speso nel mese e quando si azzera. Non cambia nulla. |
+| `/advisorbudget <importo>` | **Propone** un nuovo budget e ti chiede conferma con il riepilogo (da quanto a quanto). Non applica niente finché non confermi. Accetta `25`, `25.5`, `$25`, `12,50`; massimo `$1000`. |
+| `/advisorbudget confirm` | Applica il budget proposto (entro 5 minuti dalla proposta, altrimenti scade). La modifica finisce nell'audit con valore precedente e nuovo, e viene notificata sul canale. |
+| `/advisorbudget cancel` | Annulla la proposta in sospeso. |
+
+> 💬 **Perché il budget del consulente si cambia solo da qui.** È l'unico canale che
+> può modificarlo: la pagina web lo mostra in sola lettura e non esiste nessuna rotta
+> web che lo scriva. Il motivo è lo stesso del kill-switch — approvazione **fuori
+> banda**: chi riuscisse a entrare nella sessione web (cookie rubato, browser lasciato
+> aperto) non può alzarsi da solo il tetto di spesa verso un servizio a pagamento. La
+> conferma in due passi serve a evitare che un errore di battitura alzi una soglia di
+> spesa: un importo malformato (`-5`, `12.5.3`, parole) viene rifiutato e non crea
+> nemmeno la proposta. Impostare `0` è ammesso ed è il modo di spegnere il consulente
+> dal canale sicuro.
 
 ---
 
-## 17. Sicurezza e gestione dei segreti
+## 19. Sicurezza e gestione dei segreti
 
 Quattro punti che vale la pena conoscere anche come semplice utente:
 
@@ -567,7 +740,7 @@ trattati in [DEPLOY.md](DEPLOY.md).
 
 ---
 
-## 18. Monitoraggio e metriche
+## 20. Monitoraggio e metriche
 
 - **`/health`** — endpoint di stato, da collegare a un servizio di uptime monitoring.
 - **`/metrics`** — metriche in formato Prometheus: errori API, errori nei tick dei
@@ -578,7 +751,7 @@ trattati in [DEPLOY.md](DEPLOY.md).
 
 ---
 
-## 19. FAQ e troubleshooting
+## 21. FAQ e troubleshooting
 
 **Dov'è il pulsante per collegare MetaMask?**
 È il pill **🦊 MetaMask** in alto a destra, accanto a quello del server: clicca lì.
@@ -602,7 +775,7 @@ più frequenti sono, in ordine:
 2. conferma multi-timeframe non concorde;
 3. gate ML sotto la soglia `minProb`;
 4. un limite di portafoglio raggiunto o un cooldown attivo;
-5. kill-switch inserito — resta attivo finché non lo spegni: vedi §6.4 per come farlo.
+5. kill-switch inserito — resta attivo finché non lo spegni: vedi §7.4 per come farlo.
 
 **Ho impostato TP/SL: restano attivi se il server si spegne?**
 Sì. Sono registrati come trigger order **su Hyperliquid**, non gestiti in memoria dal
@@ -611,7 +784,7 @@ bot. È il motivo per cui vale la pena impostarli sempre.
 **Il backtest è ottimo ma in reale va male.**
 È il caso classico dell'overfitting. Verifica che l'ottimizzazione sia stata
 walk-forward e guarda il risultato **out-of-sample**, non quello in-sample. Poi passa
-dal **paper trading** (§9) prima del denaro reale: è lo stadio che separa una
+dal **paper trading** (§10) prima del denaro reale: è lo stadio che separa una
 strategia che ha funzionato sul passato da una che funziona adesso.
 
 **L'Analyst AI ha proposto un'operazione ma non è stata eseguita.**

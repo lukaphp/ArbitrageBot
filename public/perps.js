@@ -79,6 +79,17 @@ const BOT_STRATEGIES = {
   }
 };
 
+/**
+ * Visualizzazione EUR (CUR-01) — solo presentazione.
+ * `FX_TTL_MS`: dopo quanto si ricontrolla il tasso, agganciandosi a un tick che
+ * esiste già (nessun timer nuovo: il tasso ECB si muove una volta al giorno).
+ * `FX_MAX_AGE_MS`: oltre questa età il tasso non si usa più nemmeno se il server
+ * l'aveva dichiarato fresco al momento della lettura — una pagina lasciata
+ * aperta per ore non deve continuare a mostrare EUR su un tasso di ieri.
+ */
+const FX_TTL_MS = 30 * 60 * 1000;
+const FX_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
 const RISK_PROFILES = {
   conservativo: { name: 'Conservativo', emoji: '🟢', leverage: 2, sizingPercent: 5, tp: 1.5, sl: 1, trailing: 0, maxDailyLoss: 50, maxPosition: 500,
     desc: 'Leva bassa, posizioni piccole, stop stretti. Priorità alla protezione del capitale.' },
@@ -110,6 +121,20 @@ class PerpsApp {
     this.riskSnapshot = null;
     this.riskRefreshInFlight = false;
     this.riskTimer = null;
+    // Tasso EUR/USD per il secondo valore di comodo (CUR-01). `null` = niente EUR.
+    this.fx = null;
+    this.fxFetchedAt = 0;
+    this.fxInFlight = false;
+    // Performance storica (ANA-01): caricata all'apertura della sezione, mai in polling.
+    // `perfData` e non `performance`: quest'ultimo è un globale del browser.
+    this.perfData = null;
+    this.perfLoading = false;
+    this.perfChart = null;
+    this.perfEquitySeries = null;
+    this.perfMlChart = null;
+    this.perfMlAccuracySeries = null;
+    this.perfMlBaselineSeries = null;
+    this.perfMlCoin = null;
     // Stato del wallet MetaMask (ex app.isConnected / app.walletAddress)
     this.walletAddress = null;
     this.isConnected = false;
@@ -157,6 +182,125 @@ class PerpsApp {
     return '$' + v.toFixed(v < 1 ? 4 : 2);
   }
 
+  // ---- Visualizzazione EUR (CUR-01) ----
+  // Solo presentazione: nessun limite di rischio viene convertito. `maxDailyLossUsd`,
+  // `maxPositionUsd` e `maxTotalExposureUsd` restano in USD, e `riskManager`/`portfolio`
+  // non sanno nemmeno che questo codice esista. `fmtUsd` resta la fonte primaria: l'EUR
+  // è un secondo numero indicativo, mostrato dopo, mai al posto del dollaro.
+
+  /**
+   * Legge il tasso EUR/USD da `GET /api/fx/eurusd`.
+   * Regola non negoziabile della storia: `stale: true` o chiamata fallita ⇒
+   * `this.fx = null` ⇒ si mostra solo USD. Un EUR calcolato su un tasso vecchio è
+   * peggio di nessun EUR, perché è indistinguibile da uno giusto.
+   */
+  async loadFxRate() {
+    if (this.fxInFlight) return this.fx;
+    this.fxInFlight = true;
+    try {
+      const data = await this.api('/api/fx/eurusd');
+      const rate = Number(data?.rate);
+      const usable = Number.isFinite(rate) && rate > 0 && data?.stale !== true;
+      // `asOf` è la data di riferimento BCE del tasso (`YYYY-MM-DD`), non
+      // l'istante della nostra lettura; `ageMs` è l'età che il server ha già
+      // calcolato su quella data — si usa quella quando c'è.
+      this.fx = usable ? { rate, asOf: data?.asOf ?? null, ageMs: Number(data?.ageMs) } : null;
+      this.fxFetchedAt = Date.now();
+    } catch (_) {
+      // Nessun fallback su un tasso precedente: se la fonte non risponde, l'EUR
+      // sparisce del tutto.
+      this.fx = null;
+      this.fxFetchedAt = Date.now();
+    } finally {
+      this.fxInFlight = false;
+    }
+    this._applyFxNote();
+    this._refreshCockpitDashboard();
+    return this.fx;
+  }
+
+  /** Ricontrolla il tasso solo se è passato il TTL (nessun timer dedicato). */
+  _maybeRefreshFxRate() {
+    if (Date.now() - this.fxFetchedAt >= FX_TTL_MS) this.loadFxRate();
+  }
+
+  /** Il tasso in memoria è ancora utilizzabile? */
+  _fxUsable() {
+    const rate = Number(this.fx?.rate);
+    if (!Number.isFinite(rate) || rate <= 0) return false;
+    return Date.now() - this.fxFetchedAt < FX_MAX_AGE_MS;
+  }
+
+  /** Converte USD in EUR, o `null` se il tasso non è utilizzabile. */
+  _eur(usd) {
+    if (!this._fxUsable()) return null;
+    const value = Number(usd);
+    if (!Number.isFinite(value)) return null;
+    // `rate` è EURUSD: quanti dollari vale un euro.
+    return value / Number(this.fx.rate);
+  }
+
+  /**
+   * Importo in EUR, o stringa vuota quando non c'è nulla da mostrare.
+   * La stringa vuota è deliberata: chi chiama la usa per decidere se stampare o
+   * no il secondo valore, senza dover ripetere il controllo sul tasso.
+   */
+  fmtEur(n) {
+    const value = this._eur(n);
+    if (value === null) return '';
+    const abs = Math.abs(value).toLocaleString('en-US', { maximumFractionDigits: 2 });
+    return (value < 0 ? '-€' : '€') + abs;
+  }
+
+  /** Scrive (o svuota e nasconde) l'elemento che porta il secondo valore in EUR. */
+  _setEurText(id, usdValue) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const text = this.fmtEur(usdValue);
+    el.textContent = text ? `≈ ${text}` : '';
+    el.hidden = !text;
+  }
+
+  /** Nota su tasso ed età: senza di essa l'EUR sembrerebbe una conversione ufficiale. */
+  _applyFxNote() {
+    const note = document.getElementById('cockpitFxNote');
+    if (!note) return;
+    if (!this._fxUsable()) {
+      note.textContent = '';
+      note.hidden = true;
+      return;
+    }
+    const age = this._fxAgeLabel();
+    note.textContent = `EUR indicativo · EURUSD ${Number(this.fx.rate).toFixed(4)}${age ? ` · ${age}` : ''}`;
+    note.hidden = false;
+  }
+
+  /**
+   * Etichetta dell'età del tasso.
+   * Il tasso BCE è una fissazione giornaliera, quindi `asOf` arriva come data
+   * (`YYYY-MM-DD`): in quel caso si dichiara il *giorno* del tasso, non i minuti
+   * — "aggiornato 12 min fa" su una fissazione di ieri sarebbe una mezza bugia.
+   * `ageMs`, quando c'è, è l'età già calcolata dal server sulla stessa data.
+   */
+  _fxAgeLabel() {
+    const raw = this.fx?.asOf;
+    if (raw == null || raw === '') return '';
+    const dateOnly = typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.trim());
+    let ms = null;
+    if (typeof raw === 'number' && Number.isFinite(raw)) ms = raw > 1e11 ? raw : raw * 1000;
+    else {
+      const parsed = Date.parse(String(raw));
+      if (Number.isFinite(parsed)) ms = parsed;
+    }
+    if (ms == null) return '';
+    if (dateOnly) return `tasso BCE del ${new Date(ms).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' })}`;
+    const ageMs = Number.isFinite(Number(this.fx?.ageMs)) ? Number(this.fx.ageMs) : Date.now() - ms;
+    const minutes = Math.floor(ageMs / 60000);
+    if (minutes < 1) return 'aggiornato ora';
+    if (minutes < 90) return `aggiornato ${minutes} min fa`;
+    return `aggiornato il ${new Date(ms).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}`;
+  }
+
   // ---- Lifecycle ----
   async onShow() {
     if (!this.socket) this._initSocket();
@@ -164,6 +308,7 @@ class PerpsApp {
     this._initCockpitDashboard();
     this.switchCockpitTab(this.cockpitTab || 'dashboard');
     await this.loadNetwork();
+    await this.loadFxRate();
     await this.loadMarkets();
     await this.refreshAccount();
     await this.loadBots();
@@ -175,6 +320,9 @@ class PerpsApp {
       this.accountTimer = setInterval(() => {
         if (!document.getElementById('view-perps').classList.contains('hidden')) {
           this.refreshAccount();
+          // Nessun timer nuovo per il tasso di cambio: ci si aggancia a un tick
+          // che c'è già e si ricontrolla al massimo ogni FX_TTL_MS (CUR-01).
+          this._maybeRefreshFxRate();
         }
       }, 8000);
     }
@@ -249,6 +397,15 @@ class PerpsApp {
       if (button) this.switchCockpitTab(button.dataset.alertAction || 'risk');
     });
 
+    // ANA-01: ricarica solo su richiesta esplicita, nessun timer.
+    const perfRefresh = document.getElementById('perfRefresh');
+    if (perfRefresh) perfRefresh.addEventListener('click', () => this.loadPerformance(true));
+    const perfMlCoin = document.getElementById('perfMlCoin');
+    if (perfMlCoin) perfMlCoin.addEventListener('change', () => {
+      this.perfMlCoin = perfMlCoin.value || null;
+      this._renderMlQuality();
+    });
+
     document.querySelectorAll('.cockpit-tab').forEach((tab) => {
       tab.addEventListener('click', () => this.switchCockpitTab(tab.id.replace('cockpit-tab-', '')));
       tab.addEventListener('keydown', (event) => {
@@ -271,7 +428,7 @@ class PerpsApp {
   }
 
   switchCockpitTab(tab) {
-    const validTabs = ['dashboard', 'execution', 'positions', 'risk', 'system'];
+    const validTabs = ['dashboard', 'execution', 'positions', 'performance', 'risk', 'system'];
     const nextTab = validTabs.includes(tab) ? tab : 'dashboard';
     this.cockpitTab = nextTab;
     document.querySelectorAll('.cockpit-tab').forEach((button) => {
@@ -285,6 +442,9 @@ class PerpsApp {
     });
     if (nextTab === 'dashboard') this._refreshCockpitDashboard();
     if (nextTab === 'positions') this.refreshPositionsTab();
+    // Unico momento in cui la Performance si carica da sola: l'apertura della
+    // sezione. Nessun timer la richiama (ANA-01).
+    if (nextTab === 'performance') this.loadPerformance();
     if (nextTab === 'risk') this.refreshRiskSnapshot();
   }
 
@@ -302,9 +462,32 @@ class PerpsApp {
       if (updated) updated.textContent = `Aggiornamento fallito: ${error.message}`;
       const status = document.getElementById('cockpitRiskStatus');
       if (status) { status.textContent = 'DATI NON DISPONIBILI'; status.className = 'cockpit-risk-status blocked'; }
+      // Finché questo ramo non svuotava i pannelli, quello che restava a schermo
+      // erano gli alert precedenti — e al primo caricamento erano i tre alert di
+      // esempio del mockup scritti in index.html. Un pannello che non si è potuto
+      // aggiornare deve dirlo, non continuare a mostrare l'ultima cosa che aveva.
+      this._renderRiskUnavailable(error.message);
     } finally {
       this.riskRefreshInFlight = false;
     }
+  }
+
+  /**
+   * Dichiara che lo snapshot di rischio non è disponibile, al posto dei dati.
+   * Azzera anche i contatori a '—': un badge che dice "0" afferma "nessuna
+   * condizione da verificare", cioè esattamente ciò che non sappiamo.
+   */
+  _renderRiskUnavailable(message) {
+    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+    ['cockpitHeaderAlertBadge', 'cockpitRiskBadge', 'cockpitAttentionCount', 'cockpitRiskLiveCount']
+      .forEach((id) => setText(id, '—'));
+    // Il messaggio arriva dal server: escapato, non interpretato.
+    const html = `<div class="cockpit-risk-empty">Alert non disponibili: ${this._escapeHtml(message)}</div>`;
+    for (const id of ['cockpitAlerts', 'cockpitRiskAlerts']) {
+      const target = document.getElementById(id);
+      if (target) target.innerHTML = html;
+    }
+    this._renderSystemHealth(null);
   }
 
   _escapeHtml(value) {
@@ -375,9 +558,63 @@ class PerpsApp {
     const checksEl = document.getElementById('cockpitRiskChecks');
     if (checksEl) checksEl.innerHTML = checks.map((check) => `
       <div class="cockpit-risk-check"><span><i class="cockpit-risk-check-dot ${check.state}"></i>${this._escapeHtml(check.label)}</span><strong class="cockpit-${check.state === 'critical' ? 'negative' : check.state === 'warning' ? 'warning' : 'positive'}">${this._escapeHtml(check.value)}</strong></div>`).join('');
+    this._renderSystemHealth(snapshot);
     // Lo snapshot di rischio è la fonte che si aggiorna più spesso: allinea anche il
     // bottone di riattivazione, così non dipende dal solo refresh del pannello agenti.
     this._setKillSwitchUi(snapshot.killSwitch);
+  }
+
+  /**
+   * Card SYSTEM HEALTH della dashboard.
+   *
+   * Prima elencava CME, ICE e COMEX a 28ms/31ms con un "3/3 ONLINE": tre borse
+   * di future estranee a Hyperliquid e quattro numeri che non venivano da
+   * nessuna fonte, scritti nel markup e quindi visibili finché — e solo se —
+   * arrivava un dato vero. Le righe di adesso sono le stesse quattro cose che il
+   * pannello Risk già verifica sullo snapshot, quindi non c'è una seconda fonte
+   * di verità: cambia solo dove sono mostrate.
+   *
+   * Con `snapshot` nullo si torna a '—' e pallino grigio: "ignoto" è
+   * un'affermazione onesta, "online" e "offline" no.
+   */
+  _renderSystemHealth(snapshot) {
+    const set = (key, value, state) => {
+      const el = document.getElementById(`cockpitHealth${key}`);
+      if (el) el.textContent = value;
+      const dot = document.getElementById(`cockpitHealth${key}Dot`);
+      if (dot) dot.className = `cockpit-health-dot ${state}`;
+    };
+    const summary = document.getElementById('cockpitHealthSummary');
+    if (!snapshot) {
+      ['Feed', 'Bots', 'Orders', 'Api'].forEach((key) => set(key, '—', 'unknown'));
+      if (summary) { summary.textContent = '—'; summary.className = 'cockpit-surface-note'; }
+      return;
+    }
+
+    const system = snapshot.system || {};
+    const bots = snapshot.bots || {};
+    const orders = snapshot.orders || {};
+    const sourceErrors = snapshot.sourceErrors || [];
+
+    const feedOk = !!system.wsFresh;
+    set('Feed', feedOk ? 'live · fresco' : system.wsConnected ? 'connesso · stale' : 'polling REST', feedOk ? 'ok' : 'warning');
+
+    const stale = Number(bots.stale || 0);
+    const total = Number(bots.total || 0);
+    set('Bots', total ? `${Number(bots.running || 0)}/${total} attivi${stale ? ` · ${stale} stale` : ''}` : 'nessun bot',
+      stale ? 'offline' : 'ok');
+
+    set('Orders', `${orders.trigger ?? 0} protettivi`, 'ok');
+    set('Api', sourceErrors.length ? `${sourceErrors.length} fonti non disponibili` : 'ok',
+      sourceErrors.length ? 'warning' : 'ok');
+
+    // Il conteggio riassuntivo si calcola, non si scrive nel markup: prima
+    // diceva "3/3 ONLINE" anche a server spento.
+    const ok = [feedOk || !!system.wsConnected, !stale, !sourceErrors.length].filter(Boolean).length;
+    if (summary) {
+      summary.textContent = `${ok}/3 OK`;
+      summary.className = `cockpit-surface-note ${ok === 3 ? 'cockpit-positive' : 'cockpit-warning'}`;
+    }
   }
 
   _dashboardEquityData() {
@@ -419,6 +656,10 @@ class PerpsApp {
 
     setText('cockpitEquity', equityValue === null ? '—' : usd(equityValue));
     setText('cockpitHeaderEquity', equityValue === null ? '—' : usd(equityValue));
+    // Secondo valore in EUR (CUR-01): compare solo se il tasso è fresco, sparisce
+    // da sé quando non lo è — `_setEurText` svuota e nasconde l'elemento.
+    this._setEurText('cockpitEquityEur', equityValue);
+    this._setEurText('cockpitHeaderEquityEur', equityValue);
     setText('cockpitUpdatedAt', timestamp);
     setText('cockpitMarginUsed', marginPct === null ? '—' : `${Math.round(marginPct)}%`);
     setText('cockpitMarginFree', marginPct === null ? '' : `${Math.max(0, 100 - Math.round(marginPct))}% free`);
@@ -433,6 +674,7 @@ class PerpsApp {
         setText('cockpitNetPnl', `${net >= 0 ? '+' : '-'}${usd(Math.abs(net))}`);
         const netEl = document.getElementById('cockpitNetPnl');
         if (netEl) netEl.className = `cockpit-kpi-value ${net >= 0 ? 'cockpit-positive' : 'cockpit-negative'}`;
+        this._setEurText('cockpitNetPnlEur', net);
       }
       if (Number.isFinite(realized)) setText('cockpitRealized', `Realized ${realized >= 0 ? '+' : '-'}${usd(Math.abs(realized))}`);
       if (Number.isFinite(unrealized)) setText('cockpitUnrealized', `Unrealized ${unrealized >= 0 ? '+' : '-'}${usd(Math.abs(unrealized))}`);
@@ -445,12 +687,25 @@ class PerpsApp {
       this.dashboardSeries.setData(this._dashboardEquityData());
       this.dashboardChart?.timeScale().fitContent();
     }
-    this._renderCockpitPositions(positions);
+    // Ripetuto qui e non solo in _renderRiskSnapshot: così lo stato onesto della
+    // card viene affermato dal codice al primo render, e non dipende dal fatto
+    // che qualcuno non rimetta valori fissi nel markup.
+    this._renderSystemHealth(this.riskSnapshot || null);
+    // `hasAccountData` distingue "il conto non ha ancora risposto" da "il conto
+    // ha risposto e non ci sono posizioni": senza questa distinzione la tabella
+    // affermava "Nessuna posizione aperta" già al primo render, prima di sapere.
+    this._renderCockpitPositions(positions, !!(risk.account || this.account));
   }
 
-  _renderCockpitPositions(positions) {
+  _renderCockpitPositions(positions, hasAccountData = true) {
     const tbody = document.getElementById('cockpitPositionsSummary');
+    const count = document.getElementById('cockpitOpenPositionsCount');
+    if (count) count.textContent = hasAccountData ? `[${positions.length}]` : '—';
     if (!tbody) return;
+    if (!hasAccountData) {
+      tbody.innerHTML = '<tr><td class="cockpit-empty" colspan="5">In attesa dei dati del conto…</td></tr>';
+      return;
+    }
     if (!positions.length) {
       tbody.innerHTML = '<tr><td class="cockpit-empty" colspan="5">Nessuna posizione aperta</td></tr>';
       return;
@@ -464,15 +719,244 @@ class PerpsApp {
         { text: String(position.side || '—').toUpperCase(), className: side === 'long' ? 'cockpit-positive' : 'cockpit-negative' },
         { text: this.fmtNum(position.size), className: '' },
         { text: this.fmtUsd(position.entryPx), className: '' },
-        { text: `${pnl >= 0 ? '+' : '-'}${this.fmtUsd(Math.abs(pnl))}`, className: pnl >= 0 ? 'cockpit-positive' : 'cockpit-negative' }
+        // PnL: USD primario, EUR indicativo sotto (CUR-01) e solo a tasso fresco.
+        { text: `${pnl >= 0 ? '+' : '-'}${this.fmtUsd(Math.abs(pnl))}`, className: pnl >= 0 ? 'cockpit-positive' : 'cockpit-negative', eur: this.fmtEur(pnl) }
       ];
-      values.forEach(({ text, className }) => {
+      values.forEach(({ text, className, eur }) => {
         const cell = document.createElement('td');
         cell.textContent = text;
         if (className) cell.className = className;
+        if (eur) {
+          const secondary = document.createElement('small');
+          secondary.className = 'cockpit-eur';
+          secondary.textContent = `≈ ${eur}`;
+          cell.appendChild(secondary);
+        }
         row.appendChild(cell);
       });
       return row.outerHTML;
+    }).join('');
+  }
+
+  // ---- Performance storica (ANA-01) ----
+  // Ispirata a Freqtrade, ma nessun dato nuovo: posizioni chiuse con `close_reason`,
+  // `risk_equity_history` e `ml_history` esistono da sprint e non erano mostrate da
+  // nessuna parte. La serie ML in particolare viene raccolta a ogni retraining e non
+  // ha mai avuto una UI.
+  //
+  // Vincolo esplicito della storia: NESSUN polling. Il caricamento avviene
+  // all'apertura della sezione (switchCockpitTab) e sul pulsante Aggiorna.
+
+  /**
+   * Carica le aggregazioni da `GET /api/perps/performance`.
+   * `force` distingue il click su Aggiorna dall'apertura della sezione: senza
+   * `force` un secondo passaggio sulla tab non rifà la chiamata se una è già in volo.
+   */
+  async loadPerformance(force = false) {
+    if (this.perfLoading) return this.perfData;
+    this.perfLoading = true;
+    this._setPerfNotice(this.perfData && !force ? null : 'Caricamento dati storici…', 'info');
+    try {
+      const data = await this.api('/api/perps/performance');
+      this.perfData = {
+        bots: Array.isArray(data?.bots) ? data.bots : [],
+        equityHistory: Array.isArray(data?.equityHistory) ? data.equityHistory : [],
+        mlHistory: Array.isArray(data?.mlHistory) ? data.mlHistory : []
+      };
+      this._setPerfNotice(null);
+      const updated = document.getElementById('perfUpdatedAt');
+      if (updated) updated.textContent = new Date().toLocaleTimeString('it-IT', { hour12: false });
+    } catch (error) {
+      // Nessun numero inventato: la sezione dichiara che i dati non sono arrivati.
+      this.perfData = null;
+      this._setPerfNotice(`Dati storici non disponibili: ${error.message}`, 'error');
+    } finally {
+      this.perfLoading = false;
+    }
+    this._renderPerformance();
+    return this.perfData;
+  }
+
+  _setPerfNotice(text, kind = 'info') {
+    const el = document.getElementById('perfNotice');
+    if (!el) return;
+    el.textContent = text || '';
+    el.hidden = !text;
+    el.className = `cockpit-perf-notice cockpit-perf-notice-${kind}`;
+  }
+
+  /**
+   * Normalizza un timestamp per Lightweight Charts, che vuole secondi.
+   * Serve perché le due fonti non concordano: `risk_equity_history.ts` è in
+   * secondi (vedi il chiamante in server.js) mentre `ml_history.ts` è in
+   * millisecondi (`Date.now()` nell'insert). Senza questa conversione una delle
+   * due curve finirebbe nel 1970.
+   */
+  _toChartTime(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.floor(n > 1e11 ? n / 1000 : n);
+  }
+
+  /** Ordina per tempo e scarta i duplicati: Lightweight Charts pretende una serie crescente. */
+  _chartSeries(points) {
+    const byTime = new Map();
+    for (const point of points) {
+      if (point && point.time !== null && Number.isFinite(point.value)) byTime.set(point.time, point.value);
+    }
+    return [...byTime.entries()].sort((a, b) => a[0] - b[0]).map(([time, value]) => ({ time, value }));
+  }
+
+  _renderPerformance() {
+    this._renderPerformanceEquity();
+    this._renderCloseReasons();
+    this._renderMlCoinOptions();
+    this._renderMlQuality();
+    this._renderPerformanceBots();
+  }
+
+  _renderPerformanceEquity() {
+    const empty = document.getElementById('perfEquityEmpty');
+    const range = document.getElementById('perfEquityRange');
+    const points = this._chartSeries((this.perfData?.equityHistory || []).map((p) => ({
+      time: this._toChartTime(p?.time ?? p?.ts), value: Number(p?.value ?? p?.equity)
+    })));
+    if (empty) empty.hidden = points.length > 0;
+    if (range) {
+      range.textContent = points.length
+        ? `${points.length} campioni · dal ${new Date(points[0].time * 1000).toLocaleDateString('it-IT')}`
+        : '—';
+    }
+    const el = document.getElementById('perfEquityChart');
+    if (!el || !window.LightweightCharts) return;
+    if (!this.perfChart) {
+      this.perfChart = LightweightCharts.createChart(el, {
+        width: el.clientWidth || 640,
+        height: Math.max(el.clientHeight || 0, 214),
+        layout: { background: { color: 'transparent' }, textColor: '#8b97a8', fontFamily: 'JetBrains Mono, monospace', fontSize: 11 },
+        grid: { vertLines: { color: '#1b2538' }, horzLines: { color: '#1b2538' } },
+        rightPriceScale: { borderColor: '#1b2538', minimumWidth: 64 },
+        timeScale: { borderColor: '#1b2538', timeVisible: true, secondsVisible: false }
+      });
+      this.perfEquitySeries = this.perfChart.addAreaSeries({
+        lineColor: '#26d07c', topColor: 'rgba(38, 208, 124, 0.24)', bottomColor: 'rgba(38, 208, 124, 0.02)',
+        lineWidth: 2, priceLineVisible: false
+      });
+    }
+    this.perfEquitySeries?.setData(points);
+    if (points.length) this.perfChart?.timeScale?.().fitContent();
+  }
+
+  /**
+   * Breakdown dei motivi di chiusura. Le chiavi sconosciute vengono mostrate come
+   * arrivano (escapate): meglio una etichetta grezza che nascondere trade veri
+   * perché il backend ha aggiunto un motivo che questa mappa non conosce.
+   */
+  _renderCloseReasons() {
+    const target = document.getElementById('perfCloseReasons');
+    if (!target) return;
+    const labels = {
+      tp: 'Take profit', sl: 'Stop loss', manual: 'Chiusura manuale', dca: 'DCA',
+      trailing: 'Trailing stop', liquidation: 'Liquidazione', signal: 'Segnale di uscita',
+      killswitch: 'Kill-switch', unknown: 'Non registrato', other: 'Altro'
+    };
+    const totals = new Map();
+    for (const bot of this.perfData?.bots || []) {
+      for (const [reason, count] of Object.entries(bot?.closeReasons || {})) {
+        const n = Number(count);
+        if (!Number.isFinite(n) || n <= 0) continue;
+        totals.set(reason, (totals.get(reason) || 0) + n);
+      }
+    }
+    const rows = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+    if (!rows.length) {
+      target.innerHTML = '<div class="cockpit-empty">Nessun trade chiuso ancora registrato: il breakdown si popola dalla prima chiusura.</div>';
+      return;
+    }
+    const total = rows.reduce((sum, [, n]) => sum + n, 0);
+    target.innerHTML = rows.map(([reason, count]) => {
+      const label = labels[reason] || reason;
+      const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+      return `<div class="cockpit-metric-row"><span>${this._escapeHtml(label)}</span><strong>${count} · ${pct}%</strong></div>`;
+    }).join('');
+  }
+
+  /** Popola il selettore dei mercati presenti nello storico ML. */
+  _renderMlCoinOptions() {
+    const select = document.getElementById('perfMlCoin');
+    if (!select) return;
+    const coins = [...new Set((this.perfData?.mlHistory || []).map((r) => r?.coin).filter(Boolean))].sort();
+    if (!coins.includes(this.perfMlCoin)) this.perfMlCoin = coins[0] || null;
+    select.innerHTML = coins.length
+      ? coins.map((coin) => `<option value="${this._escapeHtml(coin)}"${coin === this.perfMlCoin ? ' selected' : ''}>${this._escapeHtml(coin)}</option>`).join('')
+      : '<option value="">Nessun mercato</option>';
+    select.disabled = !coins.length;
+    if (this.perfMlCoin) select.value = this.perfMlCoin;
+  }
+
+  /**
+   * Andamento della qualità del modello ML: accuracy contro baseline.
+   * È il dato con più valore percepito di questa sezione perché è l'unico che
+   * finora non era visibile da nessuna parte pur essendo raccolto a ogni
+   * retraining. La baseline è la percentuale della classe maggioritaria: una
+   * accuracy sotto la baseline vuol dire modello inutile, e va vista.
+   */
+  _renderMlQuality() {
+    const rows = (this.perfData?.mlHistory || []).filter((r) => !this.perfMlCoin || r?.coin === this.perfMlCoin);
+    const accuracy = this._chartSeries(rows.map((r) => ({ time: this._toChartTime(r?.ts ?? r?.time), value: Number(r?.accuracy) })));
+    const baseline = this._chartSeries(rows.map((r) => ({ time: this._toChartTime(r?.ts ?? r?.time), value: Number(r?.baseline) })));
+    const empty = document.getElementById('perfMlEmpty');
+    if (empty) empty.hidden = accuracy.length > 0 || baseline.length > 0;
+
+    const el = document.getElementById('perfMlChart');
+    if (!el || !window.LightweightCharts) return;
+    if (!this.perfMlChart) {
+      this.perfMlChart = LightweightCharts.createChart(el, {
+        width: el.clientWidth || 640,
+        height: Math.max(el.clientHeight || 0, 214),
+        layout: { background: { color: 'transparent' }, textColor: '#8b97a8', fontFamily: 'JetBrains Mono, monospace', fontSize: 11 },
+        grid: { vertLines: { color: '#1b2538' }, horzLines: { color: '#1b2538' } },
+        rightPriceScale: { borderColor: '#1b2538', minimumWidth: 64 },
+        timeScale: { borderColor: '#1b2538', timeVisible: true, secondsVisible: false }
+      });
+      this.perfMlAccuracySeries = this.perfMlChart.addLineSeries({ color: '#6fa9ff', lineWidth: 2, priceLineVisible: false });
+      this.perfMlBaselineSeries = this.perfMlChart.addLineSeries({ color: '#8b97a8', lineWidth: 1, lineStyle: 2, priceLineVisible: false });
+    }
+    this.perfMlAccuracySeries?.setData(accuracy);
+    this.perfMlBaselineSeries?.setData(baseline);
+    if (accuracy.length || baseline.length) this.perfMlChart?.timeScale?.().fitContent();
+  }
+
+  _renderPerformanceBots() {
+    const tbody = document.getElementById('perfBotsBody');
+    if (!tbody) return;
+    const bots = this.perfData?.bots || [];
+    if (!bots.length) {
+      tbody.innerHTML = `<tr><td class="cockpit-empty" colspan="7">${this.perfData
+        ? 'Nessun bot con trade chiusi: le colonne si popolano dalla prima chiusura.'
+        : 'Dati non disponibili.'}</td></tr>`;
+      return;
+    }
+    const pct = (v) => (Number.isFinite(Number(v)) ? `${(Number(v) * (Number(v) <= 1 ? 100 : 1)).toFixed(1)}%` : '—');
+    const signed = (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return '—';
+      return `${n >= 0 ? '+' : '-'}${this.fmtUsd(Math.abs(n))}`;
+    };
+    tbody.innerHTML = bots.map((bot) => {
+      const pnl = Number(bot?.totalPnl ?? bot?.pnl);
+      const expectancy = Number(bot?.expectancy);
+      const pnlClass = Number.isFinite(pnl) ? (pnl >= 0 ? 'cockpit-positive' : 'cockpit-negative') : '';
+      const expClass = Number.isFinite(expectancy) ? (expectancy >= 0 ? 'cockpit-positive' : 'cockpit-negative') : '';
+      return `<tr>
+        <td class="cockpit-symbol">${this._escapeHtml(bot?.name || bot?.botId || '—')}</td>
+        <td>${Number.isFinite(Number(bot?.trades)) ? Number(bot.trades) : '—'}</td>
+        <td>${pct(bot?.winRate)}</td>
+        <td class="${pnlClass}">${signed(pnl)}</td>
+        <td class="${expClass}">${signed(expectancy)}</td>
+        <td>${signed(bot?.avgWin)}</td>
+        <td>${signed(bot?.avgLoss)}</td>
+      </tr>`;
     }).join('');
   }
 
@@ -917,6 +1401,9 @@ class PerpsApp {
     empty?.classList.add('hidden');
     tbody.innerHTML = positions.map(p => {
       const pnlClass = p.unrealizedPnl >= 0 ? 'profit-positive' : 'profit-negative';
+      // Secondo valore EUR (CUR-01): stringa vuota quando il tasso non è fresco.
+      // Deriva solo da numeri formattati, quindi non introduce markup di terzi.
+      const pnlEur = this.fmtEur(p.unrealizedPnl);
       const coin = p.coin.includes('-PERP') ? p.coin : p.coin + '-PERP';
       const opened = p.openedAt ? new Date(p.openedAt).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '<span class="muted">—</span>';
       const botCell = p.botName
@@ -929,7 +1416,7 @@ class PerpsApp {
         <td><span class="side-badge ${p.side}">${p.side.toUpperCase()}</span></td>
         <td>${this.fmtNum(p.size)}</td>
         <td>${this.fmtUsd(p.entryPx)}</td>
-        <td class="${pnlClass}">${this.fmtUsd(p.unrealizedPnl)}</td>
+        <td class="${pnlClass}">${this.fmtUsd(p.unrealizedPnl)}${pnlEur ? `<small class="cockpit-eur">≈ ${pnlEur}</small>` : ''}</td>
         <td>${p.leverage ? p.leverage + 'x' : '—'}</td>
         <td>${p.liquidationPx ? this.fmtUsd(p.liquidationPx) : '—'}</td>
         <td class="pos-actions">

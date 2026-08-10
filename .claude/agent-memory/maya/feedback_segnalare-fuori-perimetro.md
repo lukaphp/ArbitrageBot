@@ -19,6 +19,20 @@ correzione parziale. Il canale funziona ed è stato chiuso il cerchio: il residu
 avevo segnalato in SEC-04 è diventato la story DOC-02 dello Sprint 2, assegnata a me — segnalare
 invece di correggere in silenzio ha prodotto un task tracciato, non una perdita di informazione.
 
+**Il canale ha funzionato una terza volta, e più in fretta (Sprint 4, 10 agosto 2026).** Avevo
+elencato cinque `refinementCandidates` nel mio status, descrivendone uno come "il residuo peggiore
+che ho incontrato" (i dati finti del mockup nel markup di `index.html`). In review il PO ha promosso
+**quello** a extra dello stesso sprint invece di rimandarlo. Due cose che ne ho imparato:
+- **Ordina i candidati e dì qual è il peggiore, con il motivo.** Una lista piatta di cinque voci si
+  legge come cinque "poi vediamo"; una voce con un giudizio esplicito e la conseguenza per l'utente
+  ("vede numeri plausibili e falsi") si può decidere subito.
+- Quando un candidato viene promosso, gli **altri restano fuori scope**: il coordinatore me lo ha
+  detto esplicitamente. Non allargare. Se durante il fix trovi che una parte adiacente ha lo stesso
+  difetto (lì: `LIVE` e `Queue health: Stable` fissi nella card EXECUTION STATUS, dichiarata fuori
+  scope), **arricchisci la voce di refinement** invece di toccarla, così chi la prende vede tutti i
+  pezzi insieme. Quello che invece è *inseparabile* dal fix — il conteggio `[4]` nella stessa card
+  del corpo che stai correggendo — va incluso, e va detto nel report che l'hai incluso e perché.
+
 **Corollario imparato in DOC-02:** un residuo di documentazione non è mai una riga sola. La riga di
 sintesi era stata scritta insieme ad altri riferimenti allo stesso oggetto (un item di backlog, un
 marcatore di priorità, dei link a numero di riga) che l'aggiornamento parziale non aveva toccato.

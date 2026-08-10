@@ -3,6 +3,7 @@
   "planningAt": "2026-08-10",
   "source": "docs/KB/BACKLOG/sprint4.md",
   "totalSp": 23,
+  "totalSpWithStretch": 28,
   "tasks": [
     { "id": "ADV-01", "title": "Fase 0 advisor: usage.js condiviso + 5 strumenti read-only", "owner": "bruno", "reviewer": "annie", "sp": 2, "priority": "P0", "note": "Prerequisito dichiarato di ADV-02 — da fare prima, non in parallelo" },
     { "id": "ADV-02", "title": "Fase 1 advisor: chat in sola lettura (backend + drawer UI)", "owner": ["bruno", "maya"], "reviewer": "annie", "sp": 5, "priority": "P0", "note": "Suite di prompt avversari non tagliabile; zero modifiche a riskAgent.js/proposals.approve()" },
@@ -12,13 +13,13 @@
     { "id": "ANA-01", "title": "Dashboard performance storica", "owner": ["bruno", "maya"], "reviewer": null, "sp": 3, "priority": "P2", "note": "Dopo DEBT-01 item 1-2 (toccano bot.js/botManager.js)" },
     { "id": "DEBT-01", "title": "Pacchetto debiti tecnici Sprint 3 (5 item)", "owner": ["bruno", "joshua"], "reviewer": "annie", "sp": 3, "priority": "P1" },
     { "id": "OPS-02", "title": "Verifica backup/restore sul VPS reale (carry-over)", "owner": "po", "reviewer": null, "sp": 1, "priority": "P1", "notDelegatedToAgent": true },
-    { "id": "OPS-03r", "title": "Uptime esterno su /health (residuo)", "owner": "po", "reviewer": null, "sp": 1, "priority": "P2", "notDelegatedToAgent": true }
+    { "id": "OPS-03r", "title": "Uptime esterno su /health (residuo)", "owner": "po", "reviewer": null, "sp": 1, "priority": "P2", "notDelegatedToAgent": true },
+    { "id": "LLM-01", "title": "Astrazione multi-provider LLM: DeepSeek + valutazione OpenRouter", "owner": "bruno", "reviewer": null, "sp": 5, "priority": "P3", "stretch": true, "note": "Aggiunta in review (10 agosto) su richiesta PO. Adattatore unico compatibile OpenAI, usabile sia per DeepSeek diretto sia per OpenRouter. Non cambia i modelli di default; nessuna chiave nuova obbligatoria; deve estendere la tabella prezzi di usage.js prima che qualunque fornitore non-Anthropic sia attivabile (dipendenza diretta col budget hard di ADV-03). Non blocca la chiusura delle altre 9 storie se resta parziale a fine sprint." }
   ],
   "outOfScope": [
     "Advisor fase 2 (proposte dalla chat) e fase 3 (voce) — decisione PO 10 agosto",
     "Persistenza candele locale — candidato Sprint 5",
     "Strategie più espressive (crossover, dedup template) — candidato Sprint 5",
-    "Astrazione multi-provider LLM — rivalutare a Sprint 5 con i costi reali della chat",
     "Market making stile Hummingbot — richiede prima uno spike dedicato",
     "FinBERT/sentiment — candidato a spike, non sviluppo diretto"
   ]

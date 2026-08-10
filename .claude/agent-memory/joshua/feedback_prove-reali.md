@@ -42,6 +42,20 @@ condiviso con gli altri agenti. Poi si verifica con i codici HTTP reali (`/healt
 rimosse 404, route che devono restare 200): e' l'unico modo per distinguere "l'ho rimossa" da
 "credo di averla rimossa". Nota: `timeout` non esiste su macOS.
 
+**Variante "stack Docker completo"** (OBS-01, Sprint 4): quando la prova richiede piu' container,
+costruisci il contesto in scratchpad come `git archive HEAD` **+ solo i miei file** (copiati dal
+working tree), e lancia Compose da li' con un **project name dedicato** (`-p <nome>proof`). Due
+ragioni concrete: (a) il working tree e' condiviso e a meta' sprint un altro agente puo' averci un
+file sintatticamente rotto — l'immagine costruita da li' non parte e il fallimento non dice niente
+sul mio lavoro; (b) il project name separato crea volumi `<nome>proof_*` e lascia intatto
+`arbitragebot_perps-data`, che e' dati veri. Chiudi sempre con `down -v` sul solo progetto di prova.
+Se un file mio e' un'aggiunta a un file condiviso (es. una route in `server.js`), riapplica **solo
+la mia modifica** su quella da `HEAD` invece di copiare il file intero: cosi' non trascini dentro il
+lavoro in corso degli altri.
+Per un cruscotto (Prometheus/Grafana) la prova che conta non e' "i container sono up": e' il target
+`health=up` via API, **ogni query di ogni pannello eseguita davvero** attraverso il proxy della
+datasource, e un alert portato a `firing` fermando il componente. Tutto il resto e' lettura di YAML.
+
 **Vincolo dell'ambiente:** una variabile con nome "da segreto" (es. quella di cifratura degli agent)
 messa inline nel comando bash viene **bloccata**, anche con un valore di test. Va messa in uno
 script `.sh` nello scratchpad e lanciato quello. Lo stesso hook blocca un `grep` che cita il nome

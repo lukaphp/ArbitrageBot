@@ -1,0 +1,24 @@
+# Provider di dashboard da file (OBS-01).
+#
+# I JSON stanno in /etc/grafana/dashboards, montato in sola lettura da
+# deploy/monitoring/grafana/dashboards/. NON dentro /var/lib/grafana: quella è la
+# directory del volume dei dati di Grafana, montarci sopra un bind read-only
+# significherebbe litigare con il database interno di Grafana.
+#
+# allowUiUpdates: false — la dashboard si modifica cambiando il JSON nel
+# repository, che è il requisito della story ("provisionata da file, non
+# costruita a mano nel browser"). Per esperimenti veloci resta possibile
+# "Save as copy" dalla UI: la copia è un'altra dashboard, non tocca questa.
+apiVersion: 1
+
+providers:
+  - name: arbitragebot
+    orgId: 1
+    folder: ArbitrageBot
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

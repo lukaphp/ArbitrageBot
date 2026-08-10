@@ -174,11 +174,44 @@ export class PerpsDatabase {
         PRIMARY KEY (network, address)
       );
 
+      -- ADV-02 — Sessioni del consulente AI conversazionale. Tabelle proprie e
+      -- non settings (che è un key-value per flag, non un archivio): un
+      -- transcript è anche traccia di AUDIT — "cosa mi ha detto prima che
+      -- aprissi quella posizione" — e deve sopravvivere ai riavvii del
+      -- container. Nessuna cifratura a riposo: è la stessa classe di dato di
+      -- trades/positions, in chiaro per scelta dichiarata (DEPLOY.md §2.2);
+      -- cifrarlo darebbe una falsa impressione di protezione senza cambiare il
+      -- modello di minaccia (spike §5.2).
+      CREATE TABLE IF NOT EXISTS chat_sessions (
+        id         TEXT PRIMARY KEY,
+        started_at INTEGER NOT NULL,
+        last_at    INTEGER NOT NULL,
+        title      TEXT,
+        cost_usd   REAL NOT NULL DEFAULT 0,
+        tokens_in  INTEGER NOT NULL DEFAULT 0,
+        tokens_out INTEGER NOT NULL DEFAULT 0,
+        summary    TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        ts         INTEGER NOT NULL,
+        role       TEXT NOT NULL,
+        content    TEXT,
+        tool_name  TEXT,
+        tokens     INTEGER,
+        cost_usd   REAL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_positions_bot ON positions(bot_id);
       CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id);
       CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
       CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
       CREATE INDEX IF NOT EXISTS idx_risk_equity_scope_ts ON risk_equity_history(network, address, ts);
+      CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id);
+      CREATE INDEX IF NOT EXISTS idx_chat_messages_ts ON chat_messages(ts);
+      CREATE INDEX IF NOT EXISTS idx_chat_sessions_last ON chat_sessions(last_at);
     `);
     this._migrate();
   }
@@ -446,6 +479,183 @@ export class PerpsDatabase {
     };
   }
 
+  /**
+   * ANA-01 — bucket del motivo di chiusura.
+   *
+   * `close_reason` è TESTO LIBERO (lo scrive `bot._registerClose` con la
+   * motivazione del momento), non un enum: qualunque breakdown deve passare da
+   * una classificazione dichiarata, non da un GROUP BY che sembra preciso e non
+   * lo è. I bucket, nell'ordine in cui vengono provati:
+   *
+   *  - `safety` ← chiusure di sicurezza (SL non garantito, errore di verifica SL).
+   *    **Deve restare il primo**: quelle stringhe contengono "SL", e se il match
+   *    su stop loss venisse prima un GUASTO verrebbe contato come uno stop
+   *    scattato normalmente;
+   *  - `tp` / `sl` ← il trigger che si è davvero riempito. Disponibili da quando
+   *    `bot._registerClose` confronta l'oid del fill di chiusura con gli oid dei
+   *    trigger piazzati (`slOid`/`tpOids`): la distinzione è un fatto letto
+   *    dall'exchange, non una deduzione dal segno del PnL;
+   *  - `manual_or_external` ← il fill di chiusura non appartiene a nessun trigger
+   *    del bot: pulsante del pannello, `/chiuditutto`, kill-switch con
+   *    `closePositions`. Il nome dice "manuale **o** esterna" perché quei tre casi
+   *    non sono distinguibili tra loro, e fingere che lo siano sarebbe lo stesso
+   *    errore che questo lavoro ha appena corretto;
+   *  - `strategy` ← uscita per regola della strategia o segnale esterno;
+   *  - `trigger_or_external` ← 'chiusa (TP/SL o esterna)', cioè i casi in cui NON
+   *    si è potuto stabilire quale ordine abbia chiuso (fill non ancora visibili,
+   *    fill senza oid, posizione aperta prima del tracciamento degli oid). Ci
+   *    resta anche tutto lo storico chiuso prima di quel fix: **non viene
+   *    riclassificato**, perché a posteriori il dato non è ricostruibile e
+   *    assegnarlo sarebbe inventarlo;
+   *  - `other` ← tutto il resto, comprese le righe chiuse prima della migrazione
+   *    v2 (che non hanno `close_reason`).
+   *
+   * Il conteggio per testo ESATTO resta comunque disponibile
+   * (`closeReasonsRaw`): la classificazione aiuta a leggere, non nasconde il dato.
+   */
+  closeReasonBucket(reason) {
+    const text = String(reason || '').toLowerCase();
+    if (!text) return 'other';
+    if (/sicurezza/.test(text)) return 'safety';
+    if (/take profit/.test(text)) return 'tp';
+    if (/stop loss/.test(text)) return 'sl';
+    if (/manuale o esterna/.test(text)) return 'manual_or_external';
+    if (/regola di uscita|segnale esterno/.test(text)) return 'strategy';
+    if (/tp\/sl|più trigger|esterna/.test(text)) return 'trigger_or_external';
+    return 'other';
+  }
+
+  /**
+   * ANA-01 — performance storica di un bot, dalle posizioni chiuse.
+   *
+   * Affianca `getBotStats` (7 numeri) invece di sostituirla: quella alimenta la
+   * card del bot e la sua forma è già consumata dalla UI e da `tools.js`.
+   *
+   * `expectancy` è in USD medi per trade — **la stessa definizione usata da
+   * `backtester.js`** (`totalPnl / n`), così un confronto tra il backtest di una
+   * strategia e il suo risultato live è un confronto tra numeri omogenei.
+   * `expectancyRatio` è invece la forma adimensionale in stile Freqtrade
+   * (>1 = profittevole): utile per confrontare bot con size diverse.
+   *
+   * `avgLoss` è NEGATIVO, come ogni altro PnL del progetto (`pnl`, `totalPnl`,
+   * `worstUsd`, `expectancy`): una perdita media che arriva alla UI col segno
+   * positivo verrebbe formattata come un guadagno. `avgLossAbs` è lo stesso
+   * numero in valore assoluto, per chi lo vuole nelle formule.
+   */
+  getBotPerformance(botId) {
+    this.ensure();
+    const rows = this.db.prepare(
+      `SELECT pnl, fee, close_reason, closed_at FROM positions
+       WHERE bot_id = ? AND status = 'closed' ORDER BY COALESCE(closed_at, opened_at) ASC`
+    ).all(botId);
+
+    const n = rows.length;
+    const wins = rows.filter(r => (r.pnl || 0) > 0);
+    const losses = rows.filter(r => (r.pnl || 0) < 0);
+    const grossWin = wins.reduce((s, r) => s + r.pnl, 0);
+    const grossLoss = Math.abs(losses.reduce((s, r) => s + r.pnl, 0));
+    const totalPnl = rows.reduce((s, r) => s + (r.pnl || 0), 0);
+    const totalFees = rows.reduce((s, r) => s + (r.fee || 0), 0);
+    const winRate = n ? wins.length / n : 0;
+    const lossRate = n ? losses.length / n : 0;
+    const avgWin = wins.length ? grossWin / wins.length : 0;
+    const avgLoss = losses.length ? grossLoss / losses.length : 0;
+
+    // Drawdown sulla curva di PnL CUMULATO del bot (non sull'equity dell'account,
+    // che mescola tutti i bot e i movimenti di cassa).
+    let cum = 0, peak = 0, maxDrawdownUsd = 0;
+    for (const r of rows) {
+      cum += r.pnl || 0;
+      if (cum > peak) peak = cum;
+      maxDrawdownUsd = Math.max(maxDrawdownUsd, peak - cum);
+    }
+
+    // Due viste dello stesso dato: `closeReasons` sono i CONTEGGI per bucket
+    // (la forma dichiarata nel contratto e quella che consuma la UI),
+    // `closeReasonDetail` aggiunge vinti/persi/PnL dentro ciascun bucket. Il
+    // dettaglio serve perché `trigger_or_external` non distingue TP da SL: sapere
+    // quanti di quei trade sono in utile è l'informazione più vicina al vero che i
+    // dati attuali permettono.
+    const closeReasons = {};
+    const closeReasonDetail = {};
+    const rawCounts = new Map();
+    for (const r of rows) {
+      const bucket = this.closeReasonBucket(r.close_reason);
+      closeReasons[bucket] = (closeReasons[bucket] || 0) + 1;
+      const b = closeReasonDetail[bucket] || (closeReasonDetail[bucket] = { trades: 0, wins: 0, losses: 0, pnl: 0 });
+      b.trades++;
+      if ((r.pnl || 0) > 0) b.wins++;
+      else if ((r.pnl || 0) < 0) b.losses++;
+      b.pnl += r.pnl || 0;
+      const key = r.close_reason || '(non registrato)';
+      const raw = rawCounts.get(key) || { reason: key, trades: 0, pnl: 0 };
+      raw.trades++;
+      raw.pnl += r.pnl || 0;
+      rawCounts.set(key, raw);
+    }
+
+    return {
+      trades: n,
+      wins: wins.length,
+      losses: losses.length,
+      breakeven: n - wins.length - losses.length,
+      winRate,
+      expectancy: n ? totalPnl / n : 0,
+      expectancyRatio: (lossRate > 0 && avgLoss > 0)
+        ? (winRate * avgWin) / (lossRate * avgLoss)
+        : (grossWin > 0 ? Infinity : 0),
+      avgWin,
+      // Negativo perché è una perdita (vedi nota sopra). Il ternario evita il
+      // `-0` di `-0`: innocuo in JSON, ma un valore che non è quello che sembra.
+      avgLoss: losses.length ? -avgLoss : 0,
+      avgLossAbs: avgLoss,
+      bestUsd: n ? Math.max(...rows.map(r => r.pnl || 0)) : 0,
+      worstUsd: n ? Math.min(...rows.map(r => r.pnl || 0)) : 0,
+      totalPnl,
+      totalFees,
+      profitFactor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? Infinity : 0),
+      maxDrawdownUsd,
+      firstClosedAt: rows.length ? (rows[0].closed_at ?? null) : null,
+      lastClosedAt: rows.length ? (rows[rows.length - 1].closed_at ?? null) : null,
+      closeReasons,
+      closeReasonDetail,
+      closeReasonsRaw: [...rawCounts.values()].sort((a, b) => b.trades - a.trades)
+    };
+  }
+
+  /**
+   * ANA-01 — serie del PnL CUMULATO nel tempo per un bot (posizioni chiuse).
+   * Ordine cronologico crescente: è una curva, e una curva si legge in avanti.
+   */
+  getBotPnlSeries(botId, limit = 500) {
+    this.ensure();
+    const keep = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 500)));
+    const rows = this.db.prepare(
+      `SELECT COALESCE(closed_at, opened_at) AS ts, pnl FROM positions
+       WHERE bot_id = ? AND status = 'closed'
+       ORDER BY COALESCE(closed_at, opened_at) DESC LIMIT ?`
+    ).all(botId, keep).reverse();
+    let cum = 0;
+    return rows.map(r => {
+      cum += r.pnl || 0;
+      return { ts: r.ts, pnl: r.pnl || 0, cumulative: cum };
+    });
+  }
+
+  /**
+   * ANA-01 — coppie (coin, interval) presenti in `ml_history`, con quanti
+   * campioni ciascuna. Serve per sapere QUALI serie ML esistono senza doverle
+   * indovinare: `listMlHistory` richiede coin e interval, e finora nessuno
+   * sapeva quali chiedere (motivo per cui la tabella non aveva consumer in UI).
+   */
+  listMlHistoryScopes() {
+    this.ensure();
+    return this.db.prepare(
+      `SELECT coin, interval, COUNT(*) AS samples, MAX(ts) AS lastAt
+       FROM ml_history GROUP BY coin, interval ORDER BY lastAt DESC`
+    ).all();
+  }
+
   /** Timestamp (ms) dell'ultima posizione chiusa di un bot, o null. */
   lastClosedAt(botId) {
     this.ensure();
@@ -489,6 +699,24 @@ export class PerpsDatabase {
 
   listTrades(limit = 100) {
     return this.db.prepare(`SELECT * FROM trades ORDER BY ts DESC LIMIT ?`).all(limit);
+  }
+
+  /**
+   * Storico fill filtrabile per bot e/o mercato (ADV-01, `get_trade_history`).
+   * `listTrades` prende gli ultimi N globali: con più bot attivi il mercato che
+   * interessa può non comparire affatto, quindi il filtro va applicato in SQL e
+   * non dopo il LIMIT.
+   */
+  listTradesBy({ botId = null, coin = null, limit = 100 } = {}) {
+    this.ensure();
+    const where = [];
+    const params = [];
+    if (botId) { where.push('bot_id = ?'); params.push(botId); }
+    if (coin) { where.push('coin = ?'); params.push(coin); }
+    params.push(Math.max(1, Math.min(1000, Math.floor(Number(limit) || 100))));
+    return this.db.prepare(
+      `SELECT * FROM trades ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY ts DESC LIMIT ?`
+    ).all(...params);
   }
 
   // ---- Settings ----
@@ -801,11 +1029,147 @@ export class PerpsDatabase {
     ).run(Date.now(), coin, interval, accuracy ?? null, baseline ?? null, edge ?? null, auc ?? null, samples ?? null);
   }
 
+  /**
+   * Storico qualità ML, più recenti prima.
+   *
+   * Il tie-break su `id` non è cosmetico: due retraining nello stesso
+   * millisecondo darebbero un ordine non specificato, e in una SERIE TEMPORALE
+   * un ordine instabile significa una curva che cambia forma tra due letture
+   * identiche (trovato invertendo la serie per ANA-01).
+   */
   listMlHistory(coin, interval, limit = 100) {
     this.ensure();
     return this.db.prepare(
-      `SELECT * FROM ml_history WHERE coin = ? AND interval = ? ORDER BY ts DESC LIMIT ?`
+      `SELECT * FROM ml_history WHERE coin = ? AND interval = ? ORDER BY ts DESC, id DESC LIMIT ?`
     ).all(coin, interval, limit);
+  }
+
+  // ---- Chat del consulente AI (ADV-02) ----
+
+  createChatSession({ id, title = null, startedAt = Date.now() }) {
+    this.ensure();
+    this.db.prepare(`
+      INSERT INTO chat_sessions (id, started_at, last_at, title, cost_usd, tokens_in, tokens_out, summary)
+      VALUES (?, ?, ?, ?, 0, 0, 0, NULL)
+    `).run(id, startedAt, startedAt, title);
+    return this.getChatSession(id);
+  }
+
+  getChatSession(id) {
+    this.ensure();
+    return this.db.prepare(`SELECT * FROM chat_sessions WHERE id = ?`).get(id);
+  }
+
+  listChatSessions(limit = 50) {
+    this.ensure();
+    return this.db.prepare(`SELECT * FROM chat_sessions ORDER BY last_at DESC LIMIT ?`)
+      .all(Math.max(1, Math.min(500, Math.floor(Number(limit) || 50))));
+  }
+
+  /** Titolo e riassunto rotante: si aggiornano, non si accumulano. */
+  updateChatSession(id, { title, summary, lastAt } = {}) {
+    this.ensure();
+    const existing = this.getChatSession(id);
+    if (!existing) return null;
+    this.db.prepare(`UPDATE chat_sessions SET title = ?, summary = ?, last_at = ? WHERE id = ?`).run(
+      title === undefined ? existing.title : title,
+      summary === undefined ? existing.summary : summary,
+      lastAt === undefined ? existing.last_at : lastAt,
+      id
+    );
+    return this.getChatSession(id);
+  }
+
+  /**
+   * Contabilità di sessione: si ACCUMULA (un turno alla volta), non si sovrascrive.
+   * Fatto in SQL con `cost_usd = cost_usd + ?` e non leggendo-modificando-scrivendo
+   * dal chiamante: better-sqlite3 è sincrono, così l'incremento resta atomico.
+   */
+  addChatSessionUsage(id, { costUsd = 0, tokensIn = 0, tokensOut = 0, lastAt = Date.now() } = {}) {
+    this.ensure();
+    this.db.prepare(`
+      UPDATE chat_sessions
+      SET cost_usd = cost_usd + ?, tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, last_at = ?
+      WHERE id = ?
+    `).run(Number(costUsd) || 0, Math.round(Number(tokensIn) || 0), Math.round(Number(tokensOut) || 0), lastAt, id);
+    return this.getChatSession(id);
+  }
+
+  insertChatMessage({ sessionId, role, content, toolName = null, tokens = null, costUsd = null, ts = Date.now() }) {
+    this.ensure();
+    const info = this.db.prepare(`
+      INSERT INTO chat_messages (session_id, ts, role, content, tool_name, tokens, cost_usd)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(sessionId, ts, role, content ?? null, toolName, tokens, costUsd);
+    return info.lastInsertRowid;
+  }
+
+  /** Messaggi in ordine cronologico (è così che si ricostruisce una conversazione). */
+  listChatMessages(sessionId, limit = 500) {
+    this.ensure();
+    return this.db.prepare(`SELECT * FROM chat_messages WHERE session_id = ? ORDER BY id ASC LIMIT ?`)
+      .all(sessionId, Math.max(1, Math.min(2000, Math.floor(Number(limit) || 500))));
+  }
+
+  /** Ultimi N messaggi in ordine cronologico (finestra scorrevole della chat). */
+  listRecentChatMessages(sessionId, limit = 60) {
+    this.ensure();
+    return this.db.prepare(`SELECT * FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT ?`)
+      .all(sessionId, Math.max(1, Math.min(2000, Math.floor(Number(limit) || 60)))).reverse();
+  }
+
+  countChatMessages(sessionId) {
+    this.ensure();
+    return this.db.prepare(`SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?`).get(sessionId).n;
+  }
+
+  /**
+   * Elimina una conversazione con tutti i suoi messaggi. Stesso stile
+   * dell'eliminazione massiva dello storico strategie (Sprint 2): messaggi prima,
+   * sessione dopo, e ritorna quante righe sono state toccate — un'eliminazione
+   * che non dice cosa ha eliminato non è verificabile.
+   */
+  deleteChatSession(id) {
+    this.ensure();
+    const messages = this.db.prepare(`DELETE FROM chat_messages WHERE session_id = ?`).run(id).changes;
+    const sessions = this.db.prepare(`DELETE FROM chat_sessions WHERE id = ?`).run(id).changes;
+    return { deleted: sessions > 0, sessions, messages };
+  }
+
+  /**
+   * Retention: elimina le conversazioni non toccate da più di `days` giorni.
+   * Il criterio è `last_at`, non `started_at`: una conversazione ripresa dopo tre
+   * mesi è ancora viva e non va cancellata sotto il naso dell'utente.
+   */
+  purgeOldChatSessions(days = 90, now = Date.now()) {
+    this.ensure();
+    const cutoff = now - Math.max(1, Number(days) || 90) * 86400000;
+    const ids = this.db.prepare(`SELECT id FROM chat_sessions WHERE last_at < ?`).all(cutoff).map(r => r.id);
+    if (!ids.length) return { sessions: 0, messages: 0 };
+    const placeholders = ids.map(() => '?').join(',');
+    const messages = this.db.prepare(`DELETE FROM chat_messages WHERE session_id IN (${placeholders})`).run(...ids).changes;
+    const sessions = this.db.prepare(`DELETE FROM chat_sessions WHERE id IN (${placeholders})`).run(...ids).changes;
+    return { sessions, messages, ids };
+  }
+
+  /**
+   * Speso dal consulente da un istante in poi (ADV-03: mese corrente).
+   *
+   * Somma i `chat_messages.cost_usd` e non i `chat_sessions.cost_usd`: una
+   * conversazione iniziata il 30 e continuata il 2 addebiterebbe al mese
+   * sbagliato tutto il suo costo. Include anche le sessioni poi ELIMINATE? No —
+   * ed è una scelta dichiarata: cancellare una conversazione non deve poter
+   * azzerare il budget speso, quindi il totale mensile viene tenuto anche in un
+   * contatore cumulativo in `settings` (vedi advisor.js), e qui si legge il
+   * massimo tra i due.
+   */
+  getAdvisorSpend(sinceTs) {
+    this.ensure();
+    const row = this.db.prepare(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS total, COUNT(*) AS turns
+       FROM chat_messages WHERE ts >= ? AND cost_usd IS NOT NULL`
+    ).get(Math.floor(Number(sinceTs) || 0));
+    return { spentUsd: row.total || 0, turns: row.turns || 0 };
   }
 
   // ---- PnL giornaliero persistito (per-bot, per-giorno) ----

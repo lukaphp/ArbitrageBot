@@ -435,7 +435,7 @@
     <nav class="sidebar" aria-label="Sommario della guida">
         <div class="sidebar-brand">
             <h2>🤖 ArbitrageBot</h2>
-            <span>v2.7</span>
+            <span>v2.8</span>
         </div>
 
         <div class="search-box">
@@ -451,6 +451,7 @@
             <li class="nav-item"><a href="#tab-dashboard">📊 Tab Dashboard</a></li>
             <li class="nav-item"><a href="#tab-execution">⚡ Tab Execution (Ordini)</a></li>
             <li class="nav-item"><a href="#tab-positions">📈 Tab Positions (Posizioni)</a></li>
+            <li class="nav-item"><a href="#tab-performance">📊 Tab Performance (Storico)</a></li>
             <li class="nav-item"><a href="#tab-risk">🛡️ Tab Risk &amp; Alerts</a></li>
             <li class="nav-item"><a href="#tab-system">⚙️ Tab System (Bot)</a></li>
 
@@ -463,6 +464,7 @@
 
             <li class="nav-section-title">Intelligenza Artificiale</li>
             <li class="nav-item"><a href="#analyst-ai">🧠 Analyst AI &amp; Proposte</a></li>
+            <li class="nav-item"><a href="#advisor-ai">💬 Consulente AI (Chat)</a></li>
             <li class="nav-item"><a href="#strategy-history">🗂️ Storico Strategie</a></li>
 
             <li class="nav-section-title">Integrazioni &amp; Sicurezza</li>
@@ -628,6 +630,20 @@
                     </div>
                 </div>
             </div>
+
+            <div class="card">
+                <h3>Secondo valore in euro</h3>
+                <p>Accanto a <strong>equity</strong>, <strong>PnL giornaliero</strong> e <strong>PnL di ogni posizione</strong> compare un secondo importo in euro, più piccolo e in grigio, preceduto da <code>≈</code>. Sotto l'intestazione della dashboard una riga dichiara il tasso usato e la sua età: <code>EUR indicativo · EURUSD 1.0925 · aggiornato 12 min fa</code>.</p>
+
+                <div class="alert alert-warning">
+                    <span class="alert-icon">⚠️</span>
+                    <div>
+                        <strong>È un numero di comodo, non una conversione di sistema.</strong> Il dollaro resta l'unica valuta con cui l'applicazione ragiona: l'euro è calcolato al momento della visualizzazione e non entra in nessun calcolo. In particolare <strong>nessun limite di rischio viene convertito</strong> — <code>maxDailyLossUsd</code>, <code>maxPositionUsd</code> e <code>maxTotalExposureUsd</code> sono e restano in USD. Se leggi <code>≈ €90</code> accanto a una perdita giornaliera di <code>$100</code>, il limite che il server applica è quello in dollari.
+                    </div>
+                </div>
+
+                <p><strong>Se il tasso non è fresco, l'euro sparisce.</strong> Quando la fonte del cambio (BCE via Frankfurter, nessuna chiave richiesta) non risponde, oppure il tasso in cache è più vecchio della soglia consentita, l'interfaccia mostra <strong>solo l'importo in dollari</strong> e la riga sul tasso sparisce insieme all'euro. È deliberato: un euro calcolato con un tasso vecchio sarebbe indistinguibile da uno giusto, e su un pannello di trading vale la stessa regola del grafico equity — un numero plausibile ma sbagliato è peggio di un numero assente.</p>
+            </div>
         </section>
 
         <!-- COCKPIT EXECUTION -->
@@ -750,6 +766,67 @@
                         </tr>
                     </tbody>
                 </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- COCKPIT PERFORMANCE -->
+        <section id="tab-performance" class="doc-section">
+            <div class="section-header">
+                <h2>📊 Tab Performance (Storico &amp; Aggregazioni)</h2>
+            </div>
+
+            <div class="card">
+                <h3>Il consuntivo di quello che i bot hanno fatto davvero</h3>
+                <p>Questa sezione non introduce nessuna misura nuova: mostra dati che l'applicazione registra da sempre — posizioni chiuse con il loro motivo di chiusura, storico equity, qualità del modello ML — e che finora non erano visibili da nessuna parte.</p>
+
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Riquadro</th>
+                            <th>Cosa mostra</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="ui-element">CURVA EQUITY STORICA</span></td>
+                            <td>L'andamento del conto su tutto lo storico persistito, non solo la sessione corrente.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">MOTIVI DI CHIUSURA</span></td>
+                            <td>Quanti trade sono stati chiusi da take profit, stop loss, chiusura manuale, DCA, trailing stop o liquidazione, in valore assoluto e in percentuale.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">QUALITÀ DEL MODELLO ML NEL TEMPO</span></td>
+                            <td>Accuratezza del modello contro la sua <em>baseline</em>, un punto per ogni retraining. Il mercato si scegli dal menu in alto a destra del riquadro.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">CONFRONTO PER BOT</span></td>
+                            <td>Una riga per bot: numero di trade chiusi, win rate, PnL totale, expectancy, media delle operazioni vinte e delle perse.</td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>Come si leggono i due numeri che contano</h3>
+                <p><strong>Qualità ML.</strong> La <em>baseline</em> è la percentuale della classe maggioritaria: è quanto otterrebbe un modello che risponde sempre la stessa cosa. Una curva di accuratezza <strong>sotto la baseline</strong> significa che il modello non sta aggiungendo niente, e che il gate ML di quel mercato sta filtrando ingressi senza una ragione statistica. Una accuratezza che scende verso la baseline nel tempo è il decadimento dell'edge: il segnale che il modello va riaddestrato o che quella strategia ha smesso di funzionare su quel mercato.</p>
+                <p><strong>Expectancy</strong> è il guadagno atteso per singolo trade (<code>win rate × media vinta − loss rate × media persa</code>). Un bot con expectancy negativa perde denaro nel lungo periodo anche se ha avuto qualche operazione molto positiva.</p>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">ℹ️</span>
+                    <div>
+                        <strong>Stati vuoti.</strong> Un bot senza trade chiusi resta in tabella con i valori a <code>—</code> e non scompare: i numeri comparirebbero solo dopo la prima chiusura. Lo stesso per la qualità ML, che si popola dal primo retraining del modello.
+                    </div>
+                </div>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">💡</span>
+                    <div>
+                        <strong>La sezione non è in polling.</strong> I dati si caricano quando apri il tab e quando premi <span class="ui-element">↻ Aggiorna</span>, non a intervalli. Le altre parti del cockpit si aggiornano da sole; questa è un'aggregazione storica e non ha ragione di ricalcolarsi ogni pochi secondi.
+                    </div>
                 </div>
             </div>
         </section>
@@ -1130,6 +1207,62 @@
                     <li><strong>Modale di stima costo</strong>: prima di lanciare un'analisi on-demand ricevi un preventivo in dollari. Solo il primo input è misurato esattamente; il resto è un <em>intervallo</em>, perché il numero di iterazioni del loop agentico non è noto in anticipo. La stima tiene conto del <em>prompt caching</em> (scrivere in cache costa 1,25×, rileggere 0,1×).</li>
                 </ul>
                 <p style="margin-bottom:0">I prezzi per milione di token sono configurabili (<code>PRICE_SONNET_IN</code>, <code>PRICE_SONNET_OUT</code>…) e vanno aggiornati se i listini cambiano. Con <code>AGENTS_ENABLED=false</code> il costo è zero e la piattaforma resta pienamente funzionante.</p>
+            </div>
+        </section>
+
+        <!-- CONSULENTE AI (DRAWER) -->
+        <section id="advisor-ai" class="doc-section">
+            <div class="section-header">
+                <h2>💬 Consulente AI (Drawer di Chat)</h2>
+            </div>
+
+            <div class="card">
+                <h3>Una conversazione accanto ai dati, non al loro posto</h3>
+                <p>Il pulsante <span class="ui-element">💬 CONSULENTE</span> nell'intestazione, accanto al pill MetaMask, apre un pannello laterale da destra: una conversazione sul tuo portafoglio, che resta visibile insieme a posizioni, PnL e rischio. Su schermo stretto occupa tutta la pagina. Si chiude con la <strong>×</strong>, con un secondo click sul pulsante o con <code>Esc</code>.</p>
+                <p>È una cosa diversa dall'Analyst della sezione precedente: l'Analyst gira da solo e produce proposte, il consulente risponde a te e <strong>non propone niente</strong>.</p>
+
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr><th>Elemento</th><th>Funzione</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><span class="ui-element">Menu delle conversazioni</span></td><td>Passa da una conversazione all'altra; ognuna ha il suo transcript.</td></tr>
+                        <tr><td><span class="btn-demo btn-demo-outline">+ Nuova</span></td><td>Apre una conversazione vuota.</td></tr>
+                        <tr><td><span class="btn-demo btn-demo-danger">🗑</span></td><td>Elimina la conversazione corrente, previa conferma. Il transcript non è recuperabile.</td></tr>
+                        <tr><td><span class="ui-element">Campo di invio</span></td><td><code>Invio</code> invia, <code>Shift+Invio</code> va a capo.</td></tr>
+                        <tr><td><span class="ui-element">Badge del budget</span></td><td>Speso del mese e budget mensile, <strong>in sola lettura</strong>.</td></tr>
+                    </tbody>
+                </table>
+                </div>
+
+                <div class="alert alert-warning">
+                    <span class="alert-icon">⚠️</span>
+                    <div>
+                        <strong>Sola consultazione: legge e risponde, non tocca niente.</strong> Il consulente ha accesso ai soli strumenti di lettura (conto, posizioni, snapshot di rischio, limiti di portafoglio, storico operazioni, stato del kill-switch). <strong>Non può</strong> aprire o chiudere posizioni, modificare stop, avviare o fermare bot, creare proposte o disattivare il kill-switch — e non perché il prompt gliel'ha chiesto gentilmente: gli strumenti di scrittura non gli vengono nemmeno presentati, e il server rifiuta un nome fuori dalla lista consentita. Se gli chiedi di chiudere tutto, ti spiega come farlo tu.
+                    </div>
+                </div>
+
+                <p><strong>Sotto ogni risposta</strong> compaiono gli strumenti che ha consultato per formularla e il costo del turno. Serve a poter distinguere una risposta basata su dati letti adesso da un'affermazione generica.</p>
+            </div>
+
+            <div class="card">
+                <h3>💰 Budget mensile e degrado dichiarato</h3>
+                <p><strong>Il budget si cambia solo da Telegram.</strong> Il badge nel drawer mostra quanto hai speso nel mese e il tetto (default <strong>$10/mese</strong>), ma <strong>nessun controllo della pagina web può modificarlo</strong>: si alza o si abbassa con <code>/advisorbudget &lt;importo&gt;</code> dalla chat Telegram autorizzata, con conferma in due passi. È voluto — chi riuscisse a entrare nella sessione web non può alzarsi il budget da solo, esattamente come per il kill-switch.</p>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">🔒</span>
+                    <div>
+                        <strong>Al raggiungimento del tetto la chat si ferma e lo dice</strong>, con l'importo speso e quello disponibile: non degrada in silenzio in risposte più povere. Nello stesso modo, se il consulente è disattivato lato server (<code>AGENTS_ENABLED=false</code>) o manca la chiave API, il drawer mostra il motivo per esteso e disabilita il campo di invio — <strong>il resto del cockpit continua a funzionare normalmente</strong>.
+                    </div>
+                </div>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">💡</span>
+                    <div>
+                        <strong>Cosa questa versione non fa.</strong> Non propone azioni e non parla: sono state escluse deliberatamente da questa iterazione. Prima il consulente deve dimostrare di dire cose vere sui tuoi dati; dargli la possibilità di proporre operazioni è un passo successivo, con le sue verifiche.
+                    </div>
+                </div>
             </div>
         </section>
 

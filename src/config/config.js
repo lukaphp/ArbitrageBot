@@ -211,14 +211,95 @@ export const HYPERLIQUID_CONFIG = {
     proposalTtlMin: parseInt(process.env.AGENT_PROPOSAL_TTL_MIN) || 30,   // scadenza proposte
     // Whitelist mercati per le azioni di apertura (vuota = tutti). Es: "ETH,BTC,SOL"
     marketWhitelist: (process.env.AGENT_MARKET_WHITELIST || '').split(',').map(s => s.trim()).filter(Boolean),
+
+    // --- Consulente AI conversazionale (ADV-02/03) ---
+    // Manopola SEPARATA da analystModel: sono compiti diversi (batch che produce
+    // JSON vs sessione lunga in prosa) e condividerla significherebbe non poter
+    // scegliere il modello economico per la chat senza declassare l'analisi.
+    // Default Haiku: è la leva di costo #1 dello spike (§4.3), ~3x di risparmio
+    // rispetto a Sonnet. L'escalation a un modello più grande è esplicita, mai
+    // automatica.
+    advisorModel: process.env.AGENT_ADVISOR_MODEL || 'claude-haiku-4-5',
+    // Turni tenuti "per intero" nella finestra scorrevole; i precedenti
+    // confluiscono nel riassunto rotante (spike §5).
+    advisorWindowTurns: parseInt(process.env.AGENT_ADVISOR_WINDOW_TURNS) || 15,
+    // Tetto duro di iterazioni tool-use per singolo turno di chat: più basso di
+    // quello dell'Analyst (10) perché in chat il transcript si rispedisce a ogni
+    // iterazione e il costo cresce in fretta.
+    advisorMaxIterations: parseInt(process.env.AGENT_ADVISOR_MAX_ITERATIONS) || 5,
+    // ADV-03 — budget mensile DI DEFAULT, il profilo più stretto dello spike
+    // §4.3. Il valore effettivo vive in `settings` e si modifica SOLO da Telegram
+    // (conferma a due passi): nessuna rotta web lo tocca.
+    advisorMonthlyBudgetUsd: parseFloat(process.env.AGENT_ADVISOR_MONTHLY_BUDGET_USD) || 10,
+    // Retention dei transcript di chat, in giorni (spike §5 punto 1).
+    advisorRetentionDays: parseInt(process.env.AGENT_ADVISOR_RETENTION_DAYS) || 90,
     // Prezzi STIMATI dei modelli Claude in USD per 1M di token (input/output).
     // Configurabili: aggiorna se i listini cambiano. La scelta del tier avviene
     // per sottostringa del nome modello (opus/sonnet/haiku).
     pricing: {
       opus: { in: parseFloat(process.env.PRICE_OPUS_IN) || 15, out: parseFloat(process.env.PRICE_OPUS_OUT) || 75 },
       sonnet: { in: parseFloat(process.env.PRICE_SONNET_IN) || 3, out: parseFloat(process.env.PRICE_SONNET_OUT) || 15 },
-      haiku: { in: parseFloat(process.env.PRICE_HAIKU_IN) || 1, out: parseFloat(process.env.PRICE_HAIKU_OUT) || 5 }
-    }
+      haiku: { in: parseFloat(process.env.PRICE_HAIKU_IN) || 1, out: parseFloat(process.env.PRICE_HAIKU_OUT) || 5 },
+
+      // LLM-01 — listino PER MODELLO, necessario appena si esce da Anthropic.
+      //
+      // La selezione per sottostringa qui sopra (opus/sonnet/haiku) funziona solo
+      // perché i nomi dei modelli Anthropic contengono il tier. Un modello di un
+      // altro fornitore non corrisponde a nessuno dei tre e `priceOf` ripiegava
+      // su Sonnet: un turno DeepSeek verrebbe fatturato ~11x il suo prezzo reale,
+      // e il budget mensile a soglia dura di ADV-03 scatterebbe nel momento
+      // sbagliato. È un bug silenzioso proprio nella storia che il PO ha voluto
+      // più cauta di tutte, quindi il listino per modello è un prerequisito
+      // dell'attivazione, non un raffinamento.
+      //
+      // ⚠️ I valori sotto sono i listini pubblici NOTI al momento della scrittura
+      // e non è stato possibile riverificarli (nessun accesso di rete, stessa
+      // riserva dello spike §8.1). Vanno ricontrollati quando le chiavi verranno
+      // provisionate: sono tutti sovrascrivibili da ENV senza toccare il codice.
+      models: {
+        // DeepSeek diretto (api.deepseek.com)
+        'deepseek-chat': {
+          in: parseFloat(process.env.PRICE_DEEPSEEK_CHAT_IN) || 0.27,
+          out: parseFloat(process.env.PRICE_DEEPSEEK_CHAT_OUT) || 1.10
+        },
+        'deepseek-reasoner': {
+          in: parseFloat(process.env.PRICE_DEEPSEEK_REASONER_IN) || 0.55,
+          out: parseFloat(process.env.PRICE_DEEPSEEK_REASONER_OUT) || 2.19
+        },
+        // Gli stessi modelli via OpenRouter, che li nomina col prefisso del
+        // fornitore. Voci separate di proposito: il gateway può applicare un
+        // margine, e assumere che il prezzo coincida sarebbe di nuovo un numero
+        // dato per buono senza verifica.
+        'deepseek/deepseek-chat': {
+          in: parseFloat(process.env.PRICE_OR_DEEPSEEK_CHAT_IN) || 0.27,
+          out: parseFloat(process.env.PRICE_OR_DEEPSEEK_CHAT_OUT) || 1.10
+        },
+        'deepseek/deepseek-r1': {
+          in: parseFloat(process.env.PRICE_OR_DEEPSEEK_R1_IN) || 0.55,
+          out: parseFloat(process.env.PRICE_OR_DEEPSEEK_R1_OUT) || 2.19
+        }
+      }
+    },
+
+    // LLM-01 — fornitori LLM alternativi. NESSUNA chiave è obbligatoria: senza,
+    // il fornitore è semplicemente non disponibile e tutto resta come oggi
+    // (solo Anthropic), esattamente come `ANTHROPIC_API_KEY` si comporta già.
+    // `deepseek` e `openrouter` sono lo STESSO adattatore compatibile OpenAI con
+    // baseURL e chiave diversi: non due percorsi di codice, due righe di config.
+    providers: {
+      deepseek: {
+        baseURL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1',
+        apiKeyEnv: 'DEEPSEEK_API_KEY'
+      },
+      openrouter: {
+        baseURL: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+        apiKeyEnv: 'OPENROUTER_API_KEY'
+      }
+    },
+    // Fornitore usato dal consulente conversazionale: 'anthropic' (default),
+    // 'deepseek' o 'openrouter'. Cambiare questo NON cambia il modello di
+    // default: `AGENT_ADVISOR_MODEL` resta la manopola del modello.
+    advisorProvider: process.env.AGENT_ADVISOR_PROVIDER || 'anthropic'
   }
 };
 

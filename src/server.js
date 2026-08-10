@@ -48,6 +48,7 @@ import botManager from './perps/botManager.js';
 import portfolio from './perps/portfolio.js';
 import notifier from './perps/notifier.js';
 import metrics from './perps/metrics.js';
+import fxRate from './perps/fxRate.js';
 import optimizer from './perps/optimizer.js';
 import predictor from './perps/predictor.js';
 import telegramControl from './perps/telegramControl.js';
@@ -65,10 +66,11 @@ if (typeof BigInt.prototype.toJSON !== 'function') {
 // Sistema agentico (backbone + Analyst AI)
 import agentRuntime from './agents/runtime.js';
 import analyst from './agents/analyst/analyst.js';
+import advisor from './agents/advisor/advisor.js';
 import proposals from './agents/proposals.js';
 import riskAgent from './agents/riskAgent.js';
 import mlTrainer from './agents/mlTrainer.js';
-import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk } from './perps/riskSnapshot.js';
+import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk, RISK_ALERT_THRESHOLDS, toRiskBotView } from './perps/riskSnapshot.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -272,6 +274,33 @@ class ArbitrageBotServer {
       }
     });
 
+    // Tasso di cambio EUR/USD — SOLO visualizzazione (CUR-01).
+    //
+    // Sotto /api/* quindi dietro il gate cookie come le altre API della cockpit.
+    // Risponde sempre 200 con `success: true` anche quando il tasso non c'è: per
+    // chi disegna la UI "tasso non disponibile" è uno stato normale da mostrare,
+    // non un errore da gestire in un catch — e `data.rate: null` + `data.stale:
+    // true` lo dicono senza ambiguità. Un 5xx qui farebbe sembrare rotta la
+    // cockpit per un dato accessorio.
+    //
+    // Nessun limite di rischio viene convertito in euro: vedi l'intestazione di
+    // src/perps/fxRate.js.
+    this.app.get('/api/fx/eurusd', async (_req, res) => {
+      try {
+        const fx = await fxRate.getEurUsd();
+        res.json({ success: true, data: fx });
+      } catch (e) {
+        // Non dovrebbe accadere: getEurUsd() cattura già i suoi errori e li
+        // riporta in `error`. Se accade, la forma della risposta resta quella che
+        // la UI si aspetta, con rate null.
+        logger.warn(`FX EUR/USD: errore inatteso nella route: ${e.message}`);
+        res.json({
+          success: true,
+          data: { rate: null, asOf: null, stale: true, ageMs: null, fetchedAt: null, fetchAgeMs: null, source: 'frankfurter', error: e.message }
+        });
+      }
+    });
+
     // Route del sottosistema Perps (Hyperliquid)
     this.setupPerpsRoutes();
   }
@@ -437,37 +466,20 @@ class ArbitrageBotServer {
         }
       }
 
-      const limits = {
-        ...portfolio.getLimits(),
-        marginWarningPct: 60,
-        marginCriticalPct: 80,
-        drawdownWarningPct: 5,
-        drawdownCriticalPct: 10
-      };
+      // ADV-01: soglie e adattatore bot arrivano da riskSnapshot.js, così la
+      // cockpit e lo strumento `get_risk_snapshot` del consulente AI leggono
+      // esattamente le stesse regole invece di due copie che possono divergere.
+      const limits = { ...portfolio.getLimits(), ...RISK_ALERT_THRESHOLDS };
       const botRows = new Map(knownBotRows.map(row => [row.id, row]));
       const allBots = botManager.listStates();
       const scopedBots = address
         ? allBots.filter(bot => botRows.get(bot.id)?.master_address?.toLowerCase() === address.toLowerCase())
         : allBots;
-      const bots = scopedBots.map(bot => {
-        const loopInterval = bot.config?.loopInterval || config.HYPERLIQUID_CONFIG.botLoopInterval;
-        const stale = bot.status === 'running' && bot.lastTickAt > 0
-          && now - bot.lastTickAt > Math.max(3 * loopInterval, 60000);
-        return {
-          id: bot.id,
-          name: bot.name,
-          coin: bot.coin,
-          status: bot.status,
-          dailyPnl: Number(bot.dailyPnl || 0),
-          lastError: bot.lastError || null,
-          tickErrors: Number(bot.tickErrors || 0),
-          lastTickAt: bot.lastTickAt || null,
-          stale,
-          staleSeconds: stale ? Math.round((now - bot.lastTickAt) / 1000) : 0,
-          inPosition: !!bot.inPosition,
-          maxDailyLossUsd: Number(bot.config?.risk?.maxDailyLossUsd ?? config.HYPERLIQUID_CONFIG.risk.maxDailyLossUsd)
-        };
-      });
+      const bots = scopedBots.map(bot => toRiskBotView(bot, {
+        now,
+        defaultLoopInterval: config.HYPERLIQUID_CONFIG.botLoopInterval,
+        defaultMaxDailyLossUsd: config.HYPERLIQUID_CONFIG.risk.maxDailyLossUsd
+      }));
       const marketStatus = marketData.getStatus();
       let equityHistory = address ? db.listRiskEquityHistory(network, address, 180) : [];
       const persistedDrawdown = address ? db.getRiskDrawdownState(network, address) : null;
@@ -829,9 +841,11 @@ class ArbitrageBotServer {
       }
     });
 
-    app.patch('/api/perps/bots/:id', (req, res) => {
+    // DEBT-01: `updateBot` è asincrono perché attende il tick in volo prima di
+    // sostituire l'istanza — senza `await` qui si risponderebbe con una promise.
+    app.patch('/api/perps/bots/:id', async (req, res) => {
       try {
-        const state = botManager.updateBot(req.params.id, req.body);
+        const state = await botManager.updateBot(req.params.id, req.body);
         res.json({ success: true, data: state });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });
@@ -1226,11 +1240,151 @@ class ArbitrageBotServer {
       res.json({ success: true, data: db.listAudit(parseInt(req.query.limit) || 100) });
     });
 
-    // Kill-switch on/off esplicito (lo stato persiste e blocca le aperture)
+    /**
+     * Kill-switch on/off esplicito (lo stato persiste e blocca le aperture).
+     *
+     * DEBT-01 item 3 — NOTIFICA su Telegram, come fa TG-01 dal lato chat. Questa
+     * è l'unica rotta che SPEGNE il kill-switch (la usa
+     * `perps.resumeFromKillSwitch` nella cockpit) e finora lo faceva in silenzio:
+     * le aperture tornavano consentite senza che ne restasse traccia sul canale
+     * che l'operatore guarda davvero. Un kill-switch non è un'azione privata di
+     * chi l'ha premuto.
+     *
+     * Due vincoli sul testo, entrambi verificati da test:
+     *  - una notifica per CAMBIO reale di stato, non per click: premere due volte
+     *    "riattiva" non deve produrre due messaggi (stesso principio del cooldown
+     *    di portafoglio e del watchdog WS). L'audit invece registra ogni
+     *    tentativo — la traccia di chi ha premuto non si perde;
+     *  - il messaggio dichiara solo ciò che questa rotta fa davvero: scrive il
+     *    flag. NON ferma i bot in esecuzione (quello è `/api/perps/killswitch`) e
+     *    non chiude posizioni. Annunciare un effetto non prodotto è il modo
+     *    peggiore di sbagliare: l'operatore crederebbe di essere protetto.
+     */
     app.post('/api/agents/killswitch', (req, res) => {
       const on = req.body?.on !== false;
+      const was = riskAgent.isKillSwitchOn();
       riskAgent.setKillSwitch(on);
-      res.json({ success: true, data: { killSwitch: on } });
+      if (was !== on) {
+        if (on) {
+          logger.warn('🛑 Kill-switch attivato dal pannello web (solo flag: nessun bot fermato)');
+          notifier.notify('🛑 <b>Kill-switch attivato</b> dal pannello web: nuove aperture <b>bloccate</b>.\nI bot in esecuzione <b>non</b> sono stati fermati e le posizioni aperte <b>non</b> sono state chiuse da questa azione.');
+        } else {
+          logger.warn('✅ Kill-switch disattivato dal pannello web: aperture di nuovo consentite');
+          notifier.notify('✅ <b>Kill-switch disattivato</b> dal pannello web: nuove aperture di nuovo <b>consentite</b>.\nI bot fermati <b>non</b> sono stati riavviati: riprendere a operare resta una decisione separata.');
+        }
+      }
+      res.json({ success: true, data: { killSwitch: on, changed: was !== on } });
+    });
+
+    /**
+     * ANA-01 — performance storica aggregata (una chiamata, non un polling).
+     *
+     * I dati esistevano già tutti (posizioni chiuse con `close_reason`,
+     * `risk_equity_history`, `ml_history`): mancava l'aggregazione e la
+     * restituzione. Qui si mettono insieme senza ricalcolare nulla altrove:
+     * expectancy/avgWin/avgLoss/breakdown arrivano da `db.getBotPerformance`, la
+     * curva equity da `db.listRiskEquityHistory` e le serie ML da
+     * `db.listMlHistory` — gli stessi metodi che già alimentano il resto.
+     *
+     * Pensata per essere chiamata all'APERTURA della sezione, non in loop: una
+     * sola risposta con tutto (criterio «nessun nuovo fetch pesante in loop»).
+     */
+    app.get('/api/perps/performance', (req, res) => {
+      try {
+        const botRows = db.listBots();
+        const requestedAddress = typeof req.query.address === 'string' && req.query.address.trim()
+          ? req.query.address.trim()
+          : null;
+        const address = requestedAddress || botRows[0]?.master_address || null;
+        const network = hyperliquid.getNetwork();
+        const seriesLimit = Math.max(10, Math.min(2000, parseInt(req.query.limit) || 500));
+
+        const liveById = new Map(botManager.listStates().map(s => [s.id, s]));
+        const bots = botRows.map(row => {
+          const perf = db.getBotPerformance(row.id);
+          const live = liveById.get(row.id);
+          return {
+            botId: row.id,
+            name: row.name,
+            coin: row.coin,
+            status: live?.status || row.status,
+            paper: !!live?.paper,
+            trades: perf.trades,
+            wins: perf.wins,
+            losses: perf.losses,
+            winRate: perf.winRate,
+            expectancy: perf.expectancy,
+            expectancyRatio: perf.expectancyRatio,
+            avgWin: perf.avgWin,
+            avgLoss: perf.avgLoss,        // negativo, come ogni PnL esposto
+            avgLossAbs: perf.avgLossAbs,
+            bestUsd: perf.bestUsd,
+            worstUsd: perf.worstUsd,
+            totalPnl: perf.totalPnl,
+            totalFees: perf.totalFees,
+            profitFactor: perf.profitFactor,
+            maxDrawdownUsd: perf.maxDrawdownUsd,
+            firstClosedAt: perf.firstClosedAt,
+            lastClosedAt: perf.lastClosedAt,
+            closeReasons: perf.closeReasons,             // { bucket: conteggio }
+            closeReasonDetail: perf.closeReasonDetail,   // { bucket: {trades,wins,losses,pnl} }
+            closeReasonsRaw: perf.closeReasonsRaw,       // testo esatto, niente nascosto
+            pnlSeries: db.getBotPnlSeries(row.id, seriesLimit)
+          };
+        });
+
+        // Aggregato di portafoglio: la somma dei bot, non un secondo calcolo.
+        const closedTrades = bots.reduce((s, b) => s + b.trades, 0);
+        const totals = {
+          bots: bots.length,
+          trades: closedTrades,
+          wins: bots.reduce((s, b) => s + b.wins, 0),
+          totalPnl: bots.reduce((s, b) => s + b.totalPnl, 0),
+          totalFees: bots.reduce((s, b) => s + b.totalFees, 0)
+        };
+        totals.winRate = closedTrades ? totals.wins / closedTrades : 0;
+        totals.expectancy = closedTrades ? totals.totalPnl / closedTrades : 0;
+
+        const equityHistory = address ? db.listRiskEquityHistory(network, address, Math.min(seriesLimit, 5000)) : [];
+        const drawdown = mergeDrawdownState(
+          calculateDrawdown(equityHistory),
+          address ? db.getRiskDrawdownState(network, address) : null
+        );
+
+        // ml_history esisteva ed era senza consumer perché `listMlHistory` vuole
+        // coin e interval e nessuno sapeva quali chiedere: si enumerano le serie
+        // presenti (`mlScopes`, per popolare un selettore) e si restituiscono i
+        // punti in un unico array PIATTO, ciascuno con la sua coin/interval —
+        // filtrare un array piatto per coin è ciò che serve a un grafico, mentre
+        // una struttura annidata costringerebbe la UI a srotolarla.
+        const mlScopes = db.listMlHistoryScopes();
+        const mlHistory = mlScopes.flatMap(scope =>
+          db.listMlHistory(scope.coin, scope.interval, Math.min(seriesLimit, 500))
+            .map(r => ({
+              coin: scope.coin, interval: scope.interval, ts: r.ts,
+              accuracy: r.accuracy, baseline: r.baseline, edge: r.edge, auc: r.auc, samples: r.samples
+            }))
+            .reverse() // cronologico crescente: è una serie temporale
+        );
+
+        res.json({
+          success: true,
+          data: {
+            generatedAt: Date.now(),
+            network,
+            ownerAddress: address,
+            totals,
+            bots,
+            equityHistory,
+            drawdown,
+            mlScopes,
+            mlHistory
+          }
+        });
+      } catch (error) {
+        logger.error('Errore performance storica:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+      }
     });
 
     // Storico qualità ML nel tempo (decadimento dell'edge)
@@ -1248,6 +1402,111 @@ class ArbitrageBotServer {
       } catch (e) {
         res.status(500).json({ success: false, error: e.message });
       }
+    });
+
+    this.setupAdvisorRoutes();
+  }
+
+  /**
+   * ADV-02/03 — Rotte del CONSULENTE AI conversazionale (sola lettura).
+   *
+   * Nessuna di queste rotte arriva a `POST /api/agents/proposals/:id/approve`,
+   * a `/killswitch` o a `/analyst/*`: il consulente produce testo, e al massimo
+   * righe in `chat_sessions`/`chat_messages`/`audit`. È l'invariante di disegno
+   * dello spike §0, e va verificata guardando gli import di `agents/advisor/`.
+   *
+   * Convenzione di errore, importante per la UI: i rifiuti PREVISTI (consulente
+   * disattivato, chiave assente, budget mensile raggiunto, sessione inesistente)
+   * tornano con HTTP 200 e `{success:false, error, code}`. Mai un 200
+   * "riuscito" con una risposta vuota: `perps.api()` lancia su `success:false` e
+   * mostra `error`, quindi l'utente legge sempre il motivo vero.
+   */
+  setupAdvisorRoutes() {
+    const app = this.app;
+
+    // Stato del consulente (modello, disponibilità, budget, retention).
+    // Additiva rispetto al contratto concordato: serve alla UI per mostrare lo
+    // stato degradato senza dover prima provare a mandare un messaggio.
+    app.get('/api/advisor/status', (req, res) => {
+      res.json({ success: true, data: advisor.status() });
+    });
+
+    // Budget mensile: SOLA LETTURA. Non esiste (e non deve esistere) alcuna
+    // rotta web che lo modifichi — la modifica passa solo da Telegram con
+    // conferma a due passi (`/advisorbudget`), così chi compromette la sessione
+    // web non può alzarsi il budget da solo. Verificato da test.
+    app.get('/api/advisor/budget', (req, res) => {
+      const b = advisor.budget();
+      res.json({
+        success: true,
+        data: {
+          monthlyLimitUsd: b.monthlyLimitUsd,
+          spentUsd: b.spentUsd,
+          remainingUsd: b.remainingUsd,
+          resetsAt: b.resetsAt,
+          exceeded: b.exceeded,
+          changeableVia: 'telegram:/advisorbudget'
+        }
+      });
+    });
+
+    app.get('/api/advisor/sessions', (req, res) => {
+      try {
+        const data = advisor.listSessions(parseInt(req.query.limit) || 50)
+          .map(s => ({ id: s.id, title: s.title, startedAt: s.startedAt, lastAt: s.lastAt, costUsd: s.costUsd }));
+        res.json({ success: true, data });
+      } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+      }
+    });
+
+    app.post('/api/advisor/sessions', (req, res) => {
+      try {
+        const s = advisor.createSession({ title: req.body?.title || null });
+        res.json({ success: true, data: { id: s.id, startedAt: s.startedAt } });
+      } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+      }
+    });
+
+    app.get('/api/advisor/sessions/:id/messages', (req, res) => {
+      if (!advisor.getSession(req.params.id)) {
+        return res.status(404).json({ success: false, error: 'Conversazione non trovata', code: 'session_not_found' });
+      }
+      res.json({ success: true, data: advisor.getMessages(req.params.id) });
+    });
+
+    app.post('/api/advisor/sessions/:id/messages', async (req, res) => {
+      try {
+        const out = await advisor.chat(req.params.id, req.body?.message);
+        if (out.error) {
+          // Rifiuto previsto: success:false con il motivo LEGGIBILE e un codice
+          // per distinguerlo senza interpretare il testo.
+          return res.json({ success: false, error: out.error, code: out.code, data: out.budget ? { budget: out.budget } : undefined });
+        }
+        res.json({
+          success: true,
+          data: {
+            reply: out.reply,
+            toolsUsed: out.toolsUsed,
+            costUsd: out.costUsd,
+            budgetRemainingUsd: out.budgetRemainingUsd,
+            messageId: out.messageId,
+            model: out.model
+          }
+        });
+      } catch (e) {
+        logger.error('Errore turno advisor:', e.message);
+        res.status(500).json({ success: false, error: e.message });
+      }
+    });
+
+    app.delete('/api/advisor/sessions/:id', (req, res) => {
+      const r = advisor.deleteSession(req.params.id);
+      if (!r.deleted) {
+        return res.status(404).json({ success: false, error: 'Conversazione non trovata', code: 'session_not_found' });
+      }
+      res.json({ success: true });
     });
   }
 
@@ -1324,6 +1583,15 @@ class ArbitrageBotServer {
         botManager.setIo(this.io);
         botManager.loadFromDb();
         botManager.startWatchdog();
+        // ADV-02: retention dei transcript di chat applicata all'avvio (oltre che
+        // alla creazione di una nuova conversazione), così un deploy fermo per
+        // settimane non si ritrova con mesi di storico oltre la soglia.
+        try {
+          const purged = advisor.purgeExpired();
+          if (purged.sessions) logger.info(`💬 Advisor: retention all'avvio — ${purged.sessions} conversazioni eliminate`);
+        } catch (e) {
+          logger.warn('💬 Advisor: retention all\'avvio non applicata', e.message);
+        }
         // Avvia il controllo comandi Telegram se configurato
         telegramControl.refresh();
         // Avvia il runtime degli agenti (Analyst AI + janitor proposte)

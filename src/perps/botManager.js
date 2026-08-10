@@ -59,11 +59,28 @@ class BotManager {
     return bot.getState();
   }
 
-  updateBot(id, { name, coin, config }) {
+  /**
+   * DEBT-01 — la sostituzione dell'istanza ATTENDE il tick in volo.
+   *
+   * `bot.stop()` ferma il timer, ma non un tick già partito: quello continua
+   * fino in fondo (snapshot mercato → riconciliazione → gestione posizione).
+   * Costruire e avviare subito la nuova istanza significava avere, per tutta la
+   * durata di quel tick, DUE istanze dello stesso bot attive sullo stesso
+   * mercato e sulla stessa riga `positions` — la vecchia con la sua posizione in
+   * memoria, la nuova che nasce con `position = null` e ricostruisce lo stato da
+   * zero. È il meccanismo concreto dietro la race di SEC-08: quel fix ha reso
+   * innocuo lo stato prodotto (`insertPositionIfNoneOpen` + `_hydratePosition`),
+   * qui si rimuove la sovrapposizione che lo produceva.
+   *
+   * Asincrono di conseguenza: chi chiama (`PATCH /api/perps/bots/:id`) deve
+   * attendere, altrimenti risponderebbe con lo stato della vecchia istanza.
+   */
+  async updateBot(id, { name, coin, config }) {
     const bot = this.bots.get(id);
     if (!bot) throw new Error('Bot non trovato');
     const wasRunning = bot.status === 'running';
     if (wasRunning) bot.stop();
+    await bot.whenIdle();
 
     db.updateBot(id, { name, coin, config });
     const fresh = new PerpsBot(db.getBot(id), this._onUpdate);

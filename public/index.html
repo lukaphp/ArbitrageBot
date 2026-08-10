@@ -14,6 +14,7 @@
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="styles_perps.css">
     <link rel="stylesheet" href="styles_cockpit.css">
+    <link rel="stylesheet" href="styles_advisor.css">
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <!-- ethers.js rimosso con la demo EVM (EVM-01): lo usava solo app.js per
          leggere rete e saldo delle testnet EVM. Le firme Hyperliquid passano da
@@ -36,11 +37,15 @@
                     <div class="cockpit-header-summary" aria-label="Equity account">
                         <span>EQUITY</span>
                         <strong id="cockpitHeaderEquity">—</strong>
+                        <!-- Secondo valore indicativo in EUR (CUR-01). Riempito da
+                             perps._setEurText() solo con un tasso fresco: se il tasso è
+                             stantio o la fonte non risponde, resta vuoto e nascosto. -->
+                        <span class="cockpit-eur" id="cockpitHeaderEquityEur" hidden></span>
                     </div>
                     <button id="cockpitHeaderAlerts" class="cockpit-alert-trigger" type="button" aria-label="Apri Risk & Alerts">
                         <span aria-hidden="true">♢</span>
                         <span>ALERTS</span>
-                        <span class="cockpit-header-badge" id="cockpitHeaderAlertBadge">0</span>
+                        <span class="cockpit-header-badge" id="cockpitHeaderAlertBadge">—</span>
                     </button>
                     <a href="manual.html" target="_blank" rel="noopener" class="btn btn-sm btn-outline" style="margin-right: 10px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;" title="Apri il manuale utente in un nuovo tab">📖 Manuale</a>
                     <div id="serverStatus" class="status-indicator offline">
@@ -55,6 +60,16 @@
                         <span class="dot"></span>
                         <span class="text">MetaMask</span>
                     </div>
+                    <!-- Toggle del drawer del consulente AI (ADV-02): sta ACCANTO al pill
+                         MetaMask, non al suo posto. Il click è agganciato da advisor.js,
+                         che possiede tutto lo stato della chat e non ne condivide nessuno
+                         con perps.js — è il difetto che EVM-01 ha rimosso. -->
+                    <button id="advisorToggle" class="cockpit-alert-trigger advisor-toggle" type="button"
+                            aria-expanded="false" aria-controls="advisorDrawer"
+                            title="Apri il consulente AI (sola consultazione)">
+                        <span aria-hidden="true">💬</span>
+                        <span>CONSULENTE</span>
+                    </button>
                 </div>
             </div>
         </div>
@@ -76,8 +91,9 @@
                     <button class="cockpit-tab" id="cockpit-tab-dashboard" type="button" role="tab" aria-selected="true" aria-controls="cockpit-panel-dashboard" onclick="perps.switchCockpitTab('dashboard')">DASHBOARD</button>
                     <button class="cockpit-tab" id="cockpit-tab-execution" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-execution" onclick="perps.switchCockpitTab('execution')">EXECUTION</button>
                     <button class="cockpit-tab" id="cockpit-tab-positions" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-positions" onclick="perps.switchCockpitTab('positions')">POSITIONS</button>
-                    <button class="cockpit-tab" id="cockpit-tab-risk" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-risk" onclick="perps.switchCockpitTab('risk')">RISK &amp; ALERTS <span class="cockpit-tab-badge" id="cockpitRiskBadge">0</span></button>
-                    <button class="cockpit-tab" id="cockpit-tab-system" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-system" onclick="perps.switchCockpitTab('system')">SYSTEM <span class="cockpit-tab-badge" id="cockpitSystemBadge">0</span></button>
+                    <button class="cockpit-tab" id="cockpit-tab-performance" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-performance" onclick="perps.switchCockpitTab('performance')">PERFORMANCE</button>
+                    <button class="cockpit-tab" id="cockpit-tab-risk" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-risk" onclick="perps.switchCockpitTab('risk')">RISK &amp; ALERTS <span class="cockpit-tab-badge" id="cockpitRiskBadge">—</span></button>
+                    <button class="cockpit-tab" id="cockpit-tab-system" type="button" role="tab" aria-selected="false" aria-controls="cockpit-panel-system" onclick="perps.switchCockpitTab('system')">SYSTEM <span class="cockpit-tab-badge" id="cockpitSystemBadge">—</span></button>
                 </nav>
 
                 <section id="cockpit-panel-dashboard" class="cockpit-panel cockpit-dashboard" role="tabpanel" aria-labelledby="cockpit-tab-dashboard">
@@ -86,24 +102,35 @@
                             <div class="cockpit-eyebrow" id="cockpitNetworkEyebrow">OPERATING OVERVIEW</div>
                             <h2 class="cockpit-title">Dashboard</h2>
                         </div>
-                        <span class="cockpit-updated">Updated <span id="cockpitUpdatedAt">—</span></span>
+                        <div class="cockpit-dashboard-heading-meta">
+                            <span class="cockpit-updated">Updated <span id="cockpitUpdatedAt">—</span></span>
+                            <!-- Tasso ed età del cambio: senza questa riga l'EUR
+                                 sembrerebbe una conversione ufficiale invece di un
+                                 secondo numero di comodo (CUR-01). -->
+                            <span class="cockpit-fx-note" id="cockpitFxNote" hidden></span>
+                        </div>
                     </div>
 
                     <div class="cockpit-kpi-grid" aria-label="Account overview">
                         <article class="cockpit-kpi">
                             <div class="cockpit-kpi-head"><span class="cockpit-label">Equity</span><span class="cockpit-info">1D</span></div>
                             <div class="cockpit-kpi-value" id="cockpitEquity">—</div>
+                            <div class="cockpit-eur" id="cockpitEquityEur" hidden></div>
                             <div class="cockpit-kpi-context"><span class="cockpit-positive" id="cockpitEquityDelta">—</span><span id="cockpitEquitySource">—</span></div>
                         </article>
                         <article class="cockpit-kpi">
                             <div class="cockpit-kpi-head"><span class="cockpit-label">Net P&amp;L</span><span class="cockpit-info">RTH</span></div>
                             <div class="cockpit-kpi-value cockpit-positive" id="cockpitNetPnl">—</div>
+                            <div class="cockpit-eur" id="cockpitNetPnlEur" hidden></div>
                             <div class="cockpit-kpi-context"><span id="cockpitRealized">Realized —</span><span id="cockpitUnrealized">Unrealized —</span></div>
                         </article>
                         <article class="cockpit-kpi">
                             <div class="cockpit-kpi-head"><span class="cockpit-label">Margin used</span><span class="cockpit-warning">Risk</span></div>
                             <div class="cockpit-kpi-value" id="cockpitMarginUsed">—</div>
-                            <div class="cockpit-progress" aria-label="Margin used 32 percent"><span id="cockpitMarginBar"></span></div>
+                            <!-- L'aria-label diceva "Margin used 32 percent", un valore fisso del
+                                 mockup: uno screen reader leggeva ad alta voce un numero inventato.
+                                 Il valore vero lo porta #cockpitMarginUsed qui sopra. -->
+                            <div class="cockpit-progress" aria-label="Margine utilizzato"><span id="cockpitMarginBar"></span></div>
                             <div class="cockpit-kpi-context"><span id="cockpitMarginFree"></span><span id="cockpitMarginLimit">Limit 60%</span></div>
                         </article>
                         <article class="cockpit-kpi">
@@ -120,30 +147,26 @@
                                 <span class="cockpit-surface-note">1D · EQUITY CURVE</span>
                             </div>
                             <div id="cockpitChart" class="cockpit-chart" role="img" aria-label="Equity curve for the current session"></div>
-                            <div class="cockpit-chart-legend"><span>Equity</span><span>Session high</span></div>
+                            <!-- "Session high" annunciava una seconda serie che il grafico non ha
+                                 mai disegnato: _initCockpitDashboard() crea una sola area series. -->
+                            <div class="cockpit-chart-legend"><span>Equity</span></div>
                         </section>
 
                         <section class="cockpit-surface" aria-labelledby="attention-title">
                             <div class="cockpit-surface-head">
-                                <h3 class="cockpit-surface-title" id="attention-title">NEEDS ATTENTION <span class="cockpit-tab-badge" id="cockpitAttentionCount">0</span></h3>
+                                <!-- "0" era un'affermazione ("nessuna condizione da verificare")
+                                     fatta prima di aver controllato: si parte da "—". -->
+                                <h3 class="cockpit-surface-title" id="attention-title">NEEDS ATTENTION <span class="cockpit-tab-badge" id="cockpitAttentionCount">—</span></h3>
                                 <span class="cockpit-surface-note">REVIEW QUEUE</span>
                             </div>
+                            <!-- Qui c'erano tre alert di esempio ereditati dal mockup ("NQ exposure
+                                 above limit", "Feed latency above threshold" su ICE, "2 orders
+                                 pending review"): restavano a schermo finché non arrivava il primo
+                                 snapshot di rischio, e per sempre se la fetch falliva. Erano
+                                 indistinguibili da alert veri. Ora si parte da uno stato di attesa
+                                 e perps.js scrive solo quello che ha davvero misurato. -->
                             <div id="cockpitAlerts" class="cockpit-alerts" aria-live="polite">
-                                <article class="cockpit-alert critical">
-                                    <div class="cockpit-alert-head"><span class="cockpit-alert-title">NQ exposure above limit</span><span class="cockpit-negative">CRITICAL</span></div>
-                                    <p class="cockpit-alert-body">Exposure is 104% of the configured symbol cap. New entries are blocked until reviewed.</p>
-                                    <div class="cockpit-alert-meta"><span>14:31:42 · Impact: high</span><button class="cockpit-review-link" type="button" data-alert-action="risk">Review</button></div>
-                                </article>
-                                <article class="cockpit-alert warning">
-                                    <div class="cockpit-alert-head"><span class="cockpit-alert-title">Feed latency above threshold</span><span class="cockpit-warning">WARNING</span></div>
-                                    <p class="cockpit-alert-body">ICE feed reached 92ms for the last 30 seconds. Verify before execution.</p>
-                                    <div class="cockpit-alert-meta"><span>14:30:10 · Next check: 30s</span><button class="cockpit-review-link" type="button" data-alert-action="system">Review</button></div>
-                                </article>
-                                <article class="cockpit-alert warning">
-                                    <div class="cockpit-alert-head"><span class="cockpit-alert-title">2 orders pending review</span><span class="cockpit-warning">WARNING</span></div>
-                                    <p class="cockpit-alert-body">Orders on ES and NQ have been waiting for confirmation for more than 2 minutes.</p>
-                                    <div class="cockpit-alert-meta"><span>14:29:58 · Action: inspect</span><button class="cockpit-review-link" type="button" data-alert-action="execution">Review</button></div>
-                                </article>
+                                <div class="cockpit-risk-empty">In attesa del primo controllo di rischio…</div>
                             </div>
                             <div class="cockpit-alert-legend" aria-label="Alert severity legend"><span class="cockpit-severity critical">Critical</span><span class="cockpit-severity warning">Warning</span><span class="cockpit-severity">Info</span></div>
                         </section>
@@ -151,16 +174,28 @@
 
                     <div class="cockpit-bottom-grid">
                         <section class="cockpit-surface" aria-labelledby="open-positions-title">
-                            <div class="cockpit-surface-head"><h3 class="cockpit-surface-title" id="open-positions-title">OPEN POSITIONS <span class="cockpit-surface-note">[4]</span></h3><span class="cockpit-surface-note">uPnL</span></div>
-                            <table class="cockpit-table"><thead><tr><th scope="col">Symbol</th><th scope="col">Side</th><th scope="col">Size</th><th scope="col">Entry</th><th scope="col">uPnL</th></tr></thead><tbody id="cockpitPositionsSummary"><tr><td class="cockpit-symbol">ES</td><td class="cockpit-positive">LONG</td><td>3</td><td>5842.25</td><td class="cockpit-positive">+$1,388</td></tr><tr><td class="cockpit-symbol">NQ</td><td class="cockpit-negative">SHORT</td><td>2</td><td>20155.00</td><td class="cockpit-positive">+$1,275</td></tr><tr><td class="cockpit-symbol">CL</td><td class="cockpit-positive">LONG</td><td>5</td><td>71.82</td><td class="cockpit-positive">+$2,950</td></tr><tr><td class="cockpit-symbol">GC</td><td class="cockpit-negative">SHORT</td><td>1</td><td>2658.40</td><td class="cockpit-positive">+$650</td></tr></tbody></table>
+                            <!-- Il corpo della tabella conteneva quattro posizioni di esempio su
+                                 ES, NQ, CL e GC: contratti future che su Hyperliquid non esistono,
+                                 con prezzi e PnL a quattro cifre. Il conteggio "[4]" li dichiarava
+                                 pure. Ora entrambi partono da uno stato di attesa e li riempie
+                                 perps._renderCockpitPositions() solo quando il conto ha risposto. -->
+                            <div class="cockpit-surface-head"><h3 class="cockpit-surface-title" id="open-positions-title">OPEN POSITIONS <span class="cockpit-surface-note" id="cockpitOpenPositionsCount">—</span></h3><span class="cockpit-surface-note">uPnL</span></div>
+                            <table class="cockpit-table"><thead><tr><th scope="col">Symbol</th><th scope="col">Side</th><th scope="col">Size</th><th scope="col">Entry</th><th scope="col">uPnL</th></tr></thead><tbody id="cockpitPositionsSummary"><tr><td class="cockpit-empty" colspan="5">In attesa dei dati del conto…</td></tr></tbody></table>
                         </section>
                         <section class="cockpit-surface" aria-labelledby="execution-status-title">
                             <div class="cockpit-surface-head"><h3 class="cockpit-surface-title" id="execution-status-title">EXECUTION STATUS</h3><span class="cockpit-surface-note cockpit-positive">LIVE</span></div>
                             <div class="cockpit-metric-list"><div class="cockpit-metric-row"><span>Fills / 5m</span><strong id="cockpitFills">—</strong></div><div class="cockpit-metric-row"><span>Pending review</span><strong class="cockpit-warning" id="cockpitPending">—</strong></div><div class="cockpit-metric-row"><span>Reject rate</span><strong id="cockpitRejectRate">—</strong></div><div class="cockpit-metric-row"><span>Queue health</span><strong class="cockpit-positive">Stable</strong></div></div>
                         </section>
                         <section class="cockpit-surface" aria-labelledby="system-health-title">
-                            <div class="cockpit-surface-head"><h3 class="cockpit-surface-title" id="system-health-title">SYSTEM HEALTH</h3><span class="cockpit-surface-note cockpit-positive">3/3 ONLINE</span></div>
-                            <div class="cockpit-health-list"><div class="cockpit-health-row"><span><i class="cockpit-health-dot"></i>CME</span><span class="cockpit-health-meta">28ms</span></div><div class="cockpit-health-row"><span><i class="cockpit-health-dot"></i>ICE</span><span class="cockpit-health-meta" id="cockpitIceLatency">—</span></div><div class="cockpit-health-row"><span><i class="cockpit-health-dot"></i>COMEX</span><span class="cockpit-health-meta">31ms</span></div><div class="cockpit-health-row"><span><span>API / database</span></span><span class="cockpit-health-meta cockpit-positive">4ms · healthy</span></div></div>
+                            <!-- La card elencava CME, ICE e COMEX con latenze fisse (28ms, 31ms),
+                                 un "4ms · healthy" e un "3/3 ONLINE": tre borse di future che con
+                                 Hyperliquid non c'entrano nulla e quattro numeri inventati, di cui
+                                 nessuno letto da una fonte. Le righe qui sotto sono le sole cose
+                                 che lo snapshot di rischio misura davvero, e partono da "—" con il
+                                 pallino grigio (stato ignoto): dichiarare "è giù" prima di aver
+                                 guardato sarebbe falso quanto dichiarare "è a posto". -->
+                            <div class="cockpit-surface-head"><h3 class="cockpit-surface-title" id="system-health-title">SYSTEM HEALTH</h3><span class="cockpit-surface-note" id="cockpitHealthSummary">—</span></div>
+                            <div class="cockpit-health-list"><div class="cockpit-health-row"><span><i class="cockpit-health-dot unknown" id="cockpitHealthFeedDot"></i>Feed Hyperliquid</span><span class="cockpit-health-meta" id="cockpitHealthFeed">—</span></div><div class="cockpit-health-row"><span><i class="cockpit-health-dot unknown" id="cockpitHealthBotsDot"></i>Bot watchdog</span><span class="cockpit-health-meta" id="cockpitHealthBots">—</span></div><div class="cockpit-health-row"><span><i class="cockpit-health-dot unknown" id="cockpitHealthOrdersDot"></i>Ordini protettivi</span><span class="cockpit-health-meta" id="cockpitHealthOrders">—</span></div><div class="cockpit-health-row"><span><i class="cockpit-health-dot unknown" id="cockpitHealthApiDot"></i>API / dati</span><span class="cockpit-health-meta" id="cockpitHealthApi">—</span></div></div>
                         </section>
                     </div>
                     <div class="cockpit-command-strip"><span><strong>F1</strong> BUY <span aria-hidden="true">·</span> <strong>F2</strong> SELL <span aria-hidden="true">·</span> <strong>F3</strong> FLATTEN <span aria-hidden="true">·</span> <strong>ESC</strong> CANCEL</span><span id="cockpitOrderNotice">Verifica prima di inviare</span></div>
@@ -374,6 +409,72 @@
                 </section>
                 </div><!-- /cockpit-panel-positions -->
 
+                <!-- ====================== PERFORMANCE STORICA (ANA-01) ======================
+                     I dati esistono da sempre (posizioni chiuse con `close_reason`,
+                     `risk_equity_history`, `ml_history`) e finora nessuna superficie li
+                     mostrava. Caricati all'APERTURA della sezione e sul pulsante Aggiorna:
+                     nessun polling, la cockpit ne ha già quattro. -->
+                <div id="cockpit-panel-performance" class="cockpit-panel" role="tabpanel" aria-labelledby="cockpit-tab-performance" hidden>
+                    <div class="cockpit-dashboard-heading">
+                        <div>
+                            <div class="cockpit-eyebrow">STORICO E AGGREGAZIONI</div>
+                            <h2 class="cockpit-title">Performance</h2>
+                        </div>
+                        <div class="cockpit-risk-actions">
+                            <span class="cockpit-updated">Dati al <span id="perfUpdatedAt">—</span></span>
+                            <button class="btn btn-sm btn-outline" id="perfRefresh" type="button">↻ Aggiorna</button>
+                        </div>
+                    </div>
+
+                    <p class="cockpit-perf-notice" id="perfNotice" role="status" aria-live="polite" hidden></p>
+
+                    <div class="cockpit-main-grid">
+                        <section class="cockpit-surface" aria-labelledby="perf-equity-title">
+                            <div class="cockpit-surface-head">
+                                <h3 class="cockpit-surface-title" id="perf-equity-title">CURVA EQUITY STORICA</h3>
+                                <span class="cockpit-surface-note" id="perfEquityRange">—</span>
+                            </div>
+                            <div id="perfEquityChart" class="cockpit-chart" role="img" aria-label="Curva equity storica del conto"></div>
+                            <p class="cockpit-empty" id="perfEquityEmpty" hidden>Nessun campione di equity ancora registrato.</p>
+                        </section>
+
+                        <section class="cockpit-surface" aria-labelledby="perf-close-title">
+                            <div class="cockpit-surface-head">
+                                <h3 class="cockpit-surface-title" id="perf-close-title">MOTIVI DI CHIUSURA</h3>
+                                <span class="cockpit-surface-note">TRADE CHIUSI</span>
+                            </div>
+                            <div class="cockpit-metric-list" id="perfCloseReasons"></div>
+                        </section>
+                    </div>
+
+                    <section class="cockpit-surface" aria-labelledby="perf-ml-title">
+                        <div class="cockpit-surface-head">
+                            <h3 class="cockpit-surface-title" id="perf-ml-title">QUALITÀ DEL MODELLO ML NEL TEMPO</h3>
+                            <select id="perfMlCoin" class="form-select form-select-sm" aria-label="Mercato dello storico ML"></select>
+                        </div>
+                        <div id="perfMlChart" class="cockpit-chart" role="img" aria-label="Accuratezza del modello ML confrontata con la baseline"></div>
+                        <p class="cockpit-empty" id="perfMlEmpty" hidden>Nessuno storico ML raccolto: si popola a ogni retraining del modello.</p>
+                        <div class="cockpit-chart-legend"><span>Accuracy</span><span>Baseline</span></div>
+                    </section>
+
+                    <section class="cockpit-surface" aria-labelledby="perf-bots-title">
+                        <div class="cockpit-surface-head">
+                            <h3 class="cockpit-surface-title" id="perf-bots-title">CONFRONTO PER BOT</h3>
+                            <span class="cockpit-surface-note">PnL · WIN RATE · EXPECTANCY</span>
+                        </div>
+                        <table class="cockpit-table">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Bot</th><th scope="col">Trade</th><th scope="col">Win rate</th>
+                                    <th scope="col">PnL</th><th scope="col">Expectancy</th>
+                                    <th scope="col">Media vinta</th><th scope="col">Media persa</th>
+                                </tr>
+                            </thead>
+                            <tbody id="perfBotsBody"></tbody>
+                        </table>
+                    </section>
+                </div><!-- /cockpit-panel-performance -->
+
                 <div id="cockpit-panel-risk" class="cockpit-panel" role="tabpanel" aria-labelledby="cockpit-tab-risk" hidden>
                 <section class="cockpit-risk-live cockpit-surface" aria-labelledby="risk-live-title">
                     <div class="cockpit-surface-head cockpit-risk-live-head">
@@ -396,7 +497,7 @@
                     </div>
                     <div class="cockpit-risk-columns">
                         <div>
-                            <div class="cockpit-risk-subhead">ALERT LIVE <span class="cockpit-tab-badge" id="cockpitRiskLiveCount">0</span></div>
+                            <div class="cockpit-risk-subhead">ALERT LIVE <span class="cockpit-tab-badge" id="cockpitRiskLiveCount">—</span></div>
                             <div id="cockpitRiskAlerts" class="cockpit-alerts" aria-live="polite" aria-atomic="false"></div>
                         </div>
                         <div>
@@ -583,6 +684,42 @@
             </div><!-- /view-perps -->
         </div>
     </main>
+
+    <!-- ====================== DRAWER CONSULENTE AI (ADV-02) ======================
+         Pannello laterale a comparsa da destra (opzione B dello spike §2): la
+         risposta si legge accanto ai dati di cui parla, non al loro posto.
+         Fase 1 = sola consultazione: nessuna proposta, nessuna scrittura.
+         Tutto il comportamento e lo stato stanno in advisor.js. -->
+    <aside id="advisorDrawer" class="advisor-drawer" role="complementary"
+           aria-labelledby="advisorDrawerTitle" aria-hidden="true" hidden>
+        <div class="advisor-drawer-head">
+            <div>
+                <h2 class="advisor-drawer-title" id="advisorDrawerTitle">💬 Consulente AI</h2>
+                <span class="advisor-drawer-sub">Sola consultazione: legge i dati del conto e risponde. Non apre, non chiude e non modifica nulla.</span>
+                <!-- Sola lettura per progetto (ADV-03): il budget si cambia solo da
+                     Telegram, con conferma a due passi. Qui non c'è nessun controllo
+                     di scrittura. -->
+                <span class="advisor-budget" id="advisorBudget">Budget —</span>
+            </div>
+            <button class="advisor-drawer-close" id="advisorClose" type="button" aria-label="Chiudi il consulente">&times;</button>
+        </div>
+
+        <div class="advisor-sessions">
+            <select id="advisorSessionList" aria-label="Conversazione attiva"></select>
+            <button class="btn btn-sm btn-outline" id="advisorNewSession" type="button" title="Apri una nuova conversazione">+ Nuova</button>
+            <button class="btn btn-sm btn-danger" id="advisorDeleteSession" type="button" title="Elimina la conversazione corrente">🗑</button>
+        </div>
+
+        <p class="advisor-notice" id="advisorNotice" role="status" aria-live="polite" hidden></p>
+
+        <div class="advisor-transcript" id="advisorTranscript" aria-live="polite"></div>
+
+        <div class="advisor-composer">
+            <textarea id="advisorInput" rows="2" aria-label="Messaggio per il consulente"
+                      placeholder="Chiedi al consulente… (Invio per inviare, Shift+Invio per andare a capo)"></textarea>
+            <button class="btn btn-sm btn-primary" id="advisorSend" type="button">Invia</button>
+        </div>
+    </aside>
 
     <!-- Footer -->
     <footer class="footer">
@@ -924,5 +1061,8 @@
          mostrare/nascondere il tab della demo, il secondo era la demo stessa. -->
     <script src="shell.js?v=3.0.0"></script>
     <script src="perps.js?v=3.0.0"></script>
+    <!-- advisor.js è indipendente da perps.js: non ne legge né ne scrive lo stato,
+         quindi l'ordine di caricamento tra i due è irrilevante (ADV-02). -->
+    <script src="advisor.js?v=3.0.0"></script>
 </body>
 </html>

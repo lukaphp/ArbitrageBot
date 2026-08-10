@@ -1,0 +1,389 @@
+{
+  "uid": "arbitragebot-perps",
+  "title": "ArbitrageBot Perps — operativo",
+  "description": "Cruscotto operativo del bot (OBS-01). Fonte: GET /metrics dell'app, raccolto da Prometheus sulla rete Docker interna. Provisionato da deploy/monitoring/grafana/dashboards/arbitragebot-perps.json: le modifiche si fanno nel repository, non nel browser.",
+  "tags": ["arbitragebot", "perps"],
+  "timezone": "browser",
+  "editable": false,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Raccolta metriche",
+      "description": "up{job=\"arbitragebot\"}: se è DOWN i pannelli qui sotto sono vuoti perché nessuno sta leggendo le metriche, non perché il bot sia fermo. Causa tipica: METRICS_TOKEN noto all'app ma non a Prometheus (401).",
+      "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "up{job=\"arbitragebot\"}",
+          "instant": true,
+          "legendFormat": "scrape"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "1": { "text": "OK", "color": "green", "index": 0 } } },
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 1 } } }
+          ],
+          "noValue": "nessun dato",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "WebSocket Hyperliquid",
+      "description": "perps_ws_connected. 0 non significa bot fermo: si lavora sul fallback REST, con prezzi validi ma meno freschi.",
+      "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "perps_ws_connected",
+          "instant": true,
+          "legendFormat": "ws"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "1": { "text": "Connesso", "color": "green", "index": 0 } } },
+            { "type": "value", "options": { "0": { "text": "Fallback REST", "color": "orange", "index": 1 } } }
+          ],
+          "noValue": "nessun dato",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Posizioni aperte",
+      "description": "perps_positions_open — una per bot in posizione.",
+      "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+      "gridPos": { "h": 4, "w": 4, "x": 10, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "perps_positions_open",
+          "instant": true,
+          "legendFormat": "aperte"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "nessun dato",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Bot in esecuzione",
+      "description": "perps_bots_running su perps_bots_total: quanti dei bot configurati stanno effettivamente girando.",
+      "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+      "gridPos": { "h": 4, "w": 5, "x": 14, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "perps_bots_running",
+          "instant": true,
+          "legendFormat": "running"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "perps_bots_total",
+          "instant": true,
+          "legendFormat": "configurati"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "value_and_name",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "nessun dato",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Uptime processo",
+      "description": "perps_uptime_seconds — si azzera a ogni riavvio del container: un valore basso inatteso è un riavvio, non un dato mancante.",
+      "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+      "gridPos": { "h": 4, "w": 5, "x": 19, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "perps_uptime_seconds",
+          "instant": true,
+          "legendFormat": "uptime"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "nessun dato",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "PnL giornaliero per bot (USD)",
+      "description": "perps_bot_daily_pnl{bot,coin}. È il PnL realizzato della giornata corrente: torna a zero al rollover giornaliero, non è una curva cumulata.",
+      "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "perps_bot_daily_pnl",
+          "legendFormat": "{{bot}} · {{coin}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "min", "max"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisSoftMin": 0
+          },
+          "noValue": "nessun bot configurato",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Età dell'ultimo tick per bot (s)",
+      "description": "perps_bot_last_tick_seconds{bot,coin}. -1 = il bot non ha ancora ticcato. Il valore cresce anche per i bot fermi: la linea di riferimento a 180s è la soglia dell'alert PerpsBotTickStale, che però scatta solo per i bot con perps_bot_running == 1.",
+      "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "perps_bot_last_tick_seconds",
+          "legendFormat": "{{bot}} · {{coin}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "perps_bot_last_tick_seconds > 180 and on(bot, coin) perps_bot_running == 1",
+          "legendFormat": "STANTIO {{bot}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "noValue": "nessun bot configurato",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "text", "value": null },
+              { "color": "orange", "value": 180 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Errori nell'ultimo intervallo",
+      "description": "Incremento a 10 minuti dei contatori, non il totale cumulato: il totale sale e non scende mai, quindi non dice se il problema è in corso. Soglie di alert: >10 errori API / >5 errori di tick su 10 minuti.",
+      "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "increase(perps_api_errors_total[10m])",
+          "legendFormat": "API Hyperliquid (retry esauriti)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "increase(perps_tick_errors_total[10m])",
+          "legendFormat": "cicli dei bot"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "increase(perps_ws_reconnects_total[10m])",
+          "legendFormat": "riconnessioni WS"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 40,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "noValue": "nessun errore nell'intervallo",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Alert attivi",
+      "description": "Serie ALERTS generata da Prometheus dalle regole in deploy/monitoring/alerts.yml. Nessun inoltro esterno in questo sprint: gli allarmi urgenti (WS giù, bot fermo) arrivano già su Telegram dall'app. Tabella vuota = nessun alert in pending o firing.",
+      "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "arbitragebot-prom" },
+          "expr": "ALERTS",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": { "show": false, "reducer": ["sum"], "countRows": false, "fields": "" }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "Value": true, "job": true, "instance": true, "monitor": true, "__name__": true },
+            "renameByName": {
+              "alertname": "Alert",
+              "alertstate": "Stato",
+              "severity": "Severità",
+              "bot": "Bot",
+              "coin": "Coin"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "nessun alert attivo",
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Stato" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "firing": { "text": "FIRING", "color": "red", "index": 0 } } },
+                  { "type": "value", "options": { "pending": { "text": "pending", "color": "orange", "index": 1 } } }
+                ]
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

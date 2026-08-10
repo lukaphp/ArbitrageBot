@@ -1,0 +1,30 @@
+# Datasource provisionata da file (OBS-01): nessun clic nel browser al primo avvio.
+#
+# `uid` è fisso e stabile perché i pannelli della dashboard lo citano per uid, non
+# per nome: con un uid generato a runtime la dashboard si caricherebbe con i
+# pannelli "Datasource not found" a ogni ricreazione del volume di Grafana.
+#
+# `editable: false` è coerente con il fatto che la fonte di verità è questo file:
+# una modifica fatta dalla UI verrebbe comunque sovrascritta al riavvio, meglio
+# che Grafana lo dica subito invece di far perdere il lavoro.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: arbitragebot-prom
+    type: prometheus
+    access: proxy
+    # Nome del servizio sulla rete Docker interna `web`, non un indirizzo dell'host:
+    # Grafana non ha bisogno di alcuna porta pubblicata per interrogare Prometheus.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Allineato a scrape_interval: evita che Grafana chieda punti più fitti dei
+      # dati realmente esistenti (grafici a gradini con buchi apparenti).
+      timeInterval: 15s
+      httpMethod: POST
+      # Mostra in Grafana le regole di alert possedute da Prometheus
+      # (deploy/monitoring/alerts.yml), in sola lettura: Prometheus resta il
+      # proprietario, Grafana è la finestra.
+      manageAlerts: true

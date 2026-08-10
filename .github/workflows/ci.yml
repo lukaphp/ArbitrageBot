@@ -19,10 +19,20 @@ jobs:
         with:
           egress-policy: audit
 
-      - uses: actions/checkout@v4
+      # SHA pinnati, non tag: un tag come `v4` è mobile e il proprietario dell'action
+      # (o chi ne compromette il repo) può farlo puntare a un commit diverso senza che
+      # qui cambi una riga — l'action gira con accesso al workspace e al token del job.
+      # Stesso vettore già chiuso per harden-runner sopra (SEC-03, Sprint 1).
+      # Risolti dal ref del tag via GitHub API il 2026-08-10:
+      #   repos/actions/checkout/git/refs/tags/v4    → 11d5960… (= tag v4.4.0)
+      #   repos/actions/setup-node/git/refs/tags/v4  → 49933ea… (= tag v4.4.0)
+      # Per aggiornarli: rileggere il ref del tag desiderato dalla stessa API e
+      # sostituire SHA *e* commento della versione insieme, mai uno solo dei due.
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
           cache: 'npm'

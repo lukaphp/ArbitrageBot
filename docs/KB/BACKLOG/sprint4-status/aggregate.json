@@ -1,0 +1,36 @@
+{
+  "producedBy": "claude",
+  "updatedAt": "2026-08-10T23:30:00Z",
+  "sprint": "Sprint 4",
+  "reviewedAt": "2026-08-10",
+  "disclaimer": "Aggregato prodotto direttamente da Claude in sessione di review col PO, come in Sprint 3 — sintesi dei file per-agente più le decisioni raccolte durante la review stessa (3 extra, 1 stretch riportato dentro, 2 rilievi di Annie chiusi in seduta).",
+  "statusCounts": { "done": 11, "pending_po_action": 2 },
+  "sprintSpCompleted": 28,
+  "sprintSpPlanned": 23,
+  "sprintSpStretch": 5,
+  "sprintSpPendingHuman": 2,
+  "tasks": [
+    { "id": "ADV-01", "title": "Fase 0 advisor: usage.js + 5 strumenti read-only", "owner": "bruno", "reviewer": "annie", "sp": 2, "status": "done", "note": "Review indipendente di Annie: nessun problema trovato." },
+    { "id": "ADV-02", "title": "Fase 1 advisor: chat in sola lettura", "owner": ["bruno", "maya"], "reviewer": "annie", "sp": 5, "status": "done", "note": "Suite avversaria (22 casi) verificata anche con un caso extra di Annie (richieste multiple di strumenti vietati) — regge. Un criterio resta operativamente aperto: costo reale di una sessione, richiede il PO con AGENTS_ENABLED=true." },
+    { "id": "ADV-03", "title": "Budget advisor con approvazione Telegram", "owner": "bruno", "reviewer": "annie", "sp": 2, "status": "done", "note": "Rilievo di Annie sul parsing (1e10/50abc/0x10) chiuso nello stesso giro: causa radice corretta, 12 casi nuovi." },
+    { "id": "CUR-01", "title": "Multivaluta EUR (solo visualizzazione)", "owner": ["joshua", "maya"], "reviewer": null, "sp": 3, "status": "done", "note": "Zero righe toccate in riskManager/portfolio/riskAgent, verificato dal PO. Due orologi di staleness (calendario BCE + età lettura) scoperti durante una prova reale." },
+    { "id": "OBS-01", "title": "Stack Prometheus + Grafana sul VPS", "owner": "joshua", "reviewer": null, "sp": 3, "status": "done", "note": "Prova reale su Docker: alert scattato per davvero, 13/13 query verificate. 'Provato sul VPS reale' resta operativo, si aggiunge a OPS-02." },
+    { "id": "ANA-01", "title": "Dashboard performance storica", "owner": ["bruno", "maya"], "reviewer": null, "sp": 3, "status": "done", "note": "Contratto API riconciliato e verificato dal PO riga per riga tra route reale e consumo UI. Vedi ANA-01-EXTRA per il breakdown TP/SL." },
+    { "id": "ANA-01-EXTRA", "title": "Breakdown TP-vs-SL reale in close_reason", "owner": "bruno", "reviewer": null, "sp": 0, "status": "done", "note": "Extra deciso in review (non stimato a parte, incluso nel lavoro di ANA-01). Degrado a 'non lo so' se l'oid non è determinabile — mai un'etichetta sbagliata. Storico pre-fix non riscritto." },
+    { "id": "DEBT-01", "title": "Pacchetto debiti tecnici Sprint 3 (5 item)", "owner": ["bruno", "joshua"], "reviewer": "annie", "sp": 3, "status": "done", "note": "Item 1-3 (Bruno) verificati a fondo da Annie con test di concorrenza reale. Item 4-5 (Joshua) verificati direttamente dal PO in chiusura, non coperti dal mandato di Annie." },
+    { "id": "DEBT-UI-01", "title": "Rimozione dati finti da index.html", "owner": "maya", "reviewer": null, "sp": 0, "status": "done", "note": "Extra deciso in review (promosso dai refinementCandidates di Maya). Trovati e corretti 2 bug di comportamento reali oltre al markup." },
+    { "id": "LLM-01", "title": "Astrazione multi-provider LLM: DeepSeek + OpenRouter", "owner": "bruno", "reviewer": null, "sp": 5, "status": "done", "stretch": true, "note": "Aggiunta e consegnata per intero nella stessa sessione di review, su richiesta PO. Bug reale trovato e corretto (doppio conteggio token cache OpenAI/Anthropic, avrebbe fatto scattare il budget di ADV-03 in anticipo). Residui dichiarati: analyst.js non migrato, qualità tool-calling reale non misurata." },
+    { "id": "OPS-02", "title": "Verifica backup/restore VPS reale", "owner": "po", "sp": 1, "status": "pending_po_action", "notDelegatedToAgent": true, "note": "Invariato da Sprint 3, mai eseguito. Si aggiunge ora anche la verifica reale di OBS-01 sul VPS." },
+    { "id": "OPS-03r", "title": "Uptime esterno su /health", "owner": "po", "sp": 1, "status": "pending_po_action", "notDelegatedToAgent": true, "note": "Grafana copre l'osservabilità interna (OBS-01); resta il ping da fuori la tailnet." }
+  ],
+  "refinementCandidates": [
+    "Nessun cap esplicito sul numero di tool_use per iterazione nell'advisor (src/agents/advisor/advisor.js) — un turno può far eseguire più strumenti pesanti (es. backtest_templates, che lancia 4 backtest da solo) senza un limite, costo CPU locale non contabilizzato dal budget monetario. Trovato da Annie durante la review. Candidato: cap simmetrico a AGENT_ADVISOR_MAX_ITERATIONS.",
+    "Costo reale di una sessione advisor (criterio 5 di ADV-02) ancora non misurato — richiede una sessione autentica del PO con AGENTS_ENABLED=true, esplicitamente fuori mandato per gli agenti in questo sprint. Il costUsd è già esposto per turno, la misura è a portata di mano.",
+    "Qualità reale del tool-calling di DeepSeek/OpenRouter (LLM-01) non misurata — solo client finto testato. Prima di dare a un modello nuovo l'accesso agli strumenti, rieseguire la suite avversaria contro il modello vero, non contro un mock.",
+    "EXECUTION STATUS nella cockpit resta l'ultima card non onesta (id mai scritti + 'LIVE'/'Queue health: Stable' fissi) — fuori scope esplicito in questa review, segnalato da Maya per Sprint 5.",
+    "Incoerenza di formattazione importi negativi ($-55 vs -$55), tre replace ripetuti a mano in perps.js invece che dentro fmtUsd — candidato piccolo, Maya.",
+    "docs/MANUAL.md e public/manual.html hanno ordine di sezioni diverso (contenuti allineati, ordine no) — Maya.",
+    "Drawer del consulente senza focus trap: Tab esce dal pannello verso la cockpit sottostante — Maya, piccolo e isolato.",
+    "Prezzi in pricing.models (LLM-01) sono listini pubblici non riverificati in rete — da ricontrollare al provisioning delle chiavi via Infisical, sovrascrivibili da ENV senza toccare codice."
+  ]
+}

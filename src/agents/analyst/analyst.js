@@ -14,6 +14,9 @@ import { getClient } from './client.js';
 import { TOOL_DEFS, runTool } from './tools.js';
 import { SYSTEM_PROMPT } from './prompts.js';
 import proposals from '../proposals.js';
+// ADV-01: contabilità token/costo e prompt caching condivisi con il consulente
+// conversazionale. Stessa matematica, un solo posto dove vive (vedi usage.js).
+import { priceOf, simulateRun, moveCacheBreakpoint, TOOL_RESULT_CHAR_CAP, TOOL_RESULT_TOKENS } from '../usage.js';
 import db from '../../db/database.js';
 import { HYPERLIQUID_CONFIG } from '../../config/config.js';
 import logger from '../../utils/logger.js';
@@ -21,14 +24,7 @@ import logger from '../../utils/logger.js';
 const MAX_TOOL_ITERATIONS = 10; // più passi: scan mercati + backtest su più candidati
 const ALLOWED_TYPES = new Set(['pause_bot', 'close', 'tighten_sl', 'open', 'new_strategy_candidate']);
 
-// Moltiplicatori di prezzo del prompt caching rispetto alla tariffa di input:
-// scrivere in cache costa 1.25x, rileggere 0.1x. Il loop agentico rispedisce
-// tutta la history a ogni iterazione, quindi la rilettura è dove si risparmia.
-const CACHE_WRITE_MULT = 1.25;
-const CACHE_READ_MULT = 0.1;
-
 const MAX_TOKENS_PER_CALL = 3000;    // deve restare allineato al max_tokens della create()
-const TOOL_RESULT_CHAR_CAP = 6000;   // idem con il troncamento dei tool_result
 
 /**
  * Parametri del preventivo. Solo il primo input è misurato esattamente
@@ -36,7 +32,7 @@ const TOOL_RESULT_CHAR_CAP = 6000;   // idem con il troncamento dei tool_result
  * e quanto scrivere lo decide il modello a runtime.
  */
 const EST = {
-  toolResultTokens: Math.round(TOOL_RESULT_CHAR_CAP / 3.3), // ~1800 tok a tool_result pieno
+  toolResultTokens: TOOL_RESULT_TOKENS, // ~1800 tok a tool_result pieno
   typical: { iterations: 4, outputPerIter: 700, finalOutput: 1500, toolCallsPerIter: 1 },
   max: { iterations: MAX_TOOL_ITERATIONS, outputPerIter: MAX_TOKENS_PER_CALL, finalOutput: MAX_TOKENS_PER_CALL, toolCallsPerIter: 2 }
 };
@@ -44,28 +40,6 @@ const EST = {
 // Il system prompt è identico a ogni run: marcandolo come cacheable si copre
 // anche il blocco `tools`, che l'API renderizza PRIMA del system.
 const CACHED_SYSTEM = [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
-
-/**
- * Sposta il punto di cache sull'ultimo blocco della conversazione, così che a
- * ogni iterazione la history già inviata venga riletta a 0.1x invece di essere
- * rifatturata a prezzo pieno. Tiene al massimo due breakpoint mobili: il limite
- * API è 4 e uno è già occupato dal system.
- */
-function moveCacheBreakpoint(messages) {
-  const marked = [];
-  for (const m of messages) {
-    if (!Array.isArray(m.content)) continue;
-    for (const block of m.content) {
-      if (block && typeof block === 'object' && block.cache_control) marked.push(block);
-    }
-  }
-  while (marked.length > 1) delete marked.shift().cache_control;
-
-  const last = messages[messages.length - 1];
-  if (!last || !Array.isArray(last.content) || !last.content.length) return;
-  const lastBlock = last.content[last.content.length - 1];
-  if (lastBlock && typeof lastBlock === 'object') lastBlock.cache_control = { type: 'ephemeral' };
-}
 
 /** Costruisce il briefing (messaggio utente) dai parametri di analisi. */
 function buildBriefing(opts = {}) {
@@ -281,7 +255,7 @@ class Analyst {
           for (const block of res.content) {
             if (block.type === 'tool_use') {
               const out = await runTool(block.name, block.input).catch(e => ({ error: e.message }));
-              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(out).slice(0, 6000) });
+              toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(out).slice(0, TOOL_RESULT_CHAR_CAP) });
             }
           }
           messages.push({ role: 'user', content: toolResults });
@@ -457,39 +431,6 @@ class Analyst {
       lastError: this.lastError
     };
   }
-}
-
-/**
- * Simula la contabilità token di una run di N iterazioni, tenendo conto del
- * prompt caching: a ogni iterazione il prefisso già inviato si rilegge (0.1x) e
- * solo il delta nuovo si riscrive (1.25x).
- */
-function simulateRun({ firstInput, iterations, outputPerIter, finalOutput, toolCallsPerIter }) {
-  const delta = outputPerIter + toolCallsPerIter * EST.toolResultTokens;
-  let cacheWrite = firstInput; // la prima iterazione scrive tutto il prefisso
-  let cacheRead = 0;
-  for (let k = 2; k <= iterations; k++) {
-    cacheRead += firstInput + delta * (k - 2); // prefisso già in cache dall'iterazione precedente
-    cacheWrite += delta;                        // il delta appena aggiunto
-  }
-  const tokensOut = (iterations - 1) * outputPerIter + finalOutput;
-  return { tokensIn: 0, cacheWrite, cacheRead, tokensOut, promptTokens: cacheWrite + cacheRead, iterations };
-}
-
-/**
- * Costo stimato in USD per una run, dal listino configurato (per tier modello).
- * I token letti dalla cache costano 0.1x e quelli scritti 1.25x della tariffa
- * di input: contarli come input pieno gonfierebbe il costo riportato.
- */
-function priceOf(model, { tokensIn = 0, tokensOut = 0, cacheWrite = 0, cacheRead = 0 } = {}) {
-  const pricing = HYPERLIQUID_CONFIG.agents?.pricing || {};
-  const tier = /opus/i.test(model) ? pricing.opus : /haiku/i.test(model) ? pricing.haiku : pricing.sonnet;
-  if (!tier) return 0;
-  const inRate = tier.in || 0;
-  return (tokensIn / 1e6) * inRate
-    + (cacheWrite / 1e6) * inRate * CACHE_WRITE_MULT
-    + (cacheRead / 1e6) * inRate * CACHE_READ_MULT
-    + (tokensOut / 1e6) * (tier.out || 0);
 }
 
 /** Estrae il primo oggetto JSON valido da un testo (anche dentro ```json). */

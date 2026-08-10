@@ -8,6 +8,49 @@
 
 const SEVERITY_ORDER = { critical: 0, warning: 1, info: 2 };
 
+/**
+ * Soglie di allerta non derivabili dai limiti di portafoglio (margine e
+ * drawdown). Esportate perché ADV-01 aggiunge un secondo lettore dello stato di
+ * rischio (lo strumento `get_risk_snapshot` del consulente AI) oltre alla rotta
+ * `/api/perps/risk`: se ognuno si portasse le proprie costanti, la chat
+ * potrebbe dire "margine ok" mentre la cockpit segna un warning. Il rischio si
+ * legge da un posto solo — non si ricalcola (spike §11 rischio S5).
+ */
+export const RISK_ALERT_THRESHOLDS = {
+  marginWarningPct: 60,
+  marginCriticalPct: 80,
+  drawdownWarningPct: 5,
+  drawdownCriticalPct: 10
+};
+
+/**
+ * Adatta uno stato bot (`botManager.listStates()`) a ciò che `deriveRiskAlerts`
+ * consuma: include il calcolo di "stantio" (running ma senza tick da oltre 3×
+ * il suo loop, minimo 60s) usato dal watchdog. Pura e condivisa per lo stesso
+ * motivo delle soglie qui sopra.
+ */
+export function toRiskBotView(bot, {
+  now = Date.now(), defaultLoopInterval = 15000, defaultMaxDailyLossUsd = 1000
+} = {}) {
+  const loopInterval = bot.config?.loopInterval || defaultLoopInterval;
+  const stale = bot.status === 'running' && bot.lastTickAt > 0
+    && now - bot.lastTickAt > Math.max(3 * loopInterval, 60000);
+  return {
+    id: bot.id,
+    name: bot.name,
+    coin: bot.coin,
+    status: bot.status,
+    dailyPnl: number(bot.dailyPnl),
+    lastError: bot.lastError || null,
+    tickErrors: number(bot.tickErrors),
+    lastTickAt: bot.lastTickAt || null,
+    stale,
+    staleSeconds: stale ? Math.round((now - bot.lastTickAt) / 1000) : 0,
+    inPosition: !!bot.inPosition,
+    maxDailyLossUsd: number(bot.config?.risk?.maxDailyLossUsd ?? defaultMaxDailyLossUsd)
+  };
+}
+
 function number(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;

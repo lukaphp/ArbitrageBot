@@ -1,0 +1,110 @@
+# Regole di alert base (OBS-01)
+# =============================
+#
+# Valutate da Prometheus (`evaluation_interval: 15s`) e visibili in Grafana in due
+# posti: nella pagina "Alert rules" → sezione gestita dalla datasource (sola
+# lettura, Prometheus è il proprietario delle regole), e nel pannello "Alert
+# attivi" della dashboard, che interroga la serie sintetica `ALERTS`.
+#
+# NIENTE INOLTRO ESTERNO, PER SCELTA
+# ----------------------------------
+# Non c'è Alertmanager in questo stack: uno stato "firing" qui non manda niente a
+# nessuno. È deliberato per questo sprint (OBS-01: "l'inoltro esterno è un
+# raffinamento futuro") e non lascia scoperto il caso urgente, perché le due
+# condizioni che devono svegliare qualcuno sono già notificate dall'app stessa via
+# Telegram: WS giù oltre PERPS_WS_DOWN_NOTIFY_MS (marketData.js) e bot che non
+# ticca oltre la soglia del watchdog (botManager.js). Queste regole servono a
+# vedere *quando e quanto spesso* è successo, non a sostituire quelle notifiche.
+#
+# SOGLIE — perché questi numeri
+# -----------------------------
+# Sono deliberatamente più larghe delle soglie interne dell'app, così un alert qui
+# significa "la condizione persiste", non "è appena iniziata": due allarmi che
+# scattano insieme sulla stessa causa raddoppiano il rumore e non l'informazione.
+
+groups:
+  - name: arbitragebot-perps
+    interval: 30s
+    rules:
+      # La raccolta stessa. Va per prima: se questa spara, tutte le altre regole
+      # sono cieche e i pannelli vuoti non vogliono dire "tutto bene".
+      # Causa tipica al primo avvio: METRICS_TOKEN impostato per l'app ma non
+      # disponibile a Prometheus (scrape 401) — vedi deploy/monitoring/prometheus.yml.
+      - alert: ArbitrageBotTargetDown
+        expr: up{job="arbitragebot"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Metriche del bot non raccolte da 2 minuti"
+          description: >-
+            Prometheus non riesce a interrogare app:3000/metrics. Se il container
+            dell'app è vivo, la causa più probabile è un 401: METRICS_TOKEN
+            impostato nell'app ma assente nell'ambiente di Prometheus.
+            Verifica con: docker compose logs prometheus e
+            curl -s localhost:9090/api/v1/targets
+
+      # Il feed WebSocket è caduto. Non è un fermo del bot: si passa al fallback
+      # REST (prezzi validi ma meno freschi), quindi la severità è warning.
+      # 2 minuti come chiesto da OBS-01: il watchdog interno riprova ogni 30s
+      # (PERPS_WS_WATCHDOG_MS), quindi 2 minuti significano 4 tentativi falliti,
+      # non un singolo sfarfallio.
+      - alert: PerpsWebSocketDown
+        expr: perps_ws_connected == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Feed WebSocket Hyperliquid giù da oltre 2 minuti"
+          description: >-
+            Il bot sta lavorando sul fallback REST. Controlla i log
+            "Hyperliquid WS …" e perps_ws_reconnects_total: se cresce di continuo
+            la connessione è instabile, non caduta una volta.
+
+      # Un bot IN ESECUZIONE non completa un ciclo di valutazione.
+      # L'incrocio con perps_bot_running non è un dettaglio: senza di esso la
+      # regola spara per sempre su ogni bot fermato a mano, perché l'età
+      # dell'ultimo tick continua a crescere anche a bot spento.
+      # 180s = 18 cicli al loop di default (PERPS_BOT_INTERVAL, 10s) e comunque
+      # sopra il minimo del watchdog interno (60s), che ha già notificato per primo.
+      - alert: PerpsBotTickStale
+        expr: perps_bot_last_tick_seconds > 180 and on(bot, coin) perps_bot_running == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Bot {{ $labels.bot }} ({{ $labels.coin }}) fermo da {{ $value | humanizeDuration }}"
+          description: >-
+            Il bot risulta running ma non aggiorna il tick. Cause tipiche:
+            API Hyperliquid che non risponde, o un errore ripetuto nel ciclo
+            (guarda perps_bot_tick_errors per lo stesso bot).
+
+      # Errori API in crescita anomala. Un contatore che sale di qualche unità è
+      # normale (rete pubblica, rate limit occasionali): conta la PENDENZA, non il
+      # totale, altrimenti l'alert resta acceso per sempre dopo un episodio.
+      - alert: PerpsApiErrorsSpike
+        expr: increase(perps_api_errors_total[10m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Errori API Hyperliquid in crescita anomala"
+          description: >-
+            Più di 10 errori negli ultimi 10 minuti, e persistono da 5.
+            Ogni errore contato è già una catena di retry esaurita, non un
+            singolo tentativo: qui c'è un problema di connettività o di API,
+            non un intoppo.
+
+      # Errori nel ciclo di un bot: complementare al tick stantio, perché un bot
+      # può ticcare regolarmente e fallire ogni volta.
+      - alert: PerpsTickErrorsSpike
+        expr: increase(perps_tick_errors_total[10m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Errori nel ciclo dei bot in crescita"
+          description: >-
+            Il bot gira ma i cicli falliscono: nessuna decisione di trading viene
+            presa in questa condizione. Vedi logs/app.log oppure
+            docker compose logs app.

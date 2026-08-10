@@ -248,6 +248,89 @@ test('DB senza segreti: esce con 0 e non tocca niente', () => {
   assert.match(out, /Tutto già cifrato con la chiave corrente/);
 });
 
+/**
+ * DEBT-01 item 4 — il confronto per id non basta.
+ *
+ * Scenario reale: si sostituisce il segreto in AGENT_ENCRYPTION_KEY ma si dimentica
+ * di incrementare AGENT_ENCRYPTION_KEY_ID. I ciphertext esistenti restano marcati
+ * con l'id corrente, quindi `needsReencryption()` (che confronta SOLO l'id) li
+ * dichiara a posto: prima di questa modifica lo script usciva 0 con "Tutto già
+ * cifrato con la chiave corrente" su segreti che nessuna chiave configurata sapeva
+ * più decifrare. Il fallimento si scopriva al riavvio dell'app.
+ */
+test('id corretto ma materiale della chiave diverso: rilevato, spiegato, exit ≠ 0', () => {
+  // Marcato v2 (= l'id corrente per runRotate) ma cifrato con un segreto che allo
+  // script non viene mai fornito: id giusto, materiale sbagliato.
+  const mismatched = encryptAs(AGENT_PLAIN, GHOST_SECRET, 2);
+  assert.match(mismatched, /^v2:/, 'la fixture deve dichiarare la versione corrente');
+
+  const dbPath = makeDb({ wallets: [{ master: '0xMIS', enc: mismatched }] });
+  const { code, out } = runRotate(dbPath, ['--apply']);
+
+  assert.equal(code, 1, 'un segreto illeggibile non può produrre un\'uscita di successo');
+  assert.doesNotMatch(out, /Tutto già cifrato con la chiave corrente/,
+    'è esattamente il falso "tutto ok" che questa modifica elimina');
+  assert.match(out, /Decifrabili \(materiale\)\s*:\s*0/);
+  assert.match(out, /marcato v2.*NON decifrabile con il materiale/s);
+  assert.match(out, /AGENT_ENCRYPTION_KEY_ID/, 'l\'output indica la causa: id riusato');
+
+  assert.equal(readDb(dbPath).wallets[0].encrypted_key, mismatched,
+    'valore non decifrabile: mai sovrascritto');
+  assert.ok(!out.includes(AGENT_PLAIN) && !out.includes(GHOST_SECRET),
+    'nessun segreto in chiaro nell\'output');
+});
+
+test('materiale corrente verificato anche quando non c\'è nulla da ruotare', () => {
+  // Tutti già su v2 col materiale giusto: 0 da ri-cifrare, ma il conteggio dei
+  // decifrabili prova che il materiale è stato davvero verificato, non assunto.
+  const dbPath = makeDb({
+    wallets: [{ master: '0xOK1', enc: encryptAs(AGENT_PLAIN, NEW_SECRET, 2) }],
+    telegram: { tokenEnc: encryptAs(TOKEN_PLAIN, NEW_SECRET, 2), chatId: '42' }
+  });
+
+  const { code, out } = runRotate(dbPath);
+
+  assert.equal(code, 0);
+  assert.match(out, /Segreti esaminati\s*:\s*2/);
+  assert.match(out, /Decifrabili \(materiale\)\s*:\s*2/);
+  assert.match(out, /Da ri-cifrare\s*:\s*0/);
+  assert.match(out, /Tutto già cifrato con la chiave corrente/);
+});
+
+/**
+ * DEBT-01 item 4 — messaggio pulito invece dello stack trace.
+ * Prima: `TypeError: Cannot open database because the directory does not exist`
+ * con sei righe di stack di better-sqlite3, sputate da un'eccezione non catturata.
+ */
+test('DB non apribile: messaggio operativo, nessuno stack trace, exit ≠ 0', () => {
+  const missing = path.join(tempRoot, 'cartella-che-non-esiste', 'perps.db');
+  const { code, out } = runRotate(missing, ['--apply']);
+
+  assert.equal(code, 1);
+  assert.match(out, /Rotazione non eseguita/);
+  assert.match(out, /DB_PATH/, 'dice all\'operatore cosa controllare');
+  assert.doesNotMatch(out, /^\s+at .*\(.*\)$/m, 'nessuna riga di stack trace');
+  assert.doesNotMatch(out, /node_modules/, 'nessun percorso interno di libreria');
+});
+
+test('DB senza lo schema dell\'app: messaggio chiaro, nessun conteggio fuorviante', () => {
+  // Un file SQLite valido ma di un altro database: prima lanciava
+  // "SqliteError: no such table: agent_wallets" DOPO aver già stampato l'intestazione,
+  // lasciando il dubbio se qualcosa fosse stato scritto.
+  const strayPath = path.join(tempRoot, 'altro-database.db');
+  const stray = new PerpsDatabase({ dbPath: strayPath });
+  stray.init();
+  stray.db.exec('DROP TABLE agent_wallets');
+  stray.close();
+
+  const { code, out } = runRotate(strayPath, ['--apply']);
+
+  assert.equal(code, 1);
+  assert.match(out, /non contiene la tabella agent_wallets/);
+  assert.doesNotMatch(out, /Segreti esaminati/, 'nessun conteggio su un DB sbagliato');
+  assert.doesNotMatch(out, /^\s+at .*\(.*\)$/m, 'nessuna riga di stack trace');
+});
+
 test('telegram_config con JSON illeggibile: segnalato, exit ≠ 0, valore non toccato', () => {
   const dbPath = makeDb({ wallets: [] });
   const d = new PerpsDatabase({ dbPath });

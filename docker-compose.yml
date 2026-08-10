@@ -38,6 +38,78 @@ services:
     depends_on: [app]
     networks: [web]
 
+  # ---------------------------------------------------------------------------
+  # MONITORAGGIO (OBS-01) — profilo separato, spento per default
+  # ---------------------------------------------------------------------------
+  # `profiles: [monitoring]` fa sì che questi due servizi esistano solo con
+  # `docker compose --profile monitoring up -d`. Un `docker compose up -d` senza
+  # profilo continua a portare su esattamente app + caddy: il deploy attuale non
+  # cambia, e chi non vuole monitoraggio non paga né RAM né superficie d'attacco.
+  #
+  # Nessuna porta nuova verso l'esterno: come Caddy, entrambi pubblicano solo su
+  # 127.0.0.1. L'ingresso dalla tailnet lo dà `tailscale serve` sull'host, fuori
+  # da Docker (docs/DEPLOY.md §6.1). Tra loro i due servizi si parlano per nome
+  # sulla rete interna `web`, dove sta già l'app: Prometheus raggiunge app:3000
+  # senza che /metrics venga esposto da nessuna parte.
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    profiles: [monitoring]
+    restart: unless-stopped
+    environment:
+      # Solo per costruire il file di credenziali qui sotto. Se non è impostato,
+      # l'app non controlla l'header e lo scrape funziona comunque.
+      - METRICS_TOKEN=${METRICS_TOKEN:-}
+    # Il token va in un file, non nella riga di comando né in prometheus.yml (che
+    # è versionato). `$$` lascia il `$` alla shell DENTRO il container: se qui ci
+    # fosse un solo `$`, Compose lo espanderebbe e il segreto finirebbe nella
+    # command line, visibile a `docker inspect` e a chiunque possa leggerla.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        ( umask 077; printf '%s' "$${METRICS_TOKEN:-nessun-token-configurato}" > /etc/prometheus/metrics_token )
+        exec /bin/prometheus \
+          --config.file=/etc/prometheus/prometheus.yml \
+          --storage.tsdb.path=/prometheus \
+          --storage.tsdb.retention.time=30d \
+          --storage.tsdb.retention.size=1GB
+    ports:
+      - "127.0.0.1:9090:9090"    # solo loopback: per curl e diagnosi dall'host
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    networks: [web]
+
+  grafana:
+    image: grafana/grafana:13.1.3
+    profiles: [monitoring]
+    restart: unless-stopped
+    environment:
+      # Credenziali iniziali: admin/admin per default, così è Grafana stessa a
+      # imporre il cambio password al primo accesso (non lo fa se qui arriva una
+      # password personalizzata). Per impostarne una da subito:
+      # GRAFANA_ADMIN_PASSWORD=... docker compose --profile monitoring up -d
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3001}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      # Nessun phone-home: coerente con l'allowlist di egress che la CI sta
+      # profilando (SEC-03) e con un host che non deve chiamare fuori senza motivo.
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_NEWS_NEWS_FEED_ENABLED=false
+    ports:
+      - "127.0.0.1:3001:3000"    # 3001 sull'host: 3000 è la porta dell'app
+    volumes:
+      # Datasource e dashboard provisionate da file: al primo avvio la dashboard
+      # c'è già, senza un clic nel browser.
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [prometheus]
+    networks: [web]
+
 networks:
   web:
 
@@ -45,3 +117,5 @@ volumes:
   perps-data:
   caddy-data:
   caddy-config:
+  prometheus-data:               # TSDB delle metriche (profilo monitoring)
+  grafana-data:                  # utenti, preferenze e stato di Grafana

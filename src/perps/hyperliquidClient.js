@@ -427,7 +427,14 @@ class HyperliquidClient {
    * dall'unrealized dell'ultimo tick). Somma il closedPnl dei fill di chiusura e
    * le fee di tutti i fill del coin a partire da `sinceTs` (apertura posizione).
    *
-   * @returns {{ closedPnl, fee, net, fills }} net = closedPnl - fee
+   * `closingFills` sono i fill di chiusura veri e propri, con il loro `oid`: su
+   * Hyperliquid un ordine trigger che scatta produce un fill che porta l'oid di
+   * quell'ordine, quindi confrontarlo con gli oid dei trigger piazzati dal bot è
+   * ciò che permette di dire se ha chiuso il TP, lo SL o una mano esterna. Sono
+   * già in memoria qui (la lettura dei fill è una sola): esporli evita una
+   * seconda chiamata di rete in `bot._registerClose`.
+   *
+   * @returns {{ closedPnl, fee, net, fills, closingFills }} net = closedPnl - fee
    *   oppure null se non sono ancora arrivati fill di chiusura (ritenta al tick dopo).
    */
   async getRealizedPnl(masterAddress, coin, sinceTs, network = this.network) {
@@ -439,7 +446,7 @@ class HyperliquidClient {
     if (!closing.length) return null; // nessun fill di chiusura ancora visibile
     const closedPnl = closing.reduce((s, f) => s + (f.closedPnl || 0), 0);
     const fee = rel.reduce((s, f) => s + (f.fee || 0), 0); // fee open+close del ciclo
-    return { closedPnl, fee, net: closedPnl - fee, fills: rel.length };
+    return { closedPnl, fee, net: closedPnl - fee, fills: rel.length, closingFills: closing };
   }
 
   // ---- Azioni user-signed (firmate da MetaMask) ----

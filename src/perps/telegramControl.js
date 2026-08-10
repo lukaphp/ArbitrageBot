@@ -25,6 +25,7 @@ import client from './hyperliquidClient.js';
 import notifier from './notifier.js';
 import proposals from '../agents/proposals.js';
 import riskAgent from '../agents/riskAgent.js';
+import advisor from '../agents/advisor/advisor.js';
 import logger from '../utils/logger.js';
 
 const HELP = [
@@ -42,8 +43,46 @@ const HELP = [
   '/proposte — proposte AI in attesa',
   '/approva &lt;id&gt; — approva una proposta AI',
   '/rifiuta &lt;id&gt; — rifiuta una proposta AI',
+  '/advisorbudget — budget mensile del consulente AI e speso corrente',
+  '/advisorbudget &lt;importo&gt; — proponi un nuovo budget (poi conferma)',
+  '/advisorbudget confirm — applica il budget proposto',
   '/help — questo messaggio'
 ].join('\n');
+
+/**
+ * ADV-03 — finestra di validità della conferma del budget advisor.
+ * Una conferma che resta valida per sempre non è una conferma: se il messaggio
+ * "confirm" arriva mezz'ora dopo, chi lo manda potrebbe non ricordare più a
+ * quale importo si riferisce.
+ */
+const BUDGET_CONFIRM_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * ADV-03 — forma ammessa per un importo di budget, applicata alla stringa
+ * GREZZA digitata dall'operatore:
+ *   simbolo di valuta opzionale · cifre · separatore decimale opzionale
+ *   (punto o virgola) con 1-2 decimali · simbolo di valuta opzionale.
+ *
+ * Nessun segno, nessun esponente, nessun prefisso di base, nessun testo
+ * attaccato, nessuno spazio interno: sono tutte cose che `parseFloat` accetta o
+ * che una "pulizia" preventiva trasformerebbe in un numero diverso da quello
+ * digitato. `\d` in JavaScript è ASCII 0-9, quindi non passano nemmeno le cifre
+ * di altri alfabeti.
+ */
+const BUDGET_AMOUNT_RE = /^[$€]?\d+(?:[.,]\d{1,2})?[$€]?$/;
+
+/**
+ * Interpreta un importo di budget. Ritorna il numero, oppure `null` se la
+ * stringa non ha la forma ammessa — mai un numero "recuperato" da un input non
+ * riconosciuto. Funzione pura: è la parte che vale la pena verificare in
+ * isolamento, e il chiamante si limita a rispondere.
+ */
+function parseBudgetAmount(text) {
+  const raw = String(text ?? '').trim();
+  if (!BUDGET_AMOUNT_RE.test(raw)) return null;
+  const amount = parseFloat(raw.replace(/[$€]/g, '').replace(',', '.'));
+  return Number.isFinite(amount) && amount >= 0 ? amount : null;
+}
 
 class TelegramControl {
   constructor() {
@@ -52,6 +91,10 @@ class TelegramControl {
     this.token = null;
     this.chatId = null;
     this._aborter = null;
+    // ADV-03: modifica di budget proposta e in attesa di conferma esplicita.
+    // In memoria di proposito: una conferma che sopravvive a un riavvio del
+    // processo non è più contestuale alla conversazione che l'ha proposta.
+    this._pendingBudget = null;
   }
 
   /** Indirizzo master e rete dedotti dai bot esistenti (fallback ENV). */
@@ -178,6 +221,8 @@ class TelegramControl {
           return this._cmdDecide(arg, true);
         case '/rifiuta':
           return this._cmdDecide(arg, false);
+        case '/advisorbudget':
+          return this._cmdAdvisorBudget(arg);
         default:
           return this._send('Comando non riconosciuto. Usa /help.');
       }
@@ -319,6 +364,103 @@ class TelegramControl {
       '✅ <b>Kill-switch disattivato</b>',
       'Le nuove aperture sono di nuovo consentite.',
       'I bot fermati <b>non</b> ripartono da soli: riavviali con /avvia &lt;id|nome&gt; (o dalla tab System).'
+    ].join('\n'));
+  }
+
+  /**
+   * ADV-03 — budget mensile del consulente AI, modificabile SOLO da qui.
+   *
+   * Perché non dalla web UI: approvazione fuori banda. Chi compromette la
+   * sessione web (cookie rubato, browser lasciato aperto) non deve poter alzare
+   * da solo il tetto di spesa verso un servizio a pagamento. È la stessa
+   * filosofia del kill-switch su Telegram (TG-01) e vale anche al contrario —
+   * `GET /api/advisor/budget` è di sola lettura, per costruzione.
+   *
+   * Conferma a DUE PASSI, non una sola battuta:
+   *  1. `/advisorbudget 25` → il bot risponde col riepilogo (da $X a $Y, speso
+   *     corrente) e NON applica nulla;
+   *  2. `/advisorbudget confirm` → applica, registra in audit e lo dice.
+   * Una proposta non confermata scade dopo 5 minuti, e ogni nuova proposta
+   * sostituisce la precedente. Senza argomento è una lettura di stato: un comando
+   * che alza una soglia di spesa non deve poter partire per un errore di
+   * battitura (stesso criterio di `/killswitch`).
+   */
+  async _cmdAdvisorBudget(arg) {
+    const mode = (arg || '').trim().toLowerCase();
+    const b = advisor.budget();
+    const stateLines = [
+      `Budget mensile: <b>$${b.monthlyLimitUsd.toFixed(2)}</b>`,
+      `Speso questo mese: $${b.spentUsd.toFixed(2)} · residuo $${b.remainingUsd.toFixed(2)}`,
+      `Azzeramento: ${new Date(b.resetsAt).toLocaleDateString('it-IT')}`
+    ];
+
+    if (!mode) {
+      return this._send([
+        '💬 <b>Budget consulente AI</b>', ...stateLines, '',
+        'Per cambiarlo: /advisorbudget &lt;importo&gt; poi /advisorbudget confirm.'
+      ].join('\n'));
+    }
+
+    if (mode === 'confirm') {
+      const pending = this._pendingBudget;
+      if (!pending) {
+        return this._send(['⚠️ Nessuna modifica di budget da confermare.', ...stateLines, '',
+          'Proponi prima un importo: /advisorbudget &lt;importo&gt;.'].join('\n'));
+      }
+      if (Date.now() - pending.at > BUDGET_CONFIRM_TTL_MS) {
+        this._pendingBudget = null;
+        return this._send(['⚠️ La conferma è scaduta (oltre 5 minuti): nulla è stato modificato.', ...stateLines, '',
+          'Riproponi l\'importo con /advisorbudget &lt;importo&gt;.'].join('\n'));
+      }
+      this._pendingBudget = null;
+      const { from, to } = advisor.setMonthlyBudget(pending.amount, { via: 'telegram' });
+      const after = advisor.budget();
+      notifier.notify(`💬 <b>Budget consulente AI</b> modificato da Telegram: da $${from.toFixed(2)} a $${to.toFixed(2)}/mese.`);
+      return this._send([
+        '✅ <b>Budget consulente aggiornato</b>',
+        `Da $${from.toFixed(2)} a <b>$${to.toFixed(2)}</b>/mese.`,
+        `Speso questo mese: $${after.spentUsd.toFixed(2)} · residuo $${after.remainingUsd.toFixed(2)}`,
+        after.exceeded ? '⚠️ Il nuovo tetto è già stato superato dalla spesa del mese: la chat resta bloccata.' : null
+      ].filter(Boolean).join('\n'));
+    }
+
+    if (mode === 'cancel' || mode === 'annulla') {
+      const had = !!this._pendingBudget;
+      this._pendingBudget = null;
+      return this._send(had ? '🚫 Modifica di budget annullata: nulla è stato cambiato.' : 'Nessuna modifica in sospeso.');
+    }
+
+    // Da qui: proposta di un nuovo importo.
+    //
+    // La validazione avviene sulla stringa GREZZA, prima di qualunque pulizia, e
+    // l'ordine è tutto il punto. La versione precedente rimuoveva i caratteri non
+    // numerici e validava DOPO: così "1e10" diventava "110", "50abc" diventava
+    // "50", "0x10" diventava "010" e "-5" diventava "5" — tutti importi validi,
+    // tutti diversi da quello digitato, tutti applicati a una soglia di SPESA.
+    // Ripulire un input non è capirlo.
+    //
+    // Ciò che si normalizza è solo ciò che un umano scrive davvero per un
+    // importo — simbolo di valuta e virgola come separatore decimale — e lo si
+    // fa esplicitamente, DOPO aver riconosciuto la forma. Tutto il resto non è
+    // sporcizia: è un input che non si è capito, e su un tetto di spesa la
+    // risposta giusta è far ripetere il comando.
+    const amount = parseBudgetAmount(mode);
+    if (amount == null) {
+      return this._send([`⚠️ Importo "${arg}" non valido.`, ...stateLines, '',
+        'Uso: /advisorbudget 25 (poi /advisorbudget confirm).'].join('\n'));
+    }
+    if (amount > 1000) {
+      return this._send(['⚠️ Importo oltre il massimo consentito ($1000/mese). Nulla è stato modificato.', ...stateLines].join('\n'));
+    }
+
+    this._pendingBudget = { amount, at: Date.now() };
+    return this._send([
+      '❓ <b>Conferma richiesta</b>',
+      `Vuoi impostare il budget advisor a <b>$${amount.toFixed(2)}/mese</b>?`,
+      `Attuale: $${b.monthlyLimitUsd.toFixed(2)}/mese · speso questo mese $${b.spentUsd.toFixed(2)}`,
+      '',
+      'Conferma con <code>/advisorbudget confirm</code> (entro 5 minuti) oppure annulla con <code>/advisorbudget cancel</code>.',
+      '<i>Nulla è stato modificato per ora.</i>'
     ].join('\n'));
   }
 

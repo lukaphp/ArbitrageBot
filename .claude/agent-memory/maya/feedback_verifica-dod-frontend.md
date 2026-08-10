@@ -1,6 +1,6 @@
 ---
 name: feedback-verifica-dod-frontend
-description: Routine di verifica della DoD frontend — node --check, check dei tag che ignora gli attributi, harness node:vm per gli script di public/; da Sprint 3 npm run lint copre anche public/
+description: Routine di verifica della DoD frontend — node --check, check dei tag e degli id duplicati, harness node:vm (e il tranello di deepStrictEqual), integrità degli anchor di MANUAL.md/manual.html
 metadata:
   type: feedback
 ---
@@ -40,3 +40,15 @@ prima di fidarti: è una riga che qualcuno può cambiare.
 4. Un'assert `regex` sul markup di `index.html` è il modo economico di bloccare una regressione di
    *contenuto* (una stringa che afferma il falso, uno script legacy ricomparso). Attenzione a togliere
    prima i commenti HTML: i miei commenti citano di proposito le stringhe rimosse.
+5. Nel check dei tag conta anche gli **id duplicati**: due `id=` uguali rompono `getElementById` in
+   silenzio, e `index.html` ne ha ormai oltre 220. Costa una riga nello stesso script.
+6. `deepStrictEqual` su oggetti creati **dentro** il contesto `node:vm` fallisce sempre ("same
+   structure but not reference-equal"): il contesto ha i suoi intrinsics, quindi il prototype non
+   coincide. Riporta i dati nel realm del test con `Array.from(x, p => ({...}))` prima dell'assert.
+7. Se tocchi la numerazione di `docs/MANUAL.md`, non farlo a mano: ha ~19 anchor `](#n-titolo)` più
+   una dozzina di riferimenti `§N` nel testo (e un `§5` che punta a **DEPLOY.md** e non va toccato).
+   Script per la rinumerazione + due check: ogni anchor deve risolvere a un titolo esistente (slug
+   alla GitHub: minuscole, via la punteggiatura, **ogni** spazio diventa un trattino — `—` e `&`
+   spariscono e lasciano un doppio trattino) e ogni `§N` deve corrispondere a una sezione esistente.
+   Per `manual.html` il check equivalente è: ogni voce di nav ha la sua `<section class="doc-section">`
+   e viceversa.

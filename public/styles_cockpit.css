@@ -644,6 +644,11 @@
 }
 
 .cockpit-health-dot.offline { background: var(--cockpit-negative); }
+/* `unknown` è lo stato di partenza: grigio finché non arriva il primo snapshot.
+   Il verde di default diceva "a posto" prima di aver guardato. */
+.cockpit-health-dot.unknown { background: var(--cockpit-muted); }
+.cockpit-health-dot.ok { background: var(--cockpit-positive); }
+.cockpit-health-dot.warning { background: var(--cockpit-warning); }
 .cockpit-health-meta { font-size: 0.63rem; letter-spacing: 0; text-transform: none; }
 
 .cockpit-command-strip {
@@ -885,6 +890,59 @@
   font-size: 0.74rem;
 }
 
+/* ---- Secondo valore in EUR (CUR-01) ----
+   Deliberatamente più piccolo e più spento del valore USD: l'USD resta la fonte
+   primaria, l'EUR è un numero di comodo. Con `hidden` sparisce del tutto — è così
+   che si comporta quando il tasso non è fresco. */
+.cockpit-eur {
+  display: block;
+  margin-top: 2px;
+  color: var(--cockpit-muted);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+}
+
+.cockpit-eur[hidden] { display: none; }
+
+.cockpit-table .cockpit-eur { margin-top: 1px; }
+
+.cockpit-mode .cockpit-header-summary .cockpit-eur { font-size: 0.62rem; }
+
+.cockpit-dashboard-heading-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.cockpit-fx-note {
+  color: var(--cockpit-muted);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.66rem;
+}
+
+.cockpit-fx-note[hidden] { display: none; }
+
+/* ---- Sezione Performance (ANA-01) ---- */
+.cockpit-perf-notice {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--cockpit-line);
+  border-left-width: 3px;
+  border-radius: 7px;
+  background: var(--cockpit-surface-soft);
+  font-size: 0.74rem;
+}
+
+.cockpit-perf-notice[hidden] { display: none; }
+.cockpit-perf-notice-info { border-left-color: var(--cockpit-info); }
+.cockpit-perf-notice-error { border-left-color: var(--cockpit-negative); color: var(--cockpit-negative); }
+
+#cockpit-panel-performance .cockpit-surface { margin-bottom: 14px; }
+#cockpit-panel-performance .cockpit-chart { min-height: 214px; }
+#cockpit-panel-performance .cockpit-table { width: 100%; }
+
 @media (max-width: 1020px) {
   .cockpit-mode .container { padding-left: 18px; padding-right: 18px; }
   .cockpit-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -904,6 +962,7 @@
      riprodotto sotto i 680px lo stesso vicolo cieco già corretto sul desktop. */
   .cockpit-mode .connection-status #serverStatus { display: none; }
   .cockpit-dashboard-heading { align-items: flex-start; flex-direction: column; }
+  .cockpit-dashboard-heading-meta { align-items: flex-start; }
   .cockpit-kpi-grid,
   .cockpit-bottom-grid,
   .cockpit-risk-metrics { grid-template-columns: 1fr; }

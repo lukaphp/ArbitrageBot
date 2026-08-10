@@ -26,6 +26,14 @@ import db from '../db/database.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
 
+/**
+ * Motivo di chiusura quando non si riesce a stabilire QUALE ordine ha chiuso la
+ * posizione. È la stringa che il bot scriveva sempre prima del tracciamento
+ * degli oid: mantenerla identica fa sì che lo storico precedente e i casi
+ * genuinamente ambigui finiscano nello stesso bucket, senza riscrivere niente.
+ */
+const CLOSE_REASON_UNRESOLVED = 'chiusa (TP/SL o esterna)';
+
 export class PerpsBot {
   constructor(record, onUpdate) {
     this.id = record.id;
@@ -48,6 +56,7 @@ export class PerpsBot {
     this.busy = false;
     this.lastEval = null;
     this.lastError = null;
+    this._inFlightTick = null; // promise del tick in corso (DEBT-01, vedi tick()/whenIdle())
     this.lastTickAt = 0;       // per il watchdog (rileva bot "fermi")
     this.tickErrors = 0;       // contatore errori di tick (metriche)
     this._lastCooldownNotifyUntil = null; // episodio di cooldown già notificato (una notifica per episodio, non per tick)
@@ -57,7 +66,7 @@ export class PerpsBot {
     this.dailyPnl = db.getDailyPnl(this.id, this.dailyKey);
 
     // Stato posizione locale (riallineato da Hyperliquid a ogni tick)
-    this.position = null; // { id, side, size, entryPx, originalEntryPx, dcaCount, tpPx, slPx, slOid, openedAt }
+    this.position = null; // { id, side, size, entryPx, originalEntryPx, dcaCount, tpPx, slPx, slOid, tpOids, openedAt }
 
     // SEC-08: true mentre `_openPosition` sta piazzando l'ordine di mercato.
     // Tra il fill sull'exchange e l'assegnazione di `this.position` la posizione
@@ -88,7 +97,14 @@ export class PerpsBot {
       originalEntryPx: trailing.originalEntryPx ?? row.entry_px,
       dcaCount: trailing.dcaCount || 0,
       tpPx: row.tp_px, slPx: row.sl_px, openedAt: row.opened_at,
-      slOid: trailing.slOid || null
+      slOid: trailing.slOid || null,
+      // Oid dei trigger di take profit. Servono a riconoscere QUALE ordine ha
+      // chiuso la posizione (vedi `_classifyCloseFills`): senza persisterli, dopo
+      // un riavvio il bot non saprebbe più distinguere un TP scattato da una
+      // chiusura esterna, e tornerebbe a scrivere il motivo generico.
+      // Array vuoto sulle righe aperte prima di questo fix: nessun riferimento,
+      // quindi nessuna deduzione — è il comportamento voluto.
+      tpOids: Array.isArray(trailing.tpOids) ? trailing.tpOids : []
     };
   }
 
@@ -134,7 +150,38 @@ export class PerpsBot {
     this.timer = null;
   }
 
-  async tick() {
+  /**
+   * Punto d'ingresso di un tick (timer, `start()`, chiamate dirette).
+   *
+   * DEBT-01 — tiene traccia della promise del tick IN VOLO. Serve a chi deve
+   * sostituire questa istanza (`botManager.updateBot`): senza un appiglio sul
+   * tick in corso, la sostituzione avveniva mentre il tick vecchio stava ancora
+   * leggendo/scrivendo la posizione, e per la sua durata esistevano due istanze
+   * attive sullo stesso mercato (il meccanismo concreto dietro la race di
+   * SEC-08). Il corpo vero è `_runTick`.
+   *
+   * La promise restituita non rigetta mai: un errore residuo (per esempio dal
+   * blocco `finally` di `_runTick`, fuori dal suo try/catch) viene loggato qui
+   * invece di diventare un `unhandledRejection` — che nel server arresta il
+   * processo. Loggato, non silenziato.
+   */
+  tick() {
+    if (this.busy) return this._inFlightTick || Promise.resolve();
+    this._inFlightTick = this._runTick()
+      .catch(error => logger.error(`Bot ${this.name}: errore non gestito nel tick`, error?.message || error))
+      .finally(() => { this._inFlightTick = null; });
+    return this._inFlightTick;
+  }
+
+  /**
+   * Attende la fine del tick eventualmente in volo (subito risolta se il bot è
+   * idle). Non ferma nulla: fermare è compito di `stop()`/`shutdown()`.
+   */
+  whenIdle() {
+    return this._inFlightTick || Promise.resolve();
+  }
+
+  async _runTick() {
     if (this.busy) return;
     this.busy = true;
     this._rolloverDaily();
@@ -198,8 +245,10 @@ export class PerpsBot {
    */
   async _reconcile(livePos, snapshot = null) {
     if (!livePos && this.position) {
-      // Posizione chiusa esternamente (TP/SL scattati o chiusura manuale)
-      await this._registerClose('chiusa (TP/SL o esterna)', this.position.lastUnrealized || 0);
+      // Posizione non più sull'exchange: TP o SL scattati, oppure chiusura da
+      // fuori. `null` = «deducilo dai fill», mentre gli oid dei trigger sono
+      // ancora in memoria (vedi _registerClose/_classifyCloseFills).
+      await this._registerClose(null, this.position.lastUnrealized || 0);
     } else if (livePos && this.position) {
       this.position.size = livePos.size;
       this.position.lastUnrealized = livePos.unrealizedPnl;
@@ -245,7 +294,7 @@ export class PerpsBot {
       this.position = {
         id, side: livePos.side, size: livePos.size, entryPx: livePos.entryPx,
         originalEntryPx: livePos.entryPx, dcaCount: 0,
-        tpPx, slPx, slOid: null, openedAt: Date.now(),
+        tpPx, slPx, slOid: null, tpOids: [], openedAt: Date.now(),
         lastUnrealized: livePos.unrealizedPnl
       };
       db.updatePosition(id, { tp_px: tpPx, sl_px: slPx, trailing_json: this._trailingJson() });
@@ -358,7 +407,7 @@ export class PerpsBot {
         id: posId, side, size: plan.size, entryPx,
         originalEntryPx: entryPx, // immutabile: riferimento per le soglie progressive del DCA (mai il prezzo medio)
         dcaCount: 0,
-        tpPx, slPx, slOid: null, openedAt: Date.now()
+        tpPx, slPx, slOid: null, tpOids: [], openedAt: Date.now()
       };
 
       if (created) {
@@ -475,6 +524,7 @@ export class PerpsBot {
       originalEntryPx: this.position?.originalEntryPx ?? persisted.originalEntryPx ?? null,
       dcaCount: this.position?.dcaCount ?? persisted.dcaCount ?? 0,
       slOid: this.position?.slOid ?? null,
+      tpOids: this.position?.tpOids ?? persisted.tpOids ?? [],
       ...extra
     });
   }
@@ -483,7 +533,10 @@ export class PerpsBot {
     if (!this.position) return;
     const closeIsBuy = this.position.side === 'short'; // chiudere short = buy; chiudere long = sell
     try {
-      // Take profit: scala parziale se configurata, altrimenti TP singolo
+      // Take profit: scala parziale se configurata, altrimenti TP singolo.
+      // Gli oid vengono RACCOLTI: sono il riferimento con cui, alla chiusura, si
+      // riconosce che è scattato un TP e non uno SL o una mano esterna.
+      const tpOids = [];
       const ladder = this.config.partialTp;
       if (Array.isArray(ladder) && ladder.length) {
         const steps = riskManager.computeTpLadder(this.position.entryPx, this.position.side, ladder);
@@ -492,26 +545,31 @@ export class PerpsBot {
         for (const st of steps) {
           const sz = riskManager.roundSize(this.position.size * st.portion, szDec);
           if (sz > 0) {
-            await this.broker.placeTriggerOrder({
+            const res = await this.broker.placeTriggerOrder({
               masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
               size: sz, triggerPx: st.px, tpsl: 'tp'
             }, this.network);
+            if (res?.oid != null) tpOids.push(res.oid);
           }
         }
       } else if (this.position.tpPx) {
-        await this.broker.placeTriggerOrder({
+        const res = await this.broker.placeTriggerOrder({
           masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
           size: this.position.size, triggerPx: this.position.tpPx, tpsl: 'tp'
         }, this.network);
+        if (res?.oid != null) tpOids.push(res.oid);
       }
+      this.position.tpOids = tpOids;
       if (this.position.slPx) {
         const res = await this.broker.placeTriggerOrder({
           masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
           size: this.position.size, triggerPx: this.position.slPx, tpsl: 'sl'
         }, this.network);
         this.position.slOid = res.oid;
-        db.updatePosition(this.position.id, { trailing_json: this._trailingJson() });
       }
+      // Una sola scrittura, dopo TP e SL: `_trailingJson` fa merge col persistito,
+      // quindi scrivere due volte non perderebbe nulla — ma neanche servirebbe.
+      db.updatePosition(this.position.id, { trailing_json: this._trailingJson() });
     } catch (error) {
       logger.warn(`Bot ${this.name}: errore piazzamento TP/SL`, error.message);
     }
@@ -602,6 +660,72 @@ export class PerpsBot {
     }
   }
 
+  /**
+   * Quanti trigger TP la strategia prevede per questa posizione.
+   * Con `partialTp` più TP contemporanei sono legittimi (uno per gradino della
+   * scala), quindi il riferimento non è "uno" ma la lunghezza della scala.
+   * 0 = la strategia non prevede TP.
+   */
+  _expectedTpCount() {
+    const ladder = this.config.partialTp;
+    if (Array.isArray(ladder) && ladder.length) return ladder.length;
+    return this.position?.tpPx ? 1 : 0;
+  }
+
+  /**
+   * DEBT-01 — pulizia dei TAKE PROFIT in ECCESSO su una posizione già tracciata.
+   *
+   * Simmetrico alla pulizia degli SL orfani di `_ensureStopLoss` (SEC-08), che
+   * copriva solo gli stop: un TP lasciato indietro da un ri-piazzamento il cui
+   * `cancel` non è andato a buon fine resta un ordine reduce-only dimensionato
+   * su uno stato PRECEDENTE della posizione (size e prezzo calcolati su un altro
+   * entry), e può chiuderla dove la strategia non prevede più di chiudere.
+   *
+   * Due asimmetrie deliberate rispetto agli SL:
+   *  1. il TP MANCANTE non viene ri-piazzato e la posizione non viene chiusa per
+   *     sicurezza. Senza SL una posizione è nuda; senza TP perde solo un'uscita
+   *     in profitto — chiudere per questo sarebbe un danno, non una protezione.
+   *     Qui si rimuove solo l'eccesso.
+   *  2. se la strategia non prevede TP (`_expectedTpCount() === 0`) non si tocca
+   *     nulla: senza un riferimento su quanti TP siano attesi non esiste il
+   *     concetto di "in eccesso", e cancellare un TP piazzato a mano
+   *     dall'operatore sarebbe peggio del problema. È la stessa uscita anticipata
+   *     che `_ensureStopLoss` fa senza `slPx`.
+   *
+   * Quali tenere: i più RECENTI (oid crescente sia su Hyperliquid sia sul
+   * paperBroker). Dopo un ri-piazzamento place-then-cancel i trigger corretti
+   * sono gli ultimi piazzati; i residui sono i precedenti.
+   */
+  async _sweepExcessTakeProfits() {
+    if (!this.position) return;
+    const expected = this._expectedTpCount();
+    if (expected === 0) return;
+    try {
+      const tps = await this._findTpOrders();
+      if (tps.length <= expected) return;
+
+      const sorted = [...tps].sort((a, b) => (b.oid ?? 0) - (a.oid ?? 0));
+      const keep = sorted.slice(0, expected);
+      const extra = sorted.slice(expected);
+      // I TP tracciati diventano quelli che restano vivi: se un domani uno di
+      // questi scatta, va riconosciuto come TP anche se non l'avevamo piazzato
+      // in questo giro (posizione adottata, ri-piazzamento a metà).
+      this.position.tpOids = keep.map(o => o.oid).filter(o => o != null);
+      db.updatePosition(this.position.id, { trailing_json: this._trailingJson() });
+      logger.warn(`Bot ${this.name}: ${extra.length} take profit in eccesso su ${this.coin} (oid ${extra.map(o => o.oid).join(', ')}), attesi ${expected}, cancello i più vecchi`);
+      notifier.notify(`🧹 <b>${this.name}</b>: trovati ${tps.length} take profit attivi su ${this.coin} per una sola posizione (attesi ${expected}) — mantengo i ${expected} più recenti e cancello ${extra.length} ordine/i residuo/i.`);
+      for (const o of extra) {
+        await this.broker.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: o.oid }, this.network)
+          .catch(err => logger.error(`Bot ${this.name}: cancellazione TP in eccesso ${o.oid} fallita`, err.message));
+      }
+    } catch (error) {
+      // Non si chiude la posizione (vedi asimmetria 1), ma non si tace: se non
+      // riesco a leggere i trigger attivi, l'operatore deve poterlo sapere.
+      logger.error(`Bot ${this.name}: errore pulizia TP in eccesso`, error.message);
+      notifier.notify(`⚠️ <b>${this.name}</b>: impossibile verificare i take profit attivi su ${this.coin} (${error.message}) — controlla manualmente che non ce ne siano di residui.`);
+    }
+  }
+
   async _manageOpen(snapshot, account, decision) {
     // Uscita su segnale strategia
     if (decision.action === 'close') {
@@ -611,6 +735,8 @@ export class PerpsBot {
     // Guardia continua: assicura che lo stop loss sia attivo a ogni tick.
     await this._ensureStopLoss();
     if (!this.position) return; // _ensureStopLoss può aver chiuso per sicurezza
+    // DEBT-01: e che i TP attivi non siano più di quanti la strategia prevede.
+    await this._sweepExcessTakeProfits();
     // DCA: aggiunge alla posizione su movimento avverso (mediazione del prezzo)
     await this._maybeDca(snapshot);
     // Trailing stop — PLACE-THEN-CANCEL: piazza il nuovo trigger PRIMA di
@@ -720,7 +846,10 @@ export class PerpsBot {
       const oldTpOrders = await this._findTpOrders();
       const oldSlOid = this.position.slOid ?? (await this._findStopOrder())?.oid ?? null;
 
-      // 1) PLACE: nuovi trigger sulla size totale aggiornata.
+      // 1) PLACE: nuovi trigger sulla size totale aggiornata. Gli oid dei nuovi
+      // TP sostituiscono i precedenti (che vengono cancellati al punto 3): dopo
+      // un DCA il riferimento per riconoscere una chiusura da TP sono questi.
+      const newTpOids = [];
       const ladder = this.config.partialTp;
       if (Array.isArray(ladder) && ladder.length) {
         const steps = riskManager.computeTpLadder(this.position.entryPx, this.position.side, ladder);
@@ -729,17 +858,19 @@ export class PerpsBot {
         for (const st of steps) {
           const sz = riskManager.roundSize(this.position.size * st.portion, szDec);
           if (sz > 0) {
-            await this.broker.placeTriggerOrder({
+            const res = await this.broker.placeTriggerOrder({
               masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
               size: sz, triggerPx: st.px, tpsl: 'tp'
             }, this.network);
+            if (res?.oid != null) newTpOids.push(res.oid);
           }
         }
       } else if (tpPx) {
-        await this.broker.placeTriggerOrder({
+        const res = await this.broker.placeTriggerOrder({
           masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
           size: this.position.size, triggerPx: tpPx, tpsl: 'tp'
         }, this.network);
+        if (res?.oid != null) newTpOids.push(res.oid);
       }
 
       let newSlOid = null;
@@ -757,6 +888,7 @@ export class PerpsBot {
       this.position.tpPx = tpPx;
       this.position.slPx = slPx;
       this.position.slOid = newSlOid;
+      this.position.tpOids = newTpOids;
       db.updatePosition(this.position.id, {
         entry_px: this.position.entryPx, size: this.position.size, tp_px: tpPx, sl_px: slPx,
         trailing_json: this._trailingJson()
@@ -788,24 +920,77 @@ export class PerpsBot {
   }
 
   /**
+   * Deduce QUALE ordine ha chiuso la posizione, dagli oid dei fill di chiusura.
+   *
+   * Su Hyperliquid un ordine trigger che scatta produce un fill che porta l'oid
+   * di quell'ordine: confrontarlo con gli oid dei trigger piazzati dal bot
+   * (`slOid`, `tpOids`) rende la distinzione TP/SL un FATTO, non una deduzione
+   * dal segno del PnL — che sarebbe circolare, visto che il PnL è proprio il
+   * numero che poi si aggrega per bucket.
+   *
+   * Funzione PURA (nessun I/O, nessun await): riceve i fill già letti da
+   * `getRealizedPnl` e legge lo stato in memoria. Vive qui e non in
+   * `riskManager.js` perché non è matematica di rischio ma interpretazione
+   * dello stato della posizione, che è di questo file; resta comunque
+   * verificabile in isolamento come `_placeTpSl`/`_ensureStopLoss`.
+   *
+   * Ritorna `null` quando NON si può dire — ed è il punto importante: senza
+   * fill, senza oid nei fill, o senza alcun trigger tracciato (posizione
+   * ereditata da prima di questo fix), il chiamante ripiega sulla stringa
+   * generica di sempre. Un'etichetta sbagliata su un dato di performance è
+   * peggio di un'etichetta assente: non si distingue da un dato vero.
+   */
+  _classifyCloseFills(closingFills) {
+    if (!Array.isArray(closingFills) || !closingFills.length) return null;
+    const slOid = this.position?.slOid ?? null;
+    const tpOids = new Set((this.position?.tpOids || []).filter(o => o != null));
+    // Nessun riferimento = nessuna deduzione possibile.
+    if (slOid == null && !tpOids.size) return null;
+
+    const oids = closingFills.map(f => f.oid).filter(o => o != null);
+    if (!oids.length) return null;
+
+    const hitTp = oids.some(o => tpOids.has(o));
+    const hitSl = slOid != null && oids.includes(slOid);
+
+    // Caso limite reale con `partialTp`: più fill di chiusura provenienti da
+    // trigger diversi. Dirlo è più utile che scegliere a caso quale contare.
+    if (hitTp && hitSl) return 'chiusa da più trigger (TP e SL)';
+    if (hitTp) return 'take profit eseguito';
+    if (hitSl) return 'stop loss eseguito';
+    // Gli oid ci sono e non sono nostri: la posizione è stata chiusa da fuori —
+    // pulsante del pannello, `/chiuditutto`, kill-switch con closePositions.
+    return 'chiusura manuale o esterna';
+  }
+
+  /**
    * Registra la chiusura di una posizione usando il PnL REALE dai fill
    * (closedPnl − fee), non l'unrealized dell'ultimo tick. Se i fill di chiusura
    * non sono ancora visibili, ripiega su `fallbackPnl` (l'unrealized noto).
+   *
+   * @param reason motivazione esplicita del bot (uscita su regola, chiusura di
+   *   sicurezza): passa intatta. `null` significa «chiusura avvenuta fuori dal
+   *   mio controllo, deducila dai fill» — vedi `_classifyCloseFills`. La
+   *   deduzione va fatta ORA, mentre gli oid dei trigger sono ancora in memoria:
+   *   a posteriori, sullo storico già chiuso, il dato non è più ricostruibile.
    */
   async _registerClose(reason, fallbackPnl = 0) {
     if (!this.position) return;
     const openedAt = this.position.openedAt;
     let net = fallbackPnl;
     let fee = 0;
+    let closingFills = null;
     try {
       const real = await this.broker.getRealizedPnl(this.masterAddress, this.coin, openedAt, this.network);
-      if (real) { net = real.net; fee = real.fee; }
+      if (real) { net = real.net; fee = real.fee; closingFills = real.closingFills || null; }
     } catch (e) {
       logger.debug(`Bot ${this.name}: PnL reale non disponibile, uso fallback`, e.message);
     }
 
+    const closeReason = reason ?? (this._classifyCloseFills(closingFills) || CLOSE_REASON_UNRESOLVED);
+
     db.updatePosition(this.position.id, {
-      status: 'closed', pnl: net, fee, close_reason: reason, closed_at: Date.now()
+      status: 'closed', pnl: net, fee, close_reason: closeReason, closed_at: Date.now()
     });
 
     // Aggiorna e PERSISTE il PnL giornaliero (sopravvive ai riavvii).
@@ -815,7 +1000,7 @@ export class PerpsBot {
 
     const emoji = net >= 0 ? '✅' : '🔻';
     const feeStr = fee ? ` · fee ${fee.toFixed(2)}$` : '';
-    notifier.notify(`🔴 <b>${this.name}</b> ha chiuso (${reason}) — PnL ${emoji} ${net.toFixed(2)}$${feeStr} · giornaliero ${this.dailyPnl.toFixed(2)}$`);
+    notifier.notify(`🔴 <b>${this.name}</b> ha chiuso (${closeReason}) — PnL ${emoji} ${net.toFixed(2)}$${feeStr} · giornaliero ${this.dailyPnl.toFixed(2)}$`);
 
     // Stop automatico se superato il limite di perdita giornaliera
     const maxDailyLoss = this.config.risk?.maxDailyLossUsd ?? HYPERLIQUID_CONFIG.risk.maxDailyLossUsd;

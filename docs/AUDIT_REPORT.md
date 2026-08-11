@@ -56,7 +56,7 @@ Tutti i file del sottosistema `src/perps/` sono stati letti integralmente, inclu
 - Persistenza (`src/db/database.js`)
 - Middleware di autenticazione (`src/middleware/auth.js`)
 - Logger (`src/utils/logger.js`)
-- Backlog Sprint 4 (`docs/KB/BACKLOG/sprint4.md`)
+- Backlog Sprint 4 (`docs/KB/BACKLOG/release1/sprint4.md`)
 
 ### Approccio
 

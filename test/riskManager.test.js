@@ -109,3 +109,68 @@ test('computeTrailing long: alza lo stop solo a favore', () => {
   const noMove = riskManager.computeTrailing({ side: 'long', slPx: 99.5 }, 100, cfg); // candidate 99 < 99.5
   assert.equal(noMove, null);
 });
+
+// ---- CRIT-01: classificazione del fill reale ----
+
+test('resolveFillSize: fill pieno', () => {
+  const r = riskManager.resolveFillSize(1.5, 1.5);
+  assert.equal(r.filled, 1.5);
+  assert.equal(r.full, true);
+  assert.equal(r.partial, false);
+  assert.equal(r.none, false);
+  assert.equal(r.ratio, 1);
+});
+
+test('resolveFillSize: fill parziale', () => {
+  const r = riskManager.resolveFillSize(2, 0.5);
+  assert.equal(r.filled, 0.5);
+  assert.equal(r.partial, true);
+  assert.equal(r.none, false);
+  assert.equal(r.ratio, 0.25);
+});
+
+test('resolveFillSize: totalSz null/0/non numerico = nessun fill', () => {
+  for (const bad of [null, undefined, 0, -1, NaN, 'x']) {
+    const r = riskManager.resolveFillSize(1, bad);
+    assert.equal(r.none, true, `totalSz ${String(bad)} deve valere "nessun fill"`);
+    assert.equal(r.filled, 0);
+    assert.equal(r.partial, false, 'nessun fill non è un fill parziale: sono casi da trattare diversamente');
+  }
+});
+
+test('resolveFillSize: un fill pieno restituito con errore di virgola mobile non è "parziale"', () => {
+  // Senza tolleranza, ogni apertura genererebbe una notifica di fill parziale.
+  const r = riskManager.resolveFillSize(0.3, 0.3 - Number.EPSILON);
+  assert.equal(r.partial, false);
+  assert.equal(r.full, true);
+});
+
+test('resolveFillSize: fill superiore al pianificato non è parziale (né un errore)', () => {
+  const r = riskManager.resolveFillSize(1, 1.2);
+  assert.equal(r.partial, false);
+  assert.equal(r.full, true);
+  assert.equal(r.filled, 1.2, 'si usa comunque la size reale, non quella pianificata');
+});
+
+// ---- WARN-03: slippage reale ----
+
+test('computeSlippage: nessuno scostamento = 0', () => {
+  assert.equal(riskManager.computeSlippage(100, 100), 0);
+});
+
+test('computeSlippage: scostamento in su e in giù danno lo stesso valore assoluto', () => {
+  assert.ok(Math.abs(riskManager.computeSlippage(100.1, 100) - 0.001) < 1e-12);
+  assert.ok(Math.abs(riskManager.computeSlippage(99.9, 100) - 0.001) < 1e-12);
+});
+
+test('computeSlippage: scostamento grande', () => {
+  assert.ok(Math.abs(riskManager.computeSlippage(105, 100) - 0.05) < 1e-12);
+});
+
+test('computeSlippage: prezzi non utilizzabili → null, non 0', () => {
+  // 0 significherebbe "eseguito esattamente al prezzo atteso": un dato assente
+  // non deve poter essere confuso con un'esecuzione perfetta.
+  for (const [a, b] of [[null, 100], [100, null], [0, 100], [100, 0], [NaN, 100], [undefined, undefined]]) {
+    assert.equal(riskManager.computeSlippage(a, b), null, `computeSlippage(${a}, ${b})`);
+  }
+});

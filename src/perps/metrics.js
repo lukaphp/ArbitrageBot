@@ -20,10 +20,12 @@
  */
 
 const counters = {
-  api_errors_total: 0,     // errori verso le API Hyperliquid (retry esauriti)
-  tick_errors_total: 0,    // errori nei tick dei bot
-  orders_placed_total: 0,  // ordini market inviati
-  ws_reconnects_total: 0   // riconnessioni WebSocket
+  api_errors_total: 0,       // errori verso le API Hyperliquid (retry esauriti)
+  tick_errors_total: 0,      // errori nei tick dei bot
+  orders_placed_total: 0,    // ordini market inviati
+  ws_reconnects_total: 0,    // riconnessioni WebSocket
+  telegram_errors_total: 0,  // notifiche Telegram perse dopo i retry (QUAL-01)
+  execqueue_depth_warnings_total: 0 // volte che la coda ha superato la soglia (WARN-02)
 };
 
 /**
@@ -35,7 +37,9 @@ const COUNTER_HELP = {
   api_errors_total: 'Errori verso le API Hyperliquid contati dopo l\'esaurimento dei retry (non i singoli tentativi).',
   tick_errors_total: 'Errori sollevati dal ciclo di valutazione dei bot, cumulativi dall\'avvio del processo.',
   orders_placed_total: 'Ordini market inviati al broker (reali o paper), cumulativi dall\'avvio del processo.',
-  ws_reconnects_total: 'Riconnessioni WebSocket completate con successo dal watchdog del feed di mercato.'
+  ws_reconnects_total: 'Riconnessioni WebSocket completate con successo dal watchdog del feed di mercato.',
+  telegram_errors_total: 'Notifiche Telegram perse dopo l\'esaurimento dei retry (solo le urgenti vengono ritentate).',
+  execqueue_depth_warnings_total: 'Volte che la coda di esecuzione di un wallet ha superato la soglia di profondità configurata.'
 };
 
 const startedAt = Date.now();
@@ -87,9 +91,14 @@ export async function render(sources = {}) {
   const botManager = sources.botManager || (await import('./botManager.js')).default;
   const marketData = sources.marketData || (await import('./marketData.js')).default;
   const client = sources.client || (await import('./hyperliquidClient.js')).default;
+  const execQueue = sources.execQueue || (await import('./execQueue.js')).default;
 
   const states = botManager.listStates();
   const running = states.filter(s => s.status === 'running');
+  const marketStatus = marketData.getStatus() || {};
+  // Retrocompatibile con un market data che non espone ancora `wsState` (o con le
+  // sorgenti finte dei test): si ripiega sul booleano di connessione.
+  const wsState = marketStatus.wsState || (client.wsConnected() ? 'healthy' : 'retrying');
   const out = [];
 
   family(out, 'perps_uptime_seconds', 'gauge',
@@ -114,7 +123,27 @@ export async function render(sources = {}) {
 
   family(out, 'perps_markets', 'gauge',
     'Mercati perp noti al modulo dati di mercato.',
-    [{ value: marketData.getStatus().markets || 0 }]);
+    [{ value: marketStatus.markets || 0 }]);
+
+  // WARN-02 — profondità MASSIMA tra le code dei wallet attivi. Senza etichette
+  // per scelta: la chiave della coda è un master address, e /metrics non è il
+  // posto dove pubblicare gli indirizzi dell'utente. Chi deve sapere QUALE
+  // wallet è in coda lo legge dal warning nei log, che quel dato lo riporta.
+  family(out, 'perps_execqueue_depth', 'gauge',
+    'Azioni firmate in coda o in esecuzione sul wallet più carico (0 = nessuna coda). ' +
+    `Soglia di warning configurata: ${execQueue.depthSnapshot().threshold}.`,
+    [{ value: execQueue.depthSnapshot().max }]);
+
+  // WARN-05 — stato del feed WS a tre valori, come "state set" (una serie, un
+  // campione per stato, esattamente uno a 1). `perps_ws_connected` resta
+  // invariata: qualunque pannello o alert scritto contro quella continua a valere.
+  family(out, 'perps_ws_state', 'gauge',
+    'Stato del feed WebSocket: healthy (connesso), retrying (giù, riconnessione in corso), ' +
+    'degraded (giù oltre la soglia di downtime, fallback REST persistente). 1 sullo stato corrente, 0 sugli altri.',
+    ['healthy', 'retrying', 'degraded'].map(state => ({
+      labels: { state },
+      value: state === wsState ? 1 : 0
+    })));
 
   // ---- Per-bot (etichette: bot, coin) ----
   const labelsOf = s => ({ bot: s.name, coin: s.coin });

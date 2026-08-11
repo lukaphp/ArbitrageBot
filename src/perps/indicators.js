@@ -76,6 +76,40 @@ export function bollinger(candles, { period = 20, stdDev = 2 } = {}) {
   return out.length ? out[out.length - 1] : null; // { lower, middle, upper, pb }
 }
 
+/**
+ * QUAL-01 item 4 — candele MINIME perché una regola produca un valore.
+ *
+ * Rispecchia una per una le guardie di warmup delle funzioni qui sopra (rsi:
+ * `period + 1`, adx: `period * 2`, macd: `slow + signal`, …). Serve alla
+ * diagnostica: un bot con meno candele del necessario resta su `hold` per
+ * sempre — gli indicatori tornano `null` e nessuna regola è mai soddisfatta —
+ * senza che nulla lo dica. Se una guardia cambia là, va cambiata anche qui:
+ * sono la stessa affermazione scritta due volte, ed è il prezzo per poter
+ * chiedere "quante candele ti servono?" senza calcolare l'indicatore.
+ *
+ * 0 = la regola non dipende dalle candele (price, funding, external).
+ */
+export function requiredCandles(rule) {
+  if (!rule || rule.type !== 'indicator') return 0;
+  const p = rule.period;
+  switch (rule.indicator) {
+    case 'rsi': return (p || 14) + 1;
+    case 'atr': return (p || 14) + 1;
+    case 'adx': return (p || 14) * 2;
+    case 'ema': return p || 20;
+    case 'sma': return p || 20;
+    case 'macd': { const { slow = 26, signal = 9 } = rule.params || {}; return slow + signal; }
+    case 'bollinger': { const { period = 20 } = rule.params || {}; return period; }
+    default: return 0;
+  }
+}
+
+/** Massimo warmup richiesto da uno o più insiemi di regole (0 se nessuno ne ha bisogno). */
+export function warmupCandles(...ruleSets) {
+  return [].concat(...ruleSets)
+    .reduce((max, rule) => Math.max(max, requiredCandles(rule)), 0);
+}
+
 // ---- Serie complete (per il backtester vettorializzato) ----
 //
 // Gli indicatori usati sono CAUSALI: il valore alla barra i calcolato sull'intera

@@ -86,10 +86,17 @@ test('cooldown: una sola notifica per episodio, non una per tick', async () => {
 });
 
 test('portfolio.canOpen espone cooldownUntil (timestamp grezzo) quando in cooldown', () => {
+  // AGGIORNATO da QUAL-01 item 2: il cooldown non si attiva più come effetto
+  // collaterale di `canOpen()` (che ora è pura) ma con `recordLoss()` esplicito,
+  // chiamato da `bot._registerClose()` quando la perdita è confermata. Ciò che
+  // questo test protegge — `cooldownUntil` grezzo nella risposta, che è come
+  // bot.js distingue un episodio dal successivo — non cambia di una virgola.
   const botId = `pf-${Math.random().toString(36).slice(2)}`;
   const r1 = portfolio.canOpen({ account: { positions: [] }, botId, consecutiveLosses: 3 });
   assert.equal(r1.ok, false);
   assert.match(r1.reason, /cooldown/i);
+
+  portfolio.recordLoss(botId, 3); // la perdita viene confermata → cooldown attivo
 
   const r2 = portfolio.canOpen({ account: { positions: [] }, botId, consecutiveLosses: 0 });
   assert.equal(r2.ok, false);

@@ -737,6 +737,13 @@ class ArbitrageBotServer {
       }
     });
 
+    // CRIT-03-EXTRA — `data.warning` è valorizzato (stringa) quando sul mercato
+    // scelto c'è già un altro bot IN ESECUZIONE sullo stesso wallet, altrimenti
+    // `null`. Non è un errore e non cambia lo status HTTP: la creazione avviene
+    // comunque, perché due strategie diverse sullo stesso asset sono una scelta
+    // legittima. Il campo arriva da `botManager.createBot()` e passa da qui senza
+    // essere toccato — la decisione di cosa sia una sovrapposizione sta nel
+    // manager, che è l'unico a sapere quali bot sono davvero in esecuzione.
     app.post('/api/perps/bots', (req, res) => {
       try {
         const { name, coin, masterAddress, config: botConfig } = req.body;

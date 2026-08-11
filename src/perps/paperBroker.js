@@ -15,21 +15,96 @@
  */
 
 import client from './hyperliquidClient.js';
+import db from '../db/database.js';
 import logger from '../utils/logger.js';
 
 const TAKER_FEE_PCT = 0.00035;
 const DEFAULT_SLIPPAGE = 0.0005;
 const START_EQUITY = parseFloat(process.env.PAPER_START_EQUITY) || 10000;
 
-class PaperBroker {
+// QUAL-01 item 3 — stato persistito in `settings`, chiave singola.
+const STATE_KEY = 'paper_broker_state';
+// I fill servono a `getRealizedPnl`, che guarda solo quelli dall'apertura della
+// posizione in corso: oltre questa finestra sono storia già aggregata in
+// `positions`/`trades`. Un forward-test lungo mesi non deve gonfiare senza limite
+// una riga di `settings`.
+const MAX_PERSISTED_FILLS = 500;
+
+export class PaperBroker {
   constructor() {
     // master(lower) -> { equity, positions: Map<coin,{side,size,entryPx,leverage}>,
     //                    triggers: Map<coin,[{oid,tpsl,triggerPx,isBuy,size}]>,
     //                    fills: [{time,coin,dir,closedPnl,fee}], oidSeq }
     this.state = new Map();
+    this._loaded = false;
+  }
+
+  /**
+   * QUAL-01 item 3 — ripristina lo stato simulato.
+   *
+   * Un riavvio azzerava il forward-test in corso: posizioni virtuali aperte,
+   * trigger e PnL simulato spariti, equity di nuovo a `PAPER_START_EQUITY`. Il
+   * paper mode serve a validare una strategia PRIMA di rischiare capitale reale,
+   * e una serie di risultati che si azzera a ogni deploy non valida nulla.
+   *
+   * `oidSeq` è persistito con il resto e non è un dettaglio: gli oid dei trigger
+   * sono ciò con cui `bot._classifyCloseFills` riconosce se ha chiuso il TP o lo
+   * SL. Ripartendo da 1 dopo un riavvio, un oid nuovo potrebbe coincidere con uno
+   * vecchio ancora tracciato in `trailing_json` e attribuire la chiusura
+   * all'ordine sbagliato.
+   *
+   * Lazy come i cooldown di portafoglio (CRIT-02): il singleton nasce all'import,
+   * quando il DB può non essere ancora inizializzato.
+   */
+  _load() {
+    if (this._loaded) return this.state;
+    this._loaded = true;
+    try {
+      const raw = db.getSetting(STATE_KEY);
+      if (!raw) return this.state;
+      const parsed = JSON.parse(raw) || {};
+      for (const [key, acc] of Object.entries(parsed)) {
+        this.state.set(key, {
+          equity: Number.isFinite(Number(acc.equity)) ? Number(acc.equity) : START_EQUITY,
+          positions: new Map(Object.entries(acc.positions || {})),
+          triggers: new Map(Object.entries(acc.triggers || {})),
+          fills: Array.isArray(acc.fills) ? acc.fills : [],
+          oidSeq: Number(acc.oidSeq) > 0 ? Number(acc.oidSeq) : 1
+        });
+      }
+      const positions = [...this.state.values()].reduce((n, a) => n + a.positions.size, 0);
+      logger.info(`📝 Paper broker: stato ripristinato (${this.state.size} account, ${positions} posizioni simulate aperte)`);
+    } catch (error) {
+      // Degrado: si riparte da zero, ma detto — un forward-test che sembra
+      // ricominciato da capo senza spiegazione è un dato che non si può leggere.
+      logger.warn('Paper broker: stato simulato non ripristinabile, si riparte da zero', error.message);
+    }
+    return this.state;
+  }
+
+  /** Salva lo stato simulato. Un errore di scrittura non interrompe la simulazione. */
+  _save() {
+    try {
+      const out = {};
+      for (const [key, acc] of this.state) {
+        out[key] = {
+          equity: acc.equity,
+          positions: Object.fromEntries(acc.positions),
+          triggers: Object.fromEntries(acc.triggers),
+          fills: acc.fills.slice(-MAX_PERSISTED_FILLS),
+          oidSeq: acc.oidSeq
+        };
+      }
+      db.setSetting(STATE_KEY, JSON.stringify(out));
+      return true;
+    } catch (error) {
+      logger.warn('Paper broker: stato simulato non persistito', error.message);
+      return false;
+    }
   }
 
   _acc(master) {
+    this._load();
     const key = (master || 'paper').toLowerCase();
     if (!this.state.has(key)) {
       this.state.set(key, { equity: START_EQUITY, positions: new Map(), triggers: new Map(), fills: [], oidSeq: 1 });
@@ -83,6 +158,7 @@ class PaperBroker {
     acc.positions.delete(coin);
     acc.triggers.delete(coin);
     logger.debug(`📝 Paper close ${coin} @ ${px} (${reason}) pnl=${closedPnl.toFixed(2)} fee=${fee.toFixed(2)}`);
+    this._save();
     return { closedPnl, fee };
   }
 
@@ -132,6 +208,7 @@ class PaperBroker {
       acc.equity -= fee;
       acc.fills.push({ time: Date.now(), coin, dir: `Open ${side === 'long' ? 'Long' : 'Short'}`, px, sz: size, fee, closedPnl: 0, oid });
     }
+    this._save();
     return { oid, avgPx: px, totalSz: size, error: null, paper: true };
   }
 
@@ -142,6 +219,7 @@ class PaperBroker {
     const list = acc.triggers.get(coin) || [];
     list.push({ oid, tpsl, triggerPx: px, isBuy, size });
     acc.triggers.set(coin, list);
+    this._save();
     return { oid, avgPx: null, error: null, paper: true };
   }
 
@@ -149,6 +227,7 @@ class PaperBroker {
     const acc = this._acc(masterAddress);
     const list = (acc.triggers.get(coin) || []).filter(t => t.oid !== oid);
     acc.triggers.set(coin, list);
+    this._save();
     return { ok: true, paper: true };
   }
 

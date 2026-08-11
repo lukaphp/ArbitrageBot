@@ -1,6 +1,7 @@
 # Release 2 — Verso il mainnet: hardening, multi-provider, consulente proattivo
 
-**Team:** Nautilus · **Stato:** epiche definite — planning tenuto l'11 agosto 2026, subito dopo la
+**Team:** Nautilus · **Stato:** Epic A (Sprint 1) chiusa — 21/21 SP, review approvata l'11 agosto
+2026 — Epic B/C/D/E ancora da pianificare in dettaglio. Planning tenuto l'11 agosto 2026, subito dopo la
 chiusura di Sprint 4 (28/28 SP) e un audit indipendente del sottosistema Perps (`docs/AUDIT_REPORT.md`,
 10 agosto 2026, 20 moduli letti integralmente, approccio threat-model-driven).
 
@@ -201,20 +202,21 @@ di default in qualunque ambiente.
 
 ## 7. Riepilogo e sequenziamento proposto
 
-| Epica | SP | Blocca/dipende da |
-|:--|:--:|:---|
-| A — Hardening mainnet | 21 | Nessuna — parte per prima |
-| B — Completamento Release 1 | 16 | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E |
-| C — Multi-provider Analyst | 5 | Nessuna |
-| D — Consulente proattivo | 6 | ADV-OPS-01 (Epic B) |
-| E — Advisor fase 2 | 3 | ADV-OPS-01 (Epic B), idealmente dopo D |
-| **Totale release** | **51** | |
+| Epica | SP | Stato | Blocca/dipende da |
+|:--|:--:|:---|:---|
+| A — Hardening mainnet | 21 | ✅ **Chiusa** (Sprint 1, review 11 agosto) | Nessuna — parte per prima |
+| B — Completamento Release 1 | 16 | Da pianificare | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E |
+| C — Multi-provider Analyst | 5 | Da pianificare | Nessuna |
+| D — Consulente proattivo | 6 | Da pianificare | ADV-OPS-01 (Epic B) |
+| E — Advisor fase 2 | 3 | Da pianificare | ADV-OPS-01 (Epic B), idealmente dopo D |
+| **Totale release** | **51** | **21/51 fatti** | |
 
 **Distribuzione su sprint** (numerazione propria di Release 2 — non prosegue quella di Release 1,
 per decisione esplicita del PO l'11 agosto: questa release riparte da Sprint 1):
 
-- **Sprint 1 — Epic A per intero** (21 SP): coerente con la decisione "prima epica, blocca le altre".
-  Pianificato in dettaglio in `sprint1.md`.
+- **Sprint 1 — Epic A per intero** (21 SP) ✅ **chiuso**: coerente con la decisione "prima epica,
+  blocca le altre". Dettaglio e esito review in `sprint1.md`. Due extra nati in review (warning
+  multi-bot stesso mercato, guard su `getLimits()`) consegnati nella stessa seduta.
 - **Sprint 2 (proposto) — Epic B + Epic C** (16 + 5 = 21 SP): completamento operativo/debito residuo
   e multi-provider Analyst, nessuna dipendenza tra loro, parallelizzabili.
 - **Sprint 3 (proposto) — Epic D + Epic E** (6 + 3 = 9 SP, sprint più leggero, spazio per eventuale

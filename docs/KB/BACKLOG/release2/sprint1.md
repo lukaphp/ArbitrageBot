@@ -1,6 +1,6 @@
 # Release 2 · Sprint 1 — Hardening mainnet (Epic A)
 
-**Team:** Nautilus · **Stato:** pianificato — refinement tenuto l'11 agosto 2026, subito dopo la
+**Team:** Nautilus · **Stato:** review chiusa, 10/10 storie + 2 extra approvati (11 agosto 2026) — refinement tenuto l'11 agosto 2026, subito dopo la
 definizione delle epiche di `docs/KB/BACKLOG/release2/README.md`. Questo sprint è **Epic A per intero**:
 i 4 critici e i 5 importanti dell'audit indipendente (`docs/AUDIT_REPORT.md`), verificati riga per
 riga sul codice reale prima di questo planning (`release2/README.md` §1), più un pacchetto di 5 minori.
@@ -54,14 +54,14 @@ successivo. Va trattato come caso a sé, non solo come "ratio basso".
 - Propagare la size reale anche al DCA (`_maybeDca`/`_checkDca`, stesso pattern di lettura del fill).
 
 **Criteri di accettazione:**
-- [ ] Fill pieno (`totalSz === plan.size`): comportamento identico a oggi, nessuna regressione.
-- [ ] Fill parziale: `position.size`, riga DB, TP/SL usano `totalSz`, non `plan.size`; notifica con i
+- [x] Fill pieno (`totalSz === plan.size`): comportamento identico a oggi, nessuna regressione.
+- [x] Fill parziale: `position.size`, riga DB, TP/SL usano `totalSz`, non `plan.size`; notifica con i
       due valori.
-- [ ] Fill nullo/zero: nessuna posizione scritta in DB né in memoria; notifica dedicata; nessun TP/SL
+- [x] Fill nullo/zero: nessuna posizione scritta in DB né in memoria; notifica dedicata; nessun TP/SL
       piazzato per una posizione inesistente.
-- [ ] Test che simula un broker con fill parziale e uno con fill nullo (mock su `placeMarketOrder`,
+- [x] Test che simula un broker con fill parziale e uno con fill nullo (mock su `placeMarketOrder`,
       pattern già usato in `test/botTpSweep.test.js`), verificati rossi prima del fix.
-- [ ] Stesso trattamento applicato al percorso DCA.
+- [x] Stesso trattamento applicato al percorso DCA.
 
 **File:** `src/perps/bot.js`. **SP:** 3.
 
@@ -85,11 +85,11 @@ apposta per chiudere.
   progetto per settings opzionali).
 
 **Criteri di accettazione:**
-- [ ] Un cooldown attivo sopravvive a un riavvio del processo (test: attiva cooldown, ricrea l'istanza
+- [x] Un cooldown attivo sopravvive a un riavvio del processo (test: attiva cooldown, ricrea l'istanza
       di `Portfolio`, verifica che sia ancora bloccato).
-- [ ] Un cooldown già scaduto al momento del riavvio non viene ripristinato.
-- [ ] Un DB non disponibile in lettura all'avvio non impedisce l'avvio del server (degrado, non crash).
-- [ ] Nessuna migrazione di schema: uso di `settings` esistente.
+- [x] Un cooldown già scaduto al momento del riavvio non viene ripristinato.
+- [x] Un DB non disponibile in lettura all'avvio non impedisce l'avvio del server (degrado, non crash).
+- [x] Nessuna migrazione di schema: uso di `settings` esistente.
 
 **File:** `src/perps/portfolio.js`. **SP:** 2.
 
@@ -118,16 +118,16 @@ sull'exchange.
   multi-bot, non un guasto).
 
 **Criteri di accettazione:**
-- [ ] Due bot sullo stesso `(masterAddress, coin)` che tentano l'apertura nello stesso tick: solo uno
+- [x] Due bot sullo stesso `(masterAddress, coin)` che tentano l'apertura nello stesso tick: solo uno
       arriva a `placeMarketOrder`, l'altro esce prima di firmare nulla (test con due chiamate
       concorrenti a `_openPosition()`, verificato che `broker.placeMarketOrder` sia chiamato una sola
       volta).
-- [ ] Il lock si rilascia **sempre** nel `finally`, anche se l'apertura fallisce a metà (stesso
+- [x] Il lock si rilascia **sempre** nel `finally`, anche se l'apertura fallisce a metà (stesso
       pattern già verificato per `this._opening` in SEC-08 — nessuna funzione nuova, estende quella
       esistente).
-- [ ] Bot su coin diversi sullo stesso master non si bloccano a vicenda (il lock è per coppia, non per
+- [x] Bot su coin diversi sullo stesso master non si bloccano a vicenda (il lock è per coppia, non per
       wallet intero).
-- [ ] Nessuna modifica al comportamento di `execQueue.run()` per gli ordini di chiusura/trigger — il
+- [x] Nessuna modifica al comportamento di `execQueue.run()` per gli ordini di chiusura/trigger — il
       lock riguarda solo l'apertura.
 
 **File:** `src/perps/execQueue.js`, `src/perps/bot.js`. **SP:** 3.
@@ -150,10 +150,10 @@ procedere direttamente a `_closeNow('SL non piazzabile (oid null)')` — la veri
 quando la risposta non è già di per sé conclusiva.
 
 **Criteri di accettazione:**
-- [ ] `res.oid === null`: chiusura di sicurezza senza la chiamata `_findStopOrder()` intermedia (test
+- [x] `res.oid === null`: chiusura di sicurezza senza la chiamata `_findStopOrder()` intermedia (test
       che conta le chiamate al broker).
-- [ ] `res.oid` valorizzato: comportamento invariato, la verifica esistente resta.
-- [ ] Notifica esistente invariata nel testo (non cambia cosa viene comunicato, solo quanto in fretta).
+- [x] `res.oid` valorizzato: comportamento invariato, la verifica esistente resta.
+- [x] Notifica esistente invariata nel testo (non cambia cosa viene comunicato, solo quanto in fretta).
 
 **File:** `src/perps/bot.js`. **SP:** 1.
 
@@ -165,7 +165,7 @@ quando la risposta non è già di per sé conclusiva.
 l'unica del file che non passa dal formato strutturato del resto del logger.
 
 **Criteri di accettazione:**
-- [ ] Riga rimossa. Nessun altro comportamento del logger cambia (verificato con i test esistenti del
+- [x] Riga rimossa. Nessun altro comportamento del logger cambia (verificato con i test esistenti del
       logger, se presenti, altrimenti verifica manuale dell'avvio).
 
 **File:** `src/utils/logger.js`. **SP:** 1.
@@ -186,9 +186,9 @@ candidato futuro):**
   configurabile (default: 10).
 
 **Criteri di accettazione:**
-- [ ] La profondità della coda è interrogabile/loggata quando supera la soglia.
-- [ ] Nessuna modifica al comportamento di serializzazione esistente — è solo osservabilità in più.
-- [ ] Test che accoda N funzioni lente e verifica che il warning scatti oltre soglia.
+- [x] La profondità della coda è interrogabile/loggata quando supera la soglia.
+- [x] Nessuna modifica al comportamento di serializzazione esistente — è solo osservabilità in più.
+- [x] Test che accoda N funzioni lente e verifica che il warning scatti oltre soglia.
 
 **File:** `src/perps/execQueue.js`. **SP:** 2.
 
@@ -211,11 +211,11 @@ slippage reale — non viene mai calcolata né esposta.
   visibilità, coerente con lo scope "hardening", non "nuova policy di rischio".
 
 **Criteri di accettazione:**
-- [ ] Slippage calcolato e loggato su ogni apertura reale (non sulle posizioni adottate da `_reconcile`,
+- [x] Slippage calcolato e loggato su ogni apertura reale (non sulle posizioni adottate da `_reconcile`,
       dove non c'è un `order` di riferimento).
-- [ ] Persistito in modo che sia recuperabile per un'aggregazione futura, senza rompere le query
+- [x] Persistito in modo che sia recuperabile per un'aggregazione futura, senza rompere le query
       esistenti su `trades`/`positions`.
-- [ ] Test con `avgPx` uguale, leggermente diverso, e molto diverso da `snapshot.price`.
+- [x] Test con `avgPx` uguale, leggermente diverso, e molto diverso da `snapshot.price`.
 
 **File:** `src/perps/bot.js`, `src/db/database.js` (campo additivo). **SP:** 2.
 
@@ -233,9 +233,9 @@ si perde tra gli altri), ogni volta che `secret()` ritorna `DEV_FALLBACK` invece
 non blocca l'avvio, rende impossibile non accorgersene.
 
 **Criteri di accettazione:**
-- [ ] Warning visibile a ogni avvio in cui `DEV_FALLBACK` è in uso, fuori produzione.
-- [ ] Nessun warning quando `AGENT_ENCRYPTION_KEY` è impostata correttamente.
-- [ ] Nessun cambiamento al comportamento fail-fast già esistente in produzione.
+- [x] Warning visibile a ogni avvio in cui `DEV_FALLBACK` è in uso, fuori produzione.
+- [x] Nessun warning quando `AGENT_ENCRYPTION_KEY` è impostata correttamente.
+- [x] Nessun cambiamento al comportamento fail-fast già esistente in produzione.
 
 **File:** `src/perps/secretBox.js`. **SP:** 1.
 
@@ -261,14 +261,14 @@ guasto persistente che probabilmente non si risolve da solo nei prossimi secondi
   esattamente ciò che la notifica-per-episodio già evita) e uno al rientro in `healthy`.
 
 **Criteri di accettazione:**
-- [ ] Lo stato passa a `degraded` dopo la soglia configurata di tempo in retry continuo, non al primo
+- [x] Lo stato passa a `degraded` dopo la soglia configurata di tempo in retry continuo, non al primo
       fallimento.
-- [ ] Un solo alert all'ingresso in `degraded`, un solo alert al ritorno a `healthy` — nessuna
+- [x] Un solo alert all'ingresso in `degraded`, un solo alert al ritorno a `healthy` — nessuna
       ripetizione per singolo tentativo di retry nel mezzo (test sullo stile di
       `test/portfolioCooldownNotify.test.js`, Sprint 3).
-- [ ] Lo stato è leggibile da un endpoint esistente, non ne serve uno nuovo se `riskSnapshot`/`/metrics`
+- [x] Lo stato è leggibile da un endpoint esistente, non ne serve uno nuovo se `riskSnapshot`/`/metrics`
       bastano.
-- [ ] Nessuna modifica al backoff/alla logica di retry già esistente — solo lo stato esplicito sopra.
+- [x] Nessuna modifica al backoff/alla logica di retry già esistente — solo lo stato esplicito sopra.
 
 **File:** `src/perps/hyperliquidClient.js`, `src/perps/marketData.js`, `src/perps/riskSnapshot.js`.
 **SP:** 3.
@@ -354,9 +354,53 @@ del lock di CRIT-03. QUAL-01 per ultimo, a mente sgombra dai critici.
 | Qualità (QUAL-01) | 3 |
 | **Totale** | **21** |
 
-Un solo owner (Bruno) per l'intero sprint, un solo revisore designato (Annie) per l'intero sprint —
-diverso dal pattern multi-owner di Sprint 3/4, per decisione esplicita: sono tutte modifiche allo
-stesso nucleo di money-handling code, un filo conduttore unico riduce il rischio di una revisione
-frammentata su un'area così sensibile.
+Un solo owner (Bruno) per l'intero sprint, un solo revisore designato in planning (Annie) — poi
+affiancata in review da **Jordan**, nuovo membro del team (analista di rischio quantitativo),
+aggiunto come secondo revisore proprio su questo sprint per decisione della PO: due lenti
+indipendenti su un'epica di sola correttezza/rischio, senza coordinamento tra loro.
 
-*Refinement chiuso l'11 agosto 2026. Lo sprint parte su richiesta esplicita del PO.*
+## 4. Esito review (11 agosto 2026)
+
+**21/21 SP completati e approvati dalla PO**, più 2 extra nati in seduta di review (senza stima SP
+a sé, piccoli per costruzione). `npm test`: 551/551 verdi (era 460 a inizio sprint). Lint pulito su
+125 file. Nessun commit fatto durante l'implementazione — tutto il lavoro è stato verificato sul
+working tree prima di essere reso definitivo.
+
+**Doppia revisione indipendente, non coordinata tra le due:**
+- **Annie** (correttezza/test) — ha **riprodotto di persona** lo scenario "rosso prima" di CRIT-03
+  disattivando il lock e osservando due ordini reali arrivare all'exchange; ha interrogato
+  `data/perps.db` in sola lettura per confermare che il fix di PaperBroker (QUAL-01) non avesse
+  toccato il database reale, invece di fidarsi della dichiarazione.
+- **Jordan** (rischio quantitativo, primo incarico nel team) — per ciascuna storia critica ha
+  verificato se il fix riduce davvero il rischio che dichiara di ridurre, non solo se il codice è
+  corretto: ha confermato che CRIT-01 ridimensiona TP/SL sulla size reale in ogni punto, e ha letto
+  CRIT-03 anche come sintomo di un problema di disegno a monte (perché esistono due bot sullo stesso
+  mercato), non solo come una race da chiudere tecnicamente.
+
+**Il finding più importante dello sprint**, confermato indipendentemente da entrambe le revisioni:
+prima di questo sprint, **valutare** una proposta dell'Analyst — non aprirla, solo valutarla — poteva
+innescare un'ora di cooldown reale su un bot, perché `riskAgent.evaluate()` chiamava la stessa
+funzione (`portfolio.canOpen()`) usata per aprire posizioni davvero. Scoperto da Bruno come effetto
+collaterale della separazione pura/impura di QUAL-01 item 2, non come obiettivo dichiarato della
+storia. Jordan lo classifica **priorità 1**, più grave della classificazione "minore" ereditata
+dall'audit originale: combinato con CRIT-02 (cooldown ora persistito), quei cooldown spuri sarebbero
+diventati **permanenti** invece che transitori — la stessa classe di incidente di SEC-10 (9-10
+agosto), ma innescata da una lettura, non da un'apertura.
+
+**Due extra decisi in seduta di review, entrambi consegnati:**
+- **CRIT-03-EXTRA** — warning esplicito (non un blocco) alla creazione di un bot su un mercato già
+  coperto da un altro bot attivo, su segnalazione di Jordan. Verificato rosso su un worktree pulito
+  (`git worktree add --detach`, non `git stash` — la disciplina imparata durante Sprint 4 sul
+  working tree condiviso). Due gap adiacenti (avvio di un bot fermo, spostamento di un bot su
+  `updateBot()`) dichiarati e lasciati aperti come refinement, non risolti di iniziativa.
+- **CRIT-02-EXTRA** — guard su `getLimits()` con fallback conservativo ai `DEFAULTS` (mai un via
+  libera sui limiti di rischio per un guasto del database) e validazione che il JSON letto sia
+  davvero un oggetto, su segnalazione di Annie. Asimmetria voluta: `setLimits()` resta senza guard,
+  perché rispondere "salvato" a un salvataggio mai avvenuto sarebbe peggio di un errore esplicito.
+
+8 candidati di refinement raccolti per lo sprint successivo, in
+`docs/KB/BACKLOG/release2/sprint1-status/aggregate.json` (default del cooldown non validato con
+dati reali, aggregazione dello slippage per bot/mercato, copertura di `startBot()`/`updateBot()`
+per il warning multi-bot, verifica che la migrazione di schema v3 giri pulita sul VPS reale).
+
+*Refinement chiuso l'11 agosto 2026. Review chiusa l'11 agosto 2026 — 21/21 SP approvati.*

@@ -43,10 +43,64 @@ class BotManager {
     logger.info(`🤖 Bot Perps caricati: ${rows.length} (${rows.filter(r => r.status === 'running').length} attivi)`);
   }
 
+  /**
+   * CRIT-03-EXTRA — bot IN ESECUZIONE che operano già sulla stessa coppia
+   * (masterAddress, coin).
+   *
+   * Il lock di CRIT-03 impedisce a due bot sullo stesso mercato di firmare
+   * entrambi un'apertura nello stesso istante; questo risponde alla domanda a
+   * monte, cioè che quel secondo bot esista. È già capitato in produzione (due bot
+   * short su NEAR-PERP a un minuto di distanza con parametri quasi identici, vedi
+   * `docs/KB/business-analysis-2026-08-11.md`): non diversificazione voluta, un
+   * doppione. Il rischio è di esposizione, perché i limiti di portafoglio contano
+   * le POSIZIONI aperte, non le strategie che le generano — due bot sullo stesso
+   * mercato sono una scommessa doppia sullo stesso rischio.
+   *
+   * Solo i bot `running`: due bot fermi non aprono nulla e non producono
+   * esposizione, avvisare su quelli sarebbe un falso positivo. L'indirizzo si
+   * confronta in minuscolo, come per il lock di apertura (`execQueue`): è lo
+   * stesso wallet scritto in modo diverso.
+   *
+   * Sola lettura, nessun effetto collaterale: si può chiamare per chiedere senza
+   * cambiare nulla (la lezione di QUAL-01 item 2 su `canOpen`).
+   *
+   * @returns {Array<{id, name, coin}>} bot sovrapposti, vuoto se nessuno.
+   */
+  findMarketOverlap({ masterAddress, coin, excludeId = null }) {
+    const master = String(masterAddress || '').toLowerCase();
+    if (!master || !coin) return [];
+    return [...this.bots.values()]
+      .filter(b => b.id !== excludeId
+        && b.status === 'running'
+        && b.coin === coin
+        && String(b.masterAddress || '').toLowerCase() === master)
+      .map(b => ({ id: b.id, name: b.name, coin: b.coin }));
+  }
+
+  /**
+   * Crea un bot. Non lo avvia: un bot nasce fermo.
+   *
+   * CRIT-03-EXTRA — se sul mercato c'è già un altro bot in esecuzione, la
+   * creazione AVVIENE COMUNQUE e la risposta porta un `warning`. Non è un blocco
+   * per scelta: due strategie diverse sullo stesso asset (timeframe diversi, una
+   * long e una short) sono una configurazione legittima, e trasformare un avviso in
+   * un divieto renderebbe impossibile una cosa che a volte si vuole fare davvero.
+   *
+   * Nessuna notifica Telegram: chi crea il bot è la persona che sta guardando la
+   * risposta in quel momento. Un messaggio in chat per un'azione appena compiuta a
+   * mano sarebbe rumore, ed è la stessa disciplina delle notifiche-per-episodio.
+   * Nei log resta traccia, perché il caso interessa anche a posteriori.
+   *
+   * `warning` è ADDITIVO sullo stato restituito (`null` quando non c'è nulla da
+   * dire): la forma di `getState()` non cambia per nessun altro consumatore —
+   * `listStates()`, le metriche e gli eventi socket non lo vedono nemmeno, perché
+   * quelli ricostruiscono lo stato per conto loro.
+   */
   createBot({ name, coin, network, masterAddress, config }) {
     if (!name || !coin || !masterAddress) {
       throw new Error('name, coin e masterAddress sono obbligatori');
     }
+    const overlap = this.findMarketOverlap({ masterAddress, coin });
     const id = crypto.randomUUID();
     const record = {
       id, name, coin, network: network || 'testnet',
@@ -56,7 +110,18 @@ class BotManager {
     const bot = new PerpsBot(db.getBot(id), this._onUpdate);
     this.bots.set(id, bot);
     logger.info(`➕ Bot creato: ${name} (${coin})`, { id });
-    return bot.getState();
+
+    let warning = null;
+    if (overlap.length) {
+      const others = overlap.map(o => o.name).join(', ');
+      warning = `Su ${coin} è già in esecuzione ${overlap.length === 1 ? 'un altro bot' : `${overlap.length} altri bot`} (${others}) sullo stesso wallet. `
+        + 'Non è un errore, ma i limiti di portafoglio contano le posizioni aperte, non le strategie: '
+        + 'due bot sullo stesso mercato possono raddoppiare l\'esposizione sullo stesso rischio. '
+        + 'Verifica che sia una diversificazione voluta e non un doppione.';
+      logger.warn(`Bot creato su un mercato già coperto: ${name} (${coin}) — già in esecuzione: ${others}`);
+    }
+
+    return { ...bot.getState(), warning };
   }
 
   /**

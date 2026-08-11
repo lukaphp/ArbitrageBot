@@ -13,6 +13,7 @@
  */
 
 import client from './hyperliquidClient.js';
+import execQueue from './execQueue.js';
 import paperBroker from './paperBroker.js';
 import marketData from './marketData.js';
 import strategyEngine from './strategyEngine.js';
@@ -367,11 +368,27 @@ export class PerpsBot {
       return;
     }
 
+    // CRIT-03: lock di apertura per (masterAddress, coin), preso PRIMA di
+    // qualunque azione firmata. I controlli qui sopra girano su uno snapshot
+    // `account` letto all'inizio del tick: due bot sullo stesso mercato possono
+    // superarli entrambi senza vedere l'apertura dell'altro, e `execQueue`
+    // serializzerebbe le due firme invece di impedire la seconda.
+    // Lock già preso = evento atteso in un sistema multi-bot: si esce come da un
+    // `canOpen()` negativo (log + `lastEval`), senza eccezioni e senza notifiche
+    // di errore.
+    if (!execQueue.acquireOpenLock(this.masterAddress, this.coin)) {
+      logger.warn(`Bot ${this.name}: apertura già in corso su ${this.coin} per questo wallet, salto questo tick`);
+      this.lastEval = { action: 'hold', reason: `Apertura ${this.coin} già in corso su questo wallet (un altro bot ha il lock)`, ts: Date.now() };
+      return;
+    }
+
     // SEC-08: da qui in poi la posizione può esistere sull'exchange senza essere
     // ancora in `this.position`. Il flag copre l'intera finestra (leva → fill →
     // riga in DB → stato in memoria → trigger) e viene azzerato nel `finally`
     // anche se l'apertura fallisce a metà: se restasse alzato, `_reconcile` non
     // adotterebbe più nessuna posizione per il resto della vita del processo.
+    // Lock e flag si rilasciano nello STESSO `finally`: un solo punto di
+    // gestione, così non possono disallinearsi.
     this._opening = true;
     try {
       await this.broker.setLeverage(this.masterAddress, this.coin, leverage,
@@ -388,7 +405,41 @@ export class PerpsBot {
         return;
       }
 
+      // CRIT-01 — da qui in avanti l'unica size legittima è quella RIEMPITA.
+      // `plan.size` è ciò che abbiamo chiesto, non ciò che l'exchange ha eseguito.
+      const fill = riskManager.resolveFillSize(plan.size, order.totalSz);
+
+      if (fill.none) {
+        // Nessun fill: l'IOC non ha trovato liquidità. Non esiste alcuna
+        // posizione sull'exchange, quindi non va scritta né in DB né in memoria e
+        // nessun trigger va piazzato — una posizione "fantasma" resterebbe nello
+        // stato del bot fino a che `_reconcile` non la corregge, e nel frattempo
+        // bloccherebbe nuove aperture e falserebbe le statistiche.
+        // Se il fill invece C'È stato e siamo qui per una risposta illeggibile, il
+        // recupero esiste già: `_reconcile` adotta la posizione al tick successivo
+        // assegnandole TP/SL propri.
+        logger.error(`Bot ${this.name}: ordine market senza fill su ${this.coin} (pianificati ${plan.size}, totalSz ${order.totalSz ?? 'assente'}) — nessuna posizione registrata`);
+        notifier.notify(`⚠️ <b>${this.name}</b>: ordine ${side.toUpperCase()} ${plan.size} ${this.coin} inviato ma <b>nessun fill</b> (IOC senza riempimento) — nessuna posizione aperta e nessun TP/SL piazzato. Verificare la liquidità del mercato.`, { urgent: true });
+        return;
+      }
+
+      const filledSize = fill.filled;
+      if (fill.partial) {
+        // Non è un errore, è una posizione più piccola del previsto: si prosegue
+        // sui numeri veri, ma l'operatore deve saperlo (il rischio effettivo
+        // dell'operazione non è quello pianificato).
+        logger.warn(`Bot ${this.name}: fill parziale su ${this.coin} — pianificati ${plan.size}, riempiti ${filledSize} (${(fill.ratio * 100).toFixed(1)}%)`);
+        notifier.notify(`⚠️ <b>${this.name}</b>: fill <b>parziale</b> su ${this.coin} — pianificati ${plan.size}, riempiti ${filledSize} (${(fill.ratio * 100).toFixed(1)}%). Posizione, TP e SL sono dimensionati sulla size riempita.`, { urgent: true });
+      }
+
       const entryPx = order.avgPx || snapshot.price;
+      // WARN-03: slippage reale dell'esecuzione (avgPx vs prezzo di riferimento
+      // della decisione). Solo visibilità: loggato e persistito sul trade, nessun
+      // blocco automatico in questo sprint.
+      const slippage = riskManager.computeSlippage(order.avgPx, snapshot.price);
+      if (slippage != null) {
+        logger.info(`Bot ${this.name}: slippage apertura ${this.coin} ${(slippage * 100).toFixed(4)}% (riferimento ${snapshot.price}, eseguito ${order.avgPx})`);
+      }
       // ATR corrente per gli stop adattivi (mode 'atr'); null se non configurati.
       const atrVal = this._usesAtr() ? ind.atr(snapshot.candles, this.config.atrPeriod || 14) : null;
       const { tpPx, slPx } = riskManager.computeTpSl(entryPx, side, this.config, { atr: atrVal });
@@ -398,13 +449,16 @@ export class PerpsBot {
       // in attesa del fill (tipicamente un'altra istanza dello stesso bot, vedi
       // botManager.updateBot): si riusa quella riga.
       const { id: posId, created, row } = db.insertPositionIfNoneOpen({
-        botId: this.id, coin: this.coin, side, size: plan.size,
+        botId: this.id, coin: this.coin, side, size: filledSize,
         entryPx, leverage, tpPx, slPx
       });
-      db.insertTrade({ botId: this.id, coin: this.coin, side, px: entryPx, sz: plan.size, hlOid: order.oid });
+      db.insertTrade({
+        botId: this.id, coin: this.coin, side, px: entryPx, sz: filledSize,
+        hlOid: order.oid, slippagePct: slippage
+      });
 
       this.position = {
-        id: posId, side, size: plan.size, entryPx,
+        id: posId, side, size: filledSize, entryPx,
         originalEntryPx: entryPx, // immutabile: riferimento per le soglie progressive del DCA (mai il prezzo medio)
         dcaCount: 0,
         tpPx, slPx, slOid: null, tpOids: [], openedAt: Date.now()
@@ -419,20 +473,21 @@ export class PerpsBot {
         // (dimensionati su uno stato diverso) vengono rimossi solo DOPO che i
         // nuovi sono attivi. Un allineamento del genere non passa in silenzio.
         db.updatePosition(posId, {
-          entry_px: entryPx, size: plan.size, tp_px: tpPx, sl_px: slPx,
+          entry_px: entryPx, size: filledSize, tp_px: tpPx, sl_px: slPx,
           opened_at: this.position.openedAt, trailing_json: this._trailingJson()
         });
-        logger.warn(`Bot ${this.name}: riga posizione #${posId} già aperta (side DB ${row?.side}) all'apertura di ${side} ${plan.size} ${this.coin} — riusata invece di duplicarla`);
+        logger.warn(`Bot ${this.name}: riga posizione #${posId} già aperta (side DB ${row?.side}) all'apertura di ${side} ${filledSize} ${this.coin} — riusata invece di duplicarla`);
         notifier.notify(`⚠️ <b>${this.name}</b>: all'apertura su ${this.coin} esisteva già la riga posizione #${posId} — riusata (nessun duplicato). Verificare i trigger attivi sull'exchange.`);
         await this._replaceTpSl(tpPx, slPx, 'riga posizione preesistente all\'apertura');
       }
       // Garanzia: nessuna posizione resta senza stop loss (chiude se non riesce a piazzarlo).
       await this._ensureStopLoss();
 
-      logger.info(`🟢 Bot ${this.name}: aperta ${side} ${plan.size} ${this.coin} @ ${entryPx}`);
-      notifier.notify(`🟢 <b>${this.name}</b> ha aperto <b>${side.toUpperCase()}</b> ${plan.size} ${this.coin} @ ${entryPx}\nTP ${tpPx ? tpPx.toFixed(2) : '—'} · SL ${slPx ? slPx.toFixed(2) : '—'}`);
+      logger.info(`🟢 Bot ${this.name}: aperta ${side} ${filledSize} ${this.coin} @ ${entryPx}`);
+      notifier.notify(`🟢 <b>${this.name}</b> ha aperto <b>${side.toUpperCase()}</b> ${filledSize} ${this.coin} @ ${entryPx}\nTP ${tpPx ? tpPx.toFixed(2) : '—'} · SL ${slPx ? slPx.toFixed(2) : '—'}`);
     } finally {
       this._opening = false;
+      execQueue.releaseOpenLock(this.masterAddress, this.coin);
     }
   }
 
@@ -643,18 +698,29 @@ export class PerpsBot {
       this.position.slOid = res.oid;
       db.updatePosition(this.position.id, { trailing_json: this._trailingJson() });
 
-      // Verifica finale: se ancora non c'è, chiusura di sicurezza.
-      const stop = await this._findStopOrder();
-      if (!stop && !res.oid) {
-        logger.error(`Bot ${this.name}: impossibile garantire lo stop loss, chiusura di sicurezza`);
-        notifier.notify(`⚠️ <b>${this.name}</b>: stop loss non piazzabile su ${this.coin} → chiudo la posizione per sicurezza.`);
+      // WARN-06 — `oid` nullo è una risposta già CONCLUSIVA: l'ordine non è stato
+      // accettato. Cercarlo sul book sarebbe una chiamata di rete in più con la
+      // posizione completamente scoperta, per confermare qualcosa che il broker ha
+      // già detto. Si chiude subito.
+      if (!res.oid) {
+        logger.error(`Bot ${this.name}: impossibile garantire lo stop loss (oid nullo), chiusura di sicurezza`);
+        notifier.notify(`⚠️ <b>${this.name}</b>: stop loss non piazzabile su ${this.coin} → chiudo la posizione per sicurezza.`, { urgent: true });
         await this._closeNow('SL non garantito (chiusura di sicurezza)');
+        return;
+      }
+
+      // Con un oid valido la verifica sul book resta: serve a lasciare traccia se
+      // l'ordine accettato non risulta poi visibile (non chiude la posizione — è
+      // esattamente il comportamento precedente, dove `!res.oid` era già falso).
+      const stop = await this._findStopOrder();
+      if (!stop) {
+        logger.debug(`Bot ${this.name}: stop loss ${res.oid} accettato ma non ancora visibile tra gli ordini aperti`);
       }
     } catch (error) {
       logger.error(`Bot ${this.name}: errore verifica stop loss`, error.message);
       // In caso di errore irriducibile, è più prudente chiudere che restare nudi.
       try {
-        notifier.notify(`⚠️ <b>${this.name}</b>: errore nel garantire lo stop loss → chiudo la posizione.`);
+        notifier.notify(`⚠️ <b>${this.name}</b>: errore nel garantire lo stop loss → chiudo la posizione.`, { urgent: true });
         await this._closeNow('errore verifica SL (chiusura di sicurezza)');
       } catch { /* noop */ }
     }
@@ -722,7 +788,7 @@ export class PerpsBot {
       // Non si chiude la posizione (vedi asimmetria 1), ma non si tace: se non
       // riesco a leggere i trigger attivi, l'operatore deve poterlo sapere.
       logger.error(`Bot ${this.name}: errore pulizia TP in eccesso`, error.message);
-      notifier.notify(`⚠️ <b>${this.name}</b>: impossibile verificare i take profit attivi su ${this.coin} (${error.message}) — controlla manualmente che non ce ne siano di residui.`);
+      notifier.notify(`⚠️ <b>${this.name}</b>: impossibile verificare i take profit attivi su ${this.coin} (${error.message}) — controlla manualmente che non ce ne siano di residui.`, { urgent: true });
     }
   }
 
@@ -792,22 +858,53 @@ export class PerpsBot {
         masterAddress: this.masterAddress, coin: this.coin,
         isBuy: this.position.side === 'long', size: addSize, slippage: this.config.slippage ?? 0.02
       }, this.network);
-      if (order.error) return;
+      if (order.error) {
+        // Un'aggiunta rifiutata è un'operazione su capitale che non è avvenuta:
+        // prima usciva senza lasciare traccia da nessuna parte.
+        logger.error(`Bot ${this.name}: DCA #${done + 1} rifiutato su ${this.coin}`, order.error);
+        notifier.notify(`⚠️ <b>${this.name}</b>: aggiunta DCA su ${this.coin} rifiutata (${order.error}) — posizione invariata.`, { urgent: true });
+        return;
+      }
+
+      // CRIT-01 sul percorso DCA: stessa lettura del fill reale dell'apertura.
+      // Un fill nullo qui è più insidioso che in apertura — la posizione esiste
+      // già, quindi lo stato "sbagliato" non verrebbe corretto da `_reconcile`
+      // (che riallinea la size, ma non il `dcaCount` né l'entry medio): il bot
+      // avrebbe consumato uno step di DCA e spostato l'entry di riferimento per
+      // un'aggiunta mai eseguita.
+      const fill = riskManager.resolveFillSize(addSize, order.totalSz);
+      if (fill.none) {
+        logger.error(`Bot ${this.name}: DCA #${done + 1} su ${this.coin} senza fill (richiesti ${addSize}, totalSz ${order.totalSz ?? 'assente'}) — nessuna aggiunta registrata`);
+        notifier.notify(`⚠️ <b>${this.name}</b>: aggiunta DCA su ${this.coin} inviata ma <b>nessun fill</b> — posizione, entry medio e conteggio DCA restano invariati.`, { urgent: true });
+        return;
+      }
+      const addedSize = fill.filled;
+      if (fill.partial) {
+        logger.warn(`Bot ${this.name}: DCA #${done + 1} riempito parzialmente su ${this.coin} — richiesti ${addSize}, riempiti ${addedSize}`);
+        notifier.notify(`⚠️ <b>${this.name}</b>: aggiunta DCA su ${this.coin} riempita solo in parte (richiesti ${addSize}, riempiti ${addedSize}) — entry medio e TP/SL calcolati sulla size reale.`, { urgent: true });
+      }
 
       const fillPx = order.avgPx || snapshot.price;
+      const slippage = riskManager.computeSlippage(order.avgPx, snapshot.price);
+      if (slippage != null) {
+        logger.info(`Bot ${this.name}: slippage DCA ${this.coin} ${(slippage * 100).toFixed(4)}% (riferimento ${snapshot.price}, eseguito ${order.avgPx})`);
+      }
       // Prezzo medio ponderato + TP/SL ricalcolati sul nuovo entry (stessa
       // modalità percent/atr già configurata) — calcolo puro, testato in
       // isolamento in test/riskManager.test.js.
       const atrVal = this._usesAtr() ? ind.atr(snapshot.candles, this.config.atrPeriod || 14) : null;
-      const updated = riskManager.applyDcaFill(this.position, fillPx, addSize, this.config, { atr: atrVal });
+      const updated = riskManager.applyDcaFill(this.position, fillPx, addedSize, this.config, { atr: atrVal });
 
       this.position.dcaCount = done + 1;
       this.position.entryPx = updated.entryPx;
       this.position.size = updated.size;
 
-      db.insertTrade({ botId: this.id, coin: this.coin, side: this.position.side, px: fillPx, sz: addSize, hlOid: order.oid });
-      logger.info(`➕ Bot ${this.name}: DCA #${this.position.dcaCount} +${addSize} ${this.coin} → nuovo entry medio ${updated.entryPx.toFixed(4)}`);
-      notifier.notify(`➕ <b>${this.name}</b>: DCA #${this.position.dcaCount} (+${addSize} ${this.coin}) — entry medio ${updated.entryPx.toFixed(4)}`);
+      db.insertTrade({
+        botId: this.id, coin: this.coin, side: this.position.side, px: fillPx,
+        sz: addedSize, hlOid: order.oid, slippagePct: slippage
+      });
+      logger.info(`➕ Bot ${this.name}: DCA #${this.position.dcaCount} +${addedSize} ${this.coin} → nuovo entry medio ${updated.entryPx.toFixed(4)}`);
+      notifier.notify(`➕ <b>${this.name}</b>: DCA #${this.position.dcaCount} (+${addedSize} ${this.coin}) — entry medio ${updated.entryPx.toFixed(4)}`);
 
       // TP/SL erano dimensionati sulla size PRECEDENTE: senza ri-piazzarli
       // sulla size totale aggiornata, la parte aggiunta con questa DCA
@@ -905,7 +1002,7 @@ export class PerpsBot {
       logger.info(`🎯 Bot ${this.name}: TP/SL ri-piazzati (${reason}) → size ${this.position.size} @ entry ${this.position.entryPx.toFixed(4)} (TP ${tpPx ?? '—'} · SL ${slPx ?? '—'})`);
     } catch (error) {
       logger.error(`Bot ${this.name}: ri-piazzamento TP/SL fallito (${reason})`, error.message);
-      notifier.notify(`⚠️ <b>${this.name}</b>: ri-piazzamento TP/SL fallito su ${this.coin} (${reason}) — la posizione potrebbe non essere protetta per intero, verificare manualmente i trigger attivi.`);
+      notifier.notify(`⚠️ <b>${this.name}</b>: ri-piazzamento TP/SL fallito su ${this.coin} (${reason}) — la posizione potrebbe non essere protetta per intero, verificare manualmente i trigger attivi.`, { urgent: true });
     }
   }
 
@@ -993,6 +1090,20 @@ export class PerpsBot {
       status: 'closed', pnl: net, fee, close_reason: closeReason, closed_at: Date.now()
     });
 
+    // QUAL-01 item 2 — la perdita è ORA confermata (PnL reale dai fill): è qui
+    // che il cooldown di portafoglio si attiva, non dentro `portfolio.canOpen()`.
+    // La riga è già `closed` con il suo `pnl`, quindi `getConsecutiveLosses`
+    // include questa chiusura.
+    if (net < 0) {
+      try {
+        portfolio.recordLoss(this.id, db.getConsecutiveLosses(this.id));
+      } catch (error) {
+        // Non deve poter impedire la registrazione della chiusura, ma un cooldown
+        // mancato è una protezione mancata: va detto.
+        logger.error(`Bot ${this.name}: registrazione del cooldown di portafoglio fallita`, error.message);
+      }
+    }
+
     // Aggiorna e PERSISTE il PnL giornaliero (sopravvive ai riavvii).
     this.dailyPnl += net;
     db.setDailyPnl(this.id, this.dailyKey, this.dailyPnl);
@@ -1006,7 +1117,7 @@ export class PerpsBot {
     const maxDailyLoss = this.config.risk?.maxDailyLossUsd ?? HYPERLIQUID_CONFIG.risk.maxDailyLossUsd;
     if (this.dailyPnl <= -Math.abs(maxDailyLoss)) {
       logger.warn(`Bot ${this.name}: limite perdita giornaliera raggiunto, arresto`);
-      notifier.notify(`🛑 <b>${this.name}</b>: limite perdita giornaliera raggiunto, bot fermato.`);
+      notifier.notify(`🛑 <b>${this.name}</b>: limite perdita giornaliera raggiunto, bot fermato.`, { urgent: true });
       this.stop();
     }
   }
@@ -1037,14 +1148,33 @@ export class PerpsBot {
     } catch {
       snapshot = { price: marketData.getMid(this.coin), candles: [], funding: null };
     }
-    const ctx = { price: snapshot.price, candles: snapshot.candles || [], funding: snapshot.funding };
+    // QUAL-01 item 1 — lettura PURA del segnale esterno: questa è diagnostica,
+    // non deve toccare la coda che il prossimo tick leggerà. Prima la diagnostica
+    // non guardava affatto la coda e dichiarava sempre "in attesa di un segnale",
+    // anche con un segnale valido già arrivato.
+    const external = strategyEngine._checkExternal(this.coin);
+    const ctx = { price: snapshot.price, candles: snapshot.candles || [], funding: snapshot.funding, external };
+
+    // QUAL-01 item 4 — warmup degli indicatori. Un bot con meno candele di quante
+    // servono al suo indicatore più lungo (RSI(14) → 15 candele) resta su `hold`
+    // per sempre senza che nulla lo spieghi: gli indicatori tornano `null` e
+    // nessuna regola risulta soddisfatta. `candlesNeed` include l'ATR quando la
+    // strategia usa stop/trailing adattivi, che hanno lo stesso problema.
+    const atrWarmup = this._usesAtr() ? (this.config.atrPeriod || 14) + 1 : 0;
+    const candlesNeed = Math.max(
+      ind.warmupCandles(this.config.entryRules || [], this.config.exitRules || []),
+      atrWarmup
+    );
+    const candlesHave = ctx.candles.length;
 
     return {
       id: this.id, name: this.name, coin: this.coin, interval,
       status: this.status, direction: this.config.direction || 'both',
       logic: this.config.logic || 'any',
       price: snapshot.price, funding: snapshot.funding,
-      candles: ctx.candles.length,
+      candles: candlesHave,
+      warmingUp: { candlesHave, candlesNeed, ready: candlesHave >= candlesNeed },
+      externalSignal: external,
       inPosition: !!this.position,
       position: this.position ? {
         side: this.position.side, size: this.position.size, entryPx: this.position.entryPx,
@@ -1093,7 +1223,16 @@ export class PerpsBot {
       return { ...base, label: 'Funding', current: funding == null ? '—' : (funding * 100).toFixed(4) + '%', target: `${rule.op} ${rule.value}`, met: !!met, hint: gapHint(funding, rule.op, rule.value) };
     }
     if (rule.type === 'external') {
-      return { ...base, label: 'Segnale esterno', current: '—', target: `webhook '${rule.signal}'`, met: false, hint: 'in attesa di un segnale webhook' };
+      // La coda dei segnali è ora leggibile senza consumarla (QUAL-01 item 1):
+      // la diagnostica può dire la verità invece di dichiarare sempre "in attesa".
+      const met = !!ctx.external && ctx.external === rule.signal;
+      return {
+        ...base, label: 'Segnale esterno',
+        current: ctx.external ? `ricevuto '${ctx.external}'` : '—',
+        target: `webhook '${rule.signal}'`, met,
+        hint: met ? '✅ condizione soddisfatta'
+          : (ctx.external ? `in coda c'è '${ctx.external}', questa regola attende '${rule.signal}'` : 'in attesa di un segnale webhook')
+      };
     }
     if (rule.type === 'indicator') {
       const p = rule.period;

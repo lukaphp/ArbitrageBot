@@ -186,6 +186,16 @@ METRICS_TOKEN=                     # se vuoto, /metrics è pubblico (§2.5)
 PERPS_WS_WATCHDOG_MS=30000            # ogni quanto verificare che il WS sia vivo
 PERPS_WS_RECONNECT_BACKOFF_MS=15000   # attesa minima tra due tentativi (anti reconnect storm)
 PERPS_WS_DOWN_NOTIFY_MS=300000        # downtime oltre il quale arriva una notifica Telegram
+PERPS_WS_DEGRADED_MS=                 # downtime oltre il quale lo stato del feed diventa
+                                      # `degraded` (vuoto = uguale a PERPS_WS_DOWN_NOTIFY_MS,
+                                      # così l'ingresso in degraded coincide con l'unica
+                                      # notifica che parte già, §6)
+
+PERPS_EXECQUEUE_DEPTH_WARN=10          # profondità della coda ordini di un wallet oltre la
+                                       # quale scatta un warning nei log (un ordine urgente
+                                       # può restare in attesa dietro le altre azioni dello
+                                       # stesso wallet). Solo osservabilità: nessuna
+                                       # prioritizzazione. Metrica: perps_execqueue_depth
 
 AGENTS_ENABLED=false               # Analyst AI: advisory, non esegue mai
 ANTHROPIC_API_KEY=
@@ -393,11 +403,32 @@ storage, o `restic`).
   connessione instabile, non un guasto momentaneo: da guardare insieme ai log
   `Hyperliquid WS …` in `logs/app.log`.
 
+  Lo **stato del feed** è esplicito e a tre valori (`perps_ws_state{state=…}` a 1
+  sullo stato corrente, e `system.marketData.wsState` in `/api/perps/risk`):
+  `healthy` connesso, `retrying` caduto e in riconnessione, `degraded` giù da oltre
+  `PERPS_WS_DEGRADED_MS` — cioè un guasto persistente, non uno sfarfallio. Serve a
+  distinguere due situazioni che `perps_ws_connected 0` mostrava identiche.
+  `perps_ws_connected` **non è cambiata**: query, alert e pannelli scritti prima
+  continuano a valere.
+
+- **Coda ordini per wallet**: `perps_execqueue_depth` è la profondità della coda del
+  wallet più carico (azioni firmate in attesa o in corso). Con più bot sullo stesso
+  master, un valore che resta alto significa che un ordine urgente (una chiusura)
+  può aspettare dietro le aperture. Oltre `PERPS_EXECQUEUE_DEPTH_WARN` (default 10)
+  compare un warning nei log con l'indirizzo del wallet coinvolto, e
+  `perps_execqueue_depth_warnings_total` si incrementa. Nessuna prioritizzazione
+  automatica: per ora è solo visibilità.
+
+- **Notifiche Telegram**: quelle urgenti (protezione della posizione, limiti di
+  rischio, anomalie di esecuzione) vengono ritentate su rate-limit/5xx/errori di
+  rete; `perps_telegram_errors_total` conta quelle perse anche dopo i retry. Una
+  notifica persa non interrompe mai la gestione di una posizione.
+
 - Log: `docker compose logs` (Docker) o `logs/app.log` (script di riavvio).
 
 ### 6.1 Cruscotto Prometheus + Grafana (profilo `monitoring`)
 
-`/metrics` espone 14 famiglie di metriche, ma da sole sono solo testo: il profilo
+`/metrics` espone 18 famiglie di metriche, ma da sole sono solo testo: il profilo
 `monitoring` aggiunge chi le raccoglie (Prometheus) e chi le disegna (Grafana),
 con dashboard e regole di alert **provisionate da file nel repository**.
 

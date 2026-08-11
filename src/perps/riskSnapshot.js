@@ -270,6 +270,20 @@ export function deriveRiskAlerts({
 
   if (marketStatus.isRunning === false) {
     add('critical', 'market-data-stopped', 'Market data fermo', 'Il servizio di market data non risulta attivo: sospendi nuove aperture.', 'system', 'market data');
+  } else if (marketStatus.wsState === 'degraded') {
+    // WARN-05 — distinto da `market-ws-disconnected`: quello è "è caduto adesso e
+    // sto ritentando", questo è "è giù da abbastanza tempo da non aspettarsi che
+    // si risolva da solo". Resta `warning` e non `critical` perché il fallback
+    // REST è un percorso previsto e funzionante: i prezzi sono validi, solo meno
+    // freschi. Un `critical` bloccherebbe la board per un degrado gestito.
+    const downFor = number(marketStatus.wsDownSeconds) > 0
+      ? ` da ~${Math.round(number(marketStatus.wsDownSeconds) / 60)} min`
+      : '';
+    add(
+      'warning', 'market-ws-degraded', 'Feed live in guasto persistente',
+      `Il WebSocket Hyperliquid non si ristabilisce${downFor}: i prezzi arrivano dal fallback REST (validi, meno freschi). Verifica rete e stato di Hyperliquid prima di operare in scalping.`,
+      'system', 'fallback REST persistente'
+    );
   } else if (marketStatus.ws === false) {
     add('warning', 'market-ws-disconnected', 'Feed live disconnesso', 'Il WebSocket Hyperliquid non è connesso. Il sistema può usare il polling REST come fallback.', 'system', 'fallback REST');
   } else if (marketStatus.wsFresh === false) {

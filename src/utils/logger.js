@@ -24,10 +24,7 @@ class SecureLogger {
     
     this.currentLevel = this.logLevels[LOGGING_CONFIG.level] !== undefined ? this.logLevels[LOGGING_CONFIG.level] : 1;
     this.logDirectory = LOGGING_CONFIG.logDirectory;
-    
-    // Debug temporaneo per verificare il livello di log
-    console.log(`🔧 Logger initialized - Level: ${LOGGING_CONFIG.level}, CurrentLevel: ${this.currentLevel}, LogLevels[${LOGGING_CONFIG.level}]: ${this.logLevels[LOGGING_CONFIG.level]}`);
-    
+
     // Crea directory log se abilitata
     if (LOGGING_CONFIG.enableFileLogging) {
       this.ensureLogDirectory();

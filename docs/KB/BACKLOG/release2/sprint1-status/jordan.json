@@ -1,5 +1,211 @@
 {
   "agent": "jordan",
-  "updatedAt": "2026-08-11T00:00:00Z",
-  "reviews": {}
+  "updatedAt": "2026-08-11T20:45:00Z",
+  "ruolo": "Analista di rischio quantitativo, team Nautilus. Lettura di Sprint 1 Release 2 (Epic A, 10 storie / 21 SP, implementate da Bruno, non committate) con lente di rischio: non correttezza/copertura test (Annie, in parallelo), ma 'questi fix riducono davvero il rischio che dichiarano di ridurre?'. Nessuna decisione di approvazione qui — input tecnico per la review col PO.",
+
+  "metodologia": {
+    "letto": [
+      "docs/KB/BACKLOG/release2/sprint1.md (le 10 storie)",
+      "docs/AUDIT_REPORT.md (audit indipendente di origine)",
+      "docs/KB/BACKLOG/release2/sprint1-status/bruno.json (stato dichiarato)",
+      "docs/KB/business-analysis-2026-08-11.md (standard di rigore sulle affermazioni rischio/dati già fissato nel progetto)",
+      "src/perps/riskManager.js, src/perps/bot.js (sezioni _openPosition, _maybeDca, _registerClose, _ensureStopLoss)",
+      "src/perps/portfolio.js, src/perps/execQueue.js, src/agents/riskAgent.js",
+      "src/perps/secretBox.js, src/perps/marketData.js, src/perps/riskSnapshot.js, src/perps/notifier.js, src/perps/indicators.js, src/perps/paperBroker.js (spot-check per WARN-01/04/05/06 e QUAL-01)",
+      "src/db/database.js (migrazione v3, insertTrade)"
+    ],
+    "verificaWorkingTree": "git status/diff confermano che le modifiche sono realmente nel working tree, non committate (26 file modificati, ~13 nuovi test) — coerente con quanto dichiarato in sprint1.md e bruno.json.",
+    "nessunaScritturaEseguita": "Nessun comando di scrittura sul DB (solo `sqlite3 -readonly`), nessuna modifica a codice o configurazione, nessuna chiamata all'exchange."
+  },
+
+  "datiReali": {
+    "accessoDb": "Ho potuto interrogare data/perps.db in sola lettura con `sqlite3 -readonly` (nessun UPDATE/INSERT/DELETE eseguito).",
+    "cosaContiene": "schema_version = 2 (la migrazione v3 di WARN-03, che aggiunge trades.slippage_pct, NON è ancora applicata a questo file). Tabella `positions`: 0 righe. Tabella `trades`: 16 righe, tutte SOL-PERP, 7-16 giugno 2026. Tabella `bots`: un solo bot configurato (NEAR-PERP, paper:true), creato/aggiornato 8-10 agosto. `settings.portfolio_limits` = {\"maxConcurrentPositions\":3,\"maxTotalExposureUsd\":10000,\"maxConsecutiveLosses\":3,\"cooldownMinutes\":60} — identico ai default hardcoded in portfolio.js, mai ritoccato su questa istanza.",
+    "discrepanzaImportante": "Questo NON è il dataset citato in docs/KB/business-analysis-2026-08-11.md (7 posizioni chiuse su NEAR-PERP, tutte perdenti, -$43,47 netti, finestra di 19 ore all'11 agosto) — quel documento dichiara di aver interrogato 'il database di produzione sul VPS'. La tabella positions qui è vuota e trades non contiene alcun record NEAR-PERP: il file locale disponibile in questo ambiente non è quella fonte, e non ho un modo di raggiungere il DB di produzione reale da qui.",
+    "conseguenzaPerLAnalisi": "Non posso verificare empiricamente, sui 7 trade NEAR-PERP realmente citati altrove, se uno scenario CRIT-01 (fill parziale mal dimensionato)/CRIT-02 (cooldown perso a un riavvio) si sia già materializzato in quello storico specifico — quello storico non è in questo file, e lo schema pre-migrazione qui disponibile non registra comunque totalSz/size pianificata (solo la size finale scritta all'epoca), quindi non sarebbe comunque ricostruibile a posteriori anche se i dati ci fossero. Per CRIT-03 esiste invece un'evidenza reale già raccolta (non da me): vedi sezione CRIT-03.",
+    "onestaSulCampione": "Il campione di 7 trade citato nel business-analysis è già lì dichiarato troppo piccolo per concludere sulla redditività della strategia. Ai fini di QUESTA review (rischio operativo dei fix, non redditività) vale lo stesso principio: con 0 posizioni chiuse visibili da qui e 16 trade tutti pre-sprint, non ho campione sufficiente per dire 'il fix avrebbe cambiato l'esito di N incidenti reali' — lo dico esplicitamente invece di forzare una conclusione che i dati disponibili non sostengono."
+  },
+
+  "reviews": {
+    "CRIT-01": {
+      "titolo": "Size reale del fill, non pianificata",
+      "valutazioneRischio": "Verificato sul codice: la size reale del fill (order.totalSz, interpretata da riskManager.resolveFillSize) si propaga fino al dimensionamento degli ordini TP/SL su ENTRAMBI i percorsi (apertura e DCA) — non ho trovato un punto in cui il trigger resti dimensionato sulla size pianificata invece che su quella riempita. Questo è esattamente il gap di rischio che la storia doveva chiudere, e risulta chiuso.",
+      "evidenzaCodice": [
+        "bot.js:410 — fill = riskManager.resolveFillSize(plan.size, order.totalSz), subito dopo il fill, prima di qualunque altro uso della size.",
+        "bot.js:426,445,452,460-465 — filledSize usata per entryPx/TP-SL (computeTpSl su order.avgPx, non su un prezzo pianificato), riga DB (insertPositionIfNoneOpen size:filledSize), e this.position.size = filledSize PRIMA di chiamare _placeTpSl().",
+        "bot.js:469,611-621 — _placeTpSl() dimensiona gli ordini trigger su this.position.size, quindi sulla size reale, non su plan.size: verificato leggendo l'intera funzione, non solo la firma.",
+        "bot.js:470-482 — ramo 'riga preesistente': db.updatePosition scrive size:filledSize, poi _replaceTpSl() usa comunque this.position.size (già filledSize) — stesso esito del ramo principale, nessuna divergenza tra i due rami.",
+        "bot.js:855-912 — percorso DCA: addSize calcolato sulla size ATTUALE (già reale) della posizione, fill risolto con lo stesso resolveFillSize, addedSize passato a riskManager.applyDcaFill, this.position.size = updated.size (reale), poi _replaceTpSl() usa this.position.size aggiornata. Stesso trattamento dell'apertura, nessuna asimmetria tra i due percorsi.",
+        "bot.js:412-424 — caso fill nullo ('none'): nessuna riga DB, nessuno stato in memoria, nessun trigger piazzato — chiude correttamente il caso 'posizione fantasma' che Bruno ha trovato in più rispetto alla richiesta originale dell'audit."
+      ],
+      "residuoNonBloccante": "Tra il fill sull'exchange e la scrittura in DB/memoria, un crash del processo si affiderebbe comunque a _reconcile() al tick successivo per correggere lo stato — questo è il pattern architetturale preesistente (exchange come fonte di verità), non toccato da questa storia e già segnalato come punto di forza nell'audit originale. Non lo conto come gap di CRIT-01.",
+      "limitazioneDati": "Il DB locale disponibile non contiene alcun record storico di fill parziale verificabile (schema pre-migrazione, nessuna colonna totalSz/size pianificata salvata all'epoca) — la mia valutazione è basata interamente sulla lettura del codice, non su un incidente reale ricostruito nei dati.",
+      "priorita": null,
+      "notaPriorita": "Nessun problema reale trovato su questa storia: verificata come chiusa correttamente rispetto al rischio che doveva chiudere."
+    },
+
+    "CRIT-02": {
+      "titolo": "Cooldown di portafoglio persistito",
+      "valutazioneRischio": "Il design di persistenza è solido e a prova di degrado (fail-open verso lo stato in memoria, mai un cooldown che impedisce l'avvio del server). Il VALORE di default (60 minuti) resta un default non giustificato da dati da nessuna parte nel codice o nella documentazione — non è un difetto della storia (che riguardava la persistenza, non il valore), ma un punto da tracciare separatamente.",
+      "evidenzaCodice": [
+        "portfolio.js:39-44 — DEFAULTS: cooldownMinutes:60, maxConsecutiveLosses:3.",
+        "Confermato via query diretta sul DB locale: settings.portfolio_limits = {\"maxConcurrentPositions\":3,\"maxTotalExposureUsd\":10000,\"maxConsecutiveLosses\":3,\"cooldownMinutes\":60} — identico ai default: su questa istanza nessuno ha mai chiamato setLimits() per cambiarlo.",
+        "portfolio.js:63-91 (_loadPersistedCooldowns) e :98-110 (_persistCooldowns) — entrambi i blocchi catch loggano e degradano, mai un'eccezione che risalga e blocchi l'avvio: coerente con l'AC 'un DB non disponibile non deve impedire l'avvio'.",
+        "portfolio.js:76 — 'lo stato in memoria vince se già presente (è più recente)' in fase di ripristino: scelta corretta, evita che un valore stale da disco sovrascriva un cooldown più aggiornato già attivo in questo stesso processo."
+      ],
+      "valutazioneValoreCooldown": "Nessuna motivazione documentata per 60 minuti in config.js, MANUAL.md o DEPLOY.md. L'unico bot configurato oggi (NEAR-PERP, RSI(14) reversal, candele 15m) rende 60 minuti ≈ 4 candele — non palesemente sbagliato rispetto al timeframe della strategia, ma non ho alcuna base empirica (nessun dato di volatilità realizzata o tempo di mean-reversion) per dire che sia calibrato correttamente su NEAR-PERP o su qualunque altro mercato. È configurabile a runtime (setLimits/portfolio_limits), il che è un mitigante reale: non è un valore immutabile.",
+      "raccomandazione": "Non serve un numero diverso ora, mancando l'evidenza per proporlo. Consiglio di trattarlo come voce di backlog da rivedere quando esiste storico sufficiente (mainnet o testnet esteso) per testare empiricamente se 60 minuti è troppo corto o troppo lungo, invece di lasciarlo come costante assunta e mai messa in discussione.",
+      "priorita": 3,
+      "notaPriorita": "Non blocca la review di questa storia (la persistenza, che era lo scope, è implementata correttamente); è un promemoria per il backlog, non un difetto di questo sprint."
+    },
+
+    "CRIT-03": {
+      "titolo": "Lock di apertura per (masterAddress, coin)",
+      "valutazioneRischio": "Il lock chiude correttamente la finestra di race sulla FIRMA simultanea (verificato sul codice), ma non risponde alla domanda di rischio più a monte: nulla nel sistema impedisce o anche solo segnala che due bot vengano configurati sullo stesso mercato, e un incidente reale già documentato altrove mostra parametri 'quasi identici' — non una diversificazione deliberata.",
+      "evidenzaCodice": [
+        "execQueue.js:56-81 — acquireOpenLock/releaseOpenLock/isOpenLocked, Set di chiavi `master.toLowerCase():coin`, nessuna seconda coda di Promise: rispetta la nota di refinement.",
+        "bot.js:379-383 — lock acquisito PRIMA di `this._opening = true`; bot.js:488-491 — rilasciato nello STESSO finally di `_opening = false`: un solo punto di gestione, coerente con l'AC 'nessuna funzione nuova, estende quella esistente'.",
+        "portfolio.js:181-189 — canOpen() verifica SOLO conteggio posizioni totali (maxConcurrentPositions) ed esposizione totale (maxTotalExposureUsd): nessun controllo è specifico per coin. Il lock di CRIT-03 impedisce la doppia FIRMA nello stesso istante, ma non impedisce che bot A apra ora e bot B apra 30 secondi dopo (lock già rilasciato) sullo stesso mercato — resta possibile avere due posizioni correlate aperte in parallelo sullo stesso coin, purché sotto i limiti globali."
+      ],
+      "opinioneDaRiskManager": "Come ultima linea di difesa contro la race letterale (due ordini sull'exchange nello stesso istante) è la protezione giusta e necessaria, indipendentemente dal fatto che il multi-bot-stesso-coin sia intenzionale o meno. Ma da sola non risponde alla domanda di disegno più a monte: se due bot sullo stesso mercato sono una scelta di diversificazione (timeframe/strategia diversi) è legittima; se sono una configurazione quasi-duplicata sono solo rischio correlato raddoppiato (stesso segnale, doppie commissioni/slippage, nessuna reale diversificazione) senza che nulla lo segnali all'operatore al momento della configurazione.",
+      "evidenzaReale": "docs/KB/business-analysis-2026-08-11.md §3 documenta un episodio GIÀ osservato, non ipotetico: 'due bot diversi hanno shortato lo stesso mercato quasi nello stesso minuto con parametri quasi identici', descritto lì come 'conseguenza nota e accettata dell'architettura attuale... da tenere d'occhio quando cresce il numero di strategie generate'. Non ho potuto ri-verificare questo episodio nella copia locale di data/perps.db (non contiene quel periodo — vedi sezione datiReali): lo cito come evidenza già raccolta da un'altra sessione con accesso al DB reale, non riprodotta autonomamente da me qui.",
+      "raccomandazione": "Chiedere al PO una decisione esplicita: (a) se il multi-bot-stesso-coin resta un pattern operativo supportato, richiedere che i parametri siano genuinamente distinti (timeframe/segnale diversi, documentato) e non 'quasi identici'; (b) se non è un pattern voluto, aggiungere un warning (non necessariamente un blocco duro, visto che oggi è descritto come 'accettato') al momento della creazione di un secondo bot sullo stesso coin di un master già attivo su quel mercato — così la scelta è sempre consapevole, non silenziosa.",
+      "priorita": 2,
+      "notaPriorita": "Non è un difetto della storia come scopata (CRIT-03 fa esattamente quello che prometteva); è un gap di policy di portafoglio che la storia non doveva e non poteva chiudere da sola."
+    },
+
+    "WARN-06": {
+      "titolo": "Reazione immediata su SL non piazzabile (ex CRIT-04)",
+      "valutazioneRischio": "Riduce di una chiamata di rete la finestra tra 'SL rifiutato' e chiusura di sicurezza — correzione minore ma corretta, nessun cambio al contenuto comunicato all'operatore.",
+      "evidenzaCodice": [
+        "bot.js:691-706 — quando res.oid è null dopo placeTriggerOrder, si salta _findStopOrder() e si procede subito a chiusura di sicurezza; commento nel codice conferma che quella chiamata extra era comunque senza conseguenze pratiche col ramo `oid` valorizzato (condizione già sempre falsa in quel caso)."
+      ],
+      "priorita": null,
+      "notaPriorita": "Nessun problema trovato."
+    },
+
+    "WARN-01": {
+      "titolo": "Rimuovere console.log di debug nel logger",
+      "valutazioneRischio": "Igiene di logging, nessun impatto diretto sul rischio di capitale. Beneficio indiretto per chi si affida a log strutturati per alerting/monitoraggio automatico del rischio operativo (una riga non strutturata inquina il parsing).",
+      "priorita": null,
+      "notaPriorita": "Nessun problema trovato; fuori dal perimetro di analisi finanziaria in senso stretto."
+    },
+
+    "WARN-02": {
+      "titolo": "Bounds e monitoraggio sulla profondità di execQueue",
+      "valutazioneRischio": "Buona base di osservabilità operativa, principalmente utile come segnale precoce di congestione — coerente con lo scope dichiarato di 'sola visibilità, niente prioritizzazione'. Non ancora granulare abbastanza per un monitoraggio di rischio multi-wallet, ma oggi non serve: un solo master è attivo su questa istanza.",
+      "evidenzaCodice": [
+        "execQueue.js:39-40 — soglia di default 10 (PERPS_EXECQUEUE_DEPTH_WARN), configurabile via env.",
+        "execQueue.js:101-119 — pattern 'un warning per episodio' (si riarma solo quando la profondità torna sotto soglia), stesso principio già usato per il watchdog WS e la notifica di cooldown: buona igiene, evita alert fatigue senza nascondere il segnale.",
+        "Scelta dichiarata nel codice/bruno.json: il gauge Prometheus perps_execqueue_depth è SENZA etichette (solo il massimo tra i wallet) per non pubblicare indirizzi su /metrics; il dettaglio per wallet resta solo nei log."
+      ],
+      "osservazionePerMonitoraggioFuturo": "Dal mio punto di vista di futuro consumatore di questo dato: la scelta di non etichettare il gauge per privacy è ragionevole oggi, ma se il sistema arriverà a operare con più wallet in produzione, un unico valore aggregato (il massimo) non basterà più a correlare la profondità di coda con un incidente specifico di chiusura ritardata senza tornare ai log grezzi. Non è un difetto di questa storia (la prioritizzazione/etichettatura è esplicitamente fuori scope), solo un promemoria per quando si scala oltre un singolo wallet.",
+      "priorita": 3,
+      "notaPriorita": "Nessun'azione richiesta ora; rivalutare quando in produzione ci saranno più master address attivi contemporaneamente."
+    },
+
+    "WARN-03": {
+      "titolo": "Slippage reale calcolato e loggato",
+      "valutazioneRischio": "Il dato di base è quello giusto — grezzo, per singolo fill, non pre-aggregato — ma oggi vive solo come colonna in trades senza alcuna funzione di aggregazione: da solo non è ancora un cruscotto di monitoraggio del rischio operativo, è la materia prima corretta per costruirne uno in futuro (ANA-01, Sprint 4, come dichiarato nella storia stessa).",
+      "evidenzaCodice": [
+        "riskManager.js:125-130 (computeSlippage) — ritorna null (non 0) quando i prezzi non sono utilizzabili: distinzione corretta tra 'nessuno slippage' e 'dato assente', importante per qualunque futura media (altrimenti righe senza dato abbasserebbero artificialmente la media reale).",
+        "database.js:246-253 — migrazione v3 additiva (trades.slippage_pct), confermato che getBotStats/getBotPerformance continuano a leggere da positions, non da trades: nessun rischio di regressione sulle query esistenti.",
+        "Verificato via grep sull'intero src/: nessuna funzione di aggregazione (per bot, per mercato, media/percentili) esiste oggi da nessuna parte nel codice — solo insertTrade scrive la colonna riga per riga."
+      ],
+      "cosaMancaPerIlMioMonitoraggioFuturo": "Come segnalato nel task: lo slippage andrà aggregato per bot/mercato per essere utile a un risk manager, non solo loggato riga per riga — ed è esattamente ciò che la storia dichiara di rimandare ad ANA-01, quindi non lo conto come gap DI QUESTA storia. Due osservazioni per quando quell'aggregazione verrà disegnata: (1) nessuna colonna distingue esplicitamente un fill di apertura da un fill di DCA nella stessa tabella trades — inferibile per ordine/posizione ma non con un flag diretto; (2) nessun contesto di condizione di mercato (es. ATR al momento del trade) accompagna il dato, utile in futuro per separare slippage 'normale' da slippage anomalo per volatilità.",
+      "notaSuMigrazione": "Il DB locale che ho potuto interrogare è ancora a schema_version 2: la migrazione v3 (colonna slippage_pct) non vi è ancora stata applicata — coerente con lo stato 'non committato/non deployato' di questo sprint. Non ho testato io stesso il percorso di migrazione (nessun accesso in scrittura per disegno di ruolo).",
+      "priorita": 3,
+      "notaPriorita": "Informativo per la pianificazione di ANA-01, non urgente per questa review."
+    },
+
+    "WARN-04": {
+      "titolo": "Warning esplicito su DEV_FALLBACK attivo",
+      "valutazioneRischio": "Chiude un vero rischio operativo di staging (fallback di cifratura noto e pubblico nel repository, usato silenziosamente fuori produzione) con un avviso visibile a ogni avvio; non altera né indebolisce il fail-fast già esistente in produzione (SEC-07).",
+      "evidenzaCodice": [
+        "secretBox.js:56 — DEV_FALLBACK ancora una stringa nota nel sorgente (comportamento invariato, per design: serve da fallback esplicito fuori produzione).",
+        "secretBox.js:91 — logger.warn esplicito quando il fallback è in uso; :103 — __resetDevFallbackWarning() esportata solo per i test, con precedente dichiarato nel progetto (pattern già usato per metrics.render)."
+      ],
+      "priorita": null,
+      "notaPriorita": "Nessun problema trovato; riduce esattamente il rischio che descrive."
+    },
+
+    "WARN-05": {
+      "titolo": "Stato esplicito 'degraded' sul reconnect WebSocket",
+      "valutazioneRischio": "Migliora la leggibilità dello stato del feed (healthy/retrying/degraded) senza toccare backoff/retry, come da vincolo esplicito di sprint. L'impatto sul rischio è indiretto ma reale: un feed prezzi inaffidabile alimenta ogni decisione di trading a valle, e oggi l'operatore può distinguere un guasto persistente da un retry normale senza dover leggere i log riga per riga.",
+      "evidenzaCodice": [
+        "marketData.js:36-42,64-71 — soglia di degraded DELIBERATAMENTE identica a quella della notifica di downtime esistente (PERPS_WS_DOWN_NOTIFY_MS, default 300000ms = 5 minuti), non una seconda soglia separata: evita di raddoppiare gli alert per lo stesso evento.",
+        "marketData.js:99,154,179-182,230 — transizioni di stato tracciate; riskSnapshot.js:273,283 — esposte come alert distinto 'market-ws-degraded', severità warning (non critical, perché il fallback REST è un percorso previsto e funzionante)."
+      ],
+      "priorita": null,
+      "notaPriorita": "Nessun problema trovato; scope rispettato (solo stato, nessun cambio a backoff/retry)."
+    },
+
+    "QUAL-01": {
+      "titolo": "Pacchetto qualità (5 minori)",
+      "valutazioneRischioGenerale": "L'item 2 è il finding più rilevante di TUTTO lo sprint dal mio punto di vista, al di là della sua classificazione come 'minore' nell'audit originale: una VALUTAZIONE read-only di una proposta poteva attivare fino a un'ora di blocco operativo reale su un bot, come side effect di canOpen(). Gli altri 4 item sono correzioni di qualità reali ma di rischio basso/indiretto.",
+      "item2_canOpenSideEffect": {
+        "titolo": "portfolio.canOpen() con side effect, chiamata anche da agents/riskAgent.evaluate()",
+        "confermatoSulCodice": true,
+        "primaDelFix": "Per come descritto nell'audit (MINOR-02) e nelle note di Bruno: canOpen() scriveva essa stessa this.cooldowns.set(...) quando consecutiveLosses >= maxConsecutiveLosses. riskAgent.js:84-90 è il SECONDO chiamante di portfolio.canOpen() oltre a bot.js — ed è esplicitamente il gate READ-ONLY usato per giudicare le proposte dell'Analyst AI, il confine su cui si regge l'intera architettura di sicurezza del progetto ('l'IA non decide, spiega', business-analysis-2026-08-11.md §2). Valutare SE una proposta sarebbe permessa è concettualmente una domanda, non un'azione — eppure poteva scrivere stato reale con conseguenze operative reali (un bot live fermo fino a un'ora) come puro sottoprodotto del chiedere 'potrei farlo?'.",
+        "doopFix_verificatoOra": [
+          "portfolio.js:169-197 (canOpen) — letta l'intera funzione: zero scritture, solo cooldownInfo() e getLimits() (entrambe lettura).",
+          "portfolio.js:123-137 (recordLoss) — unico punto di scrittura del cooldown in tutto il modulo.",
+          "Verificato con grep su src/ intero: recordLoss ha UN SOLO chiamante nell'intero codebase — bot.js:1099, dentro _registerClose(), gated da `if (net < 0)` (bot.js:1097) — cioè solo dopo che una posizione si chiude con una perdita CONFERMATA dai fill reali.",
+          "riskAgent.js — nessuna chiamata a recordLoss in nessun punto del file: il percorso di valutazione dell'Analyst non può più toccare lo stato del cooldown."
+        ],
+        "perchéLoPesoPiùDellaClassificazioneOriginale": [
+          "Viola un invariante di base per qualunque sistema di gating del rischio: VERIFICARE l'idoneità deve essere privo di side effect, altrimenti ogni chiamante della verifica diventa un attore implicito non dichiarato.",
+          "Il chiamante specifico qui è il percorso advisory dell'IA: un write-on-read su questo confine significa che la sola FREQUENZA con cui l'Analyst valuta proposte (comportamento del modello, non un evento di mercato) poteva silenziosamente ridurre la disponibilità operativa reale di un bot, senza che fosse avvenuta alcuna perdita.",
+          "Si sarebbe combinato nella direzione peggiore con CRIT-02: una volta che i cooldown sopravvivono al riavvio, un cooldown spurio generato da una valutazione avrebbe smesso di essere un bug transitorio (sparisce al riavvio) per diventare uno stato persistito — CRIT-02 avrebbe reso permanente esattamente il tipo di errore che QUAL-01 item 2 elimina."
+        ],
+        "raccomandazione": "Non entro nella dimensione degli SP o nel raggruppamento in un pacchetto 'minori' — è una decisione di planning del PO. Segnalo però esplicitamente che la severità reale di questo finding ha superato l'inquadramento 'minore/naming' dell'audit originale, e lo propongo come nota per il prossimo giro di audit: cercare side effect nascosti in funzioni chiamate can*/is*/check*/evaluate* dovrebbe essere una verifica sistematica, non un ritrovamento incidentale durante un refactor.",
+        "priorita": 1
+      },
+      "altriItem": {
+        "item1_consumeExternal": "strategyEngine.js — stessa famiglia 'una lettura non dovrebbe mutare stato' dell'item 2, ma più circoscritto nella pratica di quanto l'audit descrivesse (il percorso diagnostico non guardava affatto il segnale, non lo 'consumava due volte'): rischio basso, riguarda l'accuratezza della diagnostica sui segnali webhook, non il capitale direttamente.",
+        "item3_paperBrokerPersistence": "Migliora la continuità del forward-test tra riavvii (settings.paper_broker_state, oidSeq incluso perché usato per distinguere TP da SL sulle chiusure). Rilevante indirettamente per me: business-analysis-2026-08-11.md segnala già 'zero track record con capitale reale' e un campione minuscolo come punto debole — perdere la continuità del test cartaceo a ogni riavvio avrebbe peggiorato ulteriormente quel problema, non solo lasciato lo status quo.",
+        "item4_warmupVisibility": "getMonitor() espone warmingUp{candlesHave,candlesNeed,ready} (bot.js:1176) — evita che un hold silenzioso per mancanza di dati venga letto come un segnale di mercato dall'operatore o dall'Analyst. Rischio basso, beneficio di corretta interpretazione.",
+        "item5_notifierRetry": "notifier.js — retry (2 tentativi, backoff breve) SOLO sulle notifiche urgent:true (10 punti in bot.js, confermati via grep), non su quelle non urgenti: riduce la perdita silenziosa di un alert critico sotto rate-limit Telegram, che è esattamente il livello L6 (override umano) del modello a strati dell'audit — un alert perso in quel momento specifico vanifica quel livello di difesa. Scope corretto: non intasa la coda per un digest non urgente."
+      },
+      "priorita": 1,
+      "notaPriorita": "La priorità 1 è specificamente sull'item 2; gli altri 4 item sono corretti e a rischio basso, nessuna azione aggiuntiva richiesta."
+    }
+  },
+
+  "pianoAzione": [
+    {
+      "priorita": 1,
+      "elementi": [
+        "QUAL-01 item 2 (canOpen side effect via riskAgent.evaluate()) — trattare in review come finding di rischio critico, non come voce di un pacchetto minore: confermare esplicitamente al PO che è chiuso e che la sua severità reale giustificava un trattamento diverso da 'minore/naming' fin dall'audit originale.",
+        "CRIT-03, domanda di policy a monte — richiedere una decisione esplicita del PO su multi-bot-stesso-coin: pattern intenzionale con parametri genuinamente distinti (richiedere che sia documentato quando succede), o pattern da segnalare/impedire alla creazione del bot. Non è una richiesta di codice, è una decisione di prodotto/rischio che il lock da solo non risolve."
+      ]
+    },
+    {
+      "priorita": 2,
+      "elementi": [
+        "CRIT-02, valore di cooldownMinutes=60 — nessuna modifica ora (manca l'evidenza per proporne una diversa), ma aprire una voce di backlog per testarlo empiricamente quando lo storico di trade chiusi sarà sufficiente (mainnet o testnet esteso), invece di lasciarlo come costante mai messa in discussione.",
+        "WARN-03, disegno dell'aggregazione futura (ANA-01/Sprint 4) — quando verrà disegnata, aggregare lo slippage per bot e per mercato, non solo come media globale; considerare un modo per distinguere fill di apertura da fill di DCA nella query."
+      ]
+    },
+    {
+      "priorita": 3,
+      "elementi": [
+        "WARN-02, etichettatura del gauge perps_execqueue_depth — rivalutare la scelta 'senza etichette' quando il sistema opererà con più di un master address in produzione; oggi non è un problema (un solo wallet attivo).",
+        "Verifica di deploy — il DB locale ispezionato è ancora a schema_version 2 (la migrazione v3 di WARN-03 non vi è applicata): assicurarsi che la migrazione giri pulita sul DB reale al deploy, non presumerlo dal solo codice."
+      ]
+    }
+  ],
+
+  "valutazioniSintetiche": {
+    "CRIT-01": "Verificato sul codice: la size reale del fill si propaga correttamente fino al dimensionamento di TP/SL su apertura e DCA, senza punti residui ancorati alla size pianificata — nessun problema trovato.",
+    "CRIT-02": "Persistenza del cooldown ben progettata e a prova di degrado; il valore di 60 minuti resta un default non giustificato da dati, da rivedere quando ci sarà storico sufficiente, non ora.",
+    "CRIT-03": "Il lock chiude correttamente la race sulla firma simultanea, ma lascia aperta — perché non è nel suo scope — la domanda di policy su perché due bot condividano lo stesso mercato con parametri quasi identici, episodio già osservato in produzione altrove.",
+    "WARN-06": "Riduce di una chiamata di rete la finestra prima della chiusura di sicurezza quando l'SL non è piazzabile: correzione minore ma corretta, nessun problema trovato.",
+    "WARN-01": "Igiene di logging senza impatto diretto sul rischio di capitale; nessun problema trovato.",
+    "WARN-02": "Buona base di osservabilità sulla profondità della coda, adeguata a un solo wallet attivo com'è oggi; da rivalutare (etichettatura) solo quando si scalerà a più wallet.",
+    "WARN-03": "Il dato grezzo di slippage per fill è la base corretta per un futuro monitoraggio di rischio, ma è ancora privo di qualunque aggregazione: da solo non è un cruscotto, coerentemente con quanto la storia stessa dichiara.",
+    "WARN-04": "Chiude un vero rischio di staging (fallback di cifratura noto usato in silenzio) con un avviso visibile, senza toccare il fail-fast già esistente in produzione: nessun problema trovato.",
+    "WARN-05": "Migliora la leggibilità dello stato del feed prezzi senza toccare backoff/retry come richiesto: beneficio indiretto ma reale sul rischio, dato che un feed inaffidabile alimenta ogni decisione a valle; nessun problema trovato.",
+    "QUAL-01": "Item 2 è il finding di rischio più serio di tutto lo sprint — una valutazione read-only di una proposta poteva attivare un cooldown reale come side effect, ora verificato chiuso; gli altri 4 item sono correzioni valide a rischio basso."
+  }
 }

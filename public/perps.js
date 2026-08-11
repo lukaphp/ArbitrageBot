@@ -3208,6 +3208,12 @@ class PerpsApp {
         await this.api(`/api/perps/bots/${id}`, { method: 'PATCH', body: JSON.stringify({ name, coin, config }) });
       } else {
         created = await this.api('/api/perps/bots', { method: 'POST', body: JSON.stringify({ name, coin, masterAddress: this.address, config }) });
+        // CRIT-03-EXTRA — il bot è creato comunque (non è un errore): se sul
+        // mercato c'è già un altro bot in esecuzione sullo stesso wallet, la
+        // risposta porta `warning` e va mostrato, altrimenti un avviso che nessuno
+        // vede non è un avviso. Il testo arriva dal server (botManager), qui non
+        // si riscrive: due punti di verità direbbero due cose diverse.
+        if (created?.warning) this.toast(created.warning, 'warning');
       }
       // Se il bot nasce da una strategia AI approvata, collegalo per seguirne l'esito
       if (!id && this._pendingProposalId && created?.id) {

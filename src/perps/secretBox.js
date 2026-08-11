@@ -50,6 +50,7 @@
  */
 
 import crypto from 'crypto';
+import logger from '../utils/logger.js';
 
 const ALGO = 'aes-256-gcm';
 const DEV_FALLBACK = 'arbitragebot-perps-dev-key';
@@ -69,6 +70,40 @@ const MIN_SECRET_LEN = 32;
  * rotateEncryptionKey — si appoggiano a segreti di test e non devono cambiare
  * significato).
  */
+/**
+ * WARN-04 — il fallback di sviluppo non deve poter passare inosservato.
+ *
+ * Il rischio residuo dopo SEC-07 non è la produzione (là si solleva un errore):
+ * è uno **staging con dati reali** avviato senza `NODE_ENV=production`, dove il
+ * fallback resta attivo in silenzio e cifra chiavi agent e token Telegram con un
+ * segreto scritto nel sorgente.
+ *
+ * UNA volta per processo, non a ogni chiamata: `currentSecret()` è invocata da
+ * ogni encrypt/decrypt, e un avviso per operazione diventerebbe rumore che si
+ * impara a ignorare — l'opposto dell'obiettivo. "A ogni avvio in cui il fallback
+ * è in uso" è la granularità del criterio di accettazione.
+ */
+let devFallbackWarned = false;
+
+function warnDevFallbackOnce() {
+  if (devFallbackWarned) return false;
+  devFallbackWarned = true;
+  logger.warn(
+    '⚠️  ATTENZIONE: AGENT_ENCRYPTION_KEY non impostata → in uso il FALLBACK DI SVILUPPO. ' +
+    'La chiave di cifratura è quella scritta nel sorgente, quindi pubblica: chiavi agent ' +
+    'Hyperliquid e token Telegram salvati ora sono da considerare NON protetti. ' +
+    'Accettabile solo per sviluppo/test locale — se questo ambiente ha dati reali, imposta ' +
+    'AGENT_ENCRYPTION_KEY (`openssl rand -hex 32`, vedi docs/DEPLOY.md §2) e ri-cifra con ' +
+    '`npm run secrets:rotate`.'
+  );
+  return true;
+}
+
+/** Solo per i test: rende ripetibile la verifica dell'avviso "una volta per processo". */
+export function __resetDevFallbackWarning() {
+  devFallbackWarned = false;
+}
+
 function currentSecret() {
   const secret = process.env.AGENT_ENCRYPTION_KEY || '';
 
@@ -82,7 +117,11 @@ function currentSecret() {
     );
   }
 
-  return secret || DEV_FALLBACK;
+  if (!secret) {
+    warnDevFallbackOnce();
+    return DEV_FALLBACK;
+  }
+  return secret;
 }
 
 /**

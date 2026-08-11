@@ -242,6 +242,11 @@ Validi per **tutti** i bot e per gli ordini manuali:
 | Max perdite consecutive | 3 | Oltre la soglia scatta un cooldown. |
 | Cooldown | 60 min | Durata dello stop forzato dopo le perdite consecutive. |
 
+Il cooldown **sopravvive al riavvio** del server: prima viveva solo in memoria, e un
+deploy (o un crash) lo azzerava — riaprendo la porta a una nuova operazione proprio
+dopo una serie di perdite, che è il momento in cui il cooldown serve. Un cooldown già
+scaduto al riavvio non viene ripristinato.
+
 ### 7.3 Gate deterministico unico
 
 **Ogni** esecuzione — che venga da un bot a regole o da una proposta approvata
@@ -376,6 +381,11 @@ Ogni bot ha un flag **PAPER**. Attivandolo:
 reale: il backtest ti dice come *sarebbe* andata sui dati passati, il paper trading
 ti dice come *sta* andando sul mercato di adesso, senza rischio. I bot in paper mode
 mostrano un badge **PAPER** nella lista.
+
+Lo stato simulato (equity, posizioni virtuali, trigger, storico dei fill) è
+**persistito**: un riavvio del server non azzera più un forward-test in corso. Prima
+ripartiva da `PAPER_START_EQUITY` senza posizioni, e una serie di risultati
+interrotta da un deploy non valida nulla.
 
 ---
 
@@ -673,6 +683,15 @@ oppure via `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`.
 Ricevi notifiche su entrate, uscite, errori, limiti raggiunti e kill-switch, e puoi
 comandare il bot dalla chat.
 
+Tra queste ci sono anche le **anomalie di esecuzione**, che prima non venivano
+comunicate: un ordine inviato e **mai riempito** (nessuna posizione aperta, nessun
+TP/SL piazzato) e un **fill parziale** (posizione più piccola di quella pianificata:
+il messaggio riporta entrambi i numeri, e TP/SL vengono dimensionati su quella
+riempita, non su quella richiesta). Le notifiche di questo tipo — insieme a quelle
+che riguardano la protezione della posizione — vengono **ritentate** se Telegram
+risponde con un rate limit o un errore temporaneo, invece di andare perse in
+silenzio.
+
 | Comando | Effetto |
 |:---|:---|
 | `/start`, `/help` | Menu di aiuto con i comandi supportati. |
@@ -771,7 +790,10 @@ posizioni e **non può prelevare**.
 **Il bot non apre mai una posizione. Perché?**
 Apri il **Monitor** del bot: mostra l'ultima valutazione e la motivazione. Le cause
 più frequenti sono, in ordine:
-1. candele insufficienti a scaldare gli indicatori (su timeframe lunghi serve tempo);
+1. candele insufficienti a scaldare gli indicatori (su timeframe lunghi serve tempo).
+   Il Monitor ora lo dice con un numero: `warmingUp` riporta quante candele ha e
+   quante gliene servono (RSI(14) ne vuole 15, ADX(14) ne vuole 28, MACD di default
+   35). Finché `ready` è falso il bot resta su `hold` qualunque cosa faccia il mercato;
 2. conferma multi-timeframe non concorde;
 3. gate ML sotto la soglia `minProb`;
 4. un limite di portafoglio raggiunto o un cooldown attivo;

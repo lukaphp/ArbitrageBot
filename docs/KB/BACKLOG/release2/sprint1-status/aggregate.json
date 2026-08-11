@@ -1,0 +1,38 @@
+{
+  "producedBy": "claude",
+  "updatedAt": "2026-08-11T22:00:00Z",
+  "sprint": "Sprint 1",
+  "release": "Release 2",
+  "epic": "Epic A — Hardening mainnet",
+  "reviewedAt": "2026-08-11",
+  "disclaimer": "Aggregato prodotto direttamente da Claude in sessione di review col PO, come Sprint 3/4 — sintesi di bruno.json (implementazione) più le review indipendenti di annie.json e jordan.json (due lenti distinte, non coordinate tra loro).",
+  "statusCounts": { "done": 12 },
+  "sprintSpPlanned": 21,
+  "sprintSpCompleted": 21,
+  "sprintSpExtra": 0,
+  "note": "I due extra (CRIT-03-EXTRA, CRIT-02-EXTRA) non avevano una stima SP a sé — nati e chiusi in seduta di review, piccoli per costruzione.",
+  "tasks": [
+    { "id": "CRIT-01", "title": "Size reale del fill, non pianificata", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 3, "status": "done" },
+    { "id": "CRIT-02", "title": "Cooldown di portafoglio persistito", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 2, "status": "done" },
+    { "id": "CRIT-03", "title": "Lock di apertura multi-bot stesso coin", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 3, "status": "done" },
+    { "id": "WARN-06", "title": "Reazione immediata su SL non piazzabile", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 1, "status": "done" },
+    { "id": "WARN-01", "title": "Rimuovere console.log debug dal logger", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 1, "status": "done" },
+    { "id": "WARN-02", "title": "Bounds/monitoring su execQueue", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 2, "status": "done" },
+    { "id": "WARN-03", "title": "Slippage reale calcolato e loggato", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 2, "status": "done" },
+    { "id": "WARN-04", "title": "Warning esplicito su DEV_FALLBACK", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 1, "status": "done" },
+    { "id": "WARN-05", "title": "Stato esplicito degraded sul WS", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 3, "status": "done" },
+    { "id": "QUAL-01", "title": "Pacchetto qualità (5 minori)", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 3, "status": "done", "note": "Item 2 (canOpen side-effect via riskAgent.evaluate) è il finding più importante dello sprint, confermato indipendentemente da entrambe le review." },
+    { "id": "CRIT-03-EXTRA", "title": "Warning multi-bot stesso mercato", "owner": "bruno", "sp": 0, "status": "done", "note": "Extra deciso in review, da segnalazione Jordan." },
+    { "id": "CRIT-02-EXTRA", "title": "Guard su getLimits()", "owner": "bruno", "sp": 0, "status": "done", "note": "Extra deciso in review, da segnalazione Annie." }
+  ],
+  "refinementCandidates": [
+    "getLimits() era già senza guard prima di questo sprint (chiuso ora come CRIT-02-EXTRA) — resta da verificare se altri getter di settings nel progetto hanno lo stesso gap. (Annie)",
+    "Duplicazione delle soglie di warmup indicatori tra bot.js e indicators.js, senza test di coerenza automatico. (Annie)",
+    "Accoppiamento silenzioso tra WS_DEGRADED_MS e WS_DOWN_NOTIFY_MS in marketData.js — corretto per oggi, da tenere d'occhio se in futuro le due soglie devono divergere per motivi diversi. (Annie)",
+    "Prioritizzazione della coda execQueue per ordini di chiusura urgenti — già dichiarata fuori scope in sprint1.md, riportata per continuità. (Annie)",
+    "Il default di 60 minuti per il cooldown di portafoglio non ha una giustificazione documentata — da validare quando ci sarà uno storico testnet abbastanza lungo. (Jordan)",
+    "CRIT-03-EXTRA copre solo la creazione del bot: startBot() su un bot fermo e updateBot() che sposta un bot su un mercato già coperto non hanno lo stesso avviso. findMarketOverlap() è già riusabile per entrambi. (Bruno, dichiarato lui stesso)",
+    "Slippage reale (WARN-03) oggi è un dato grezzo per trade, senza aggregazione per bot/mercato — utile solo dopo un lavoro di aggregazione dedicato. (Jordan)",
+    "Verificare che la migrazione di schema v3 (colonna trades.slippage_pct) giri pulita sul DB reale del VPS al prossimo deploy — il DB locale usato per i test è ancora a schema_version 2. (Jordan, osservazione operativa)"
+  ]
+}

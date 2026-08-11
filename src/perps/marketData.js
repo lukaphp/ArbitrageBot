@@ -24,6 +24,24 @@
  * reale della connessione e ri-sottoscrive, con backoff minimo per non generare
  * un reconnect storm e una notifica Telegram (una per episodio) se il downtime
  * supera la soglia.
+ *
+ * STATO ESPLICITO A TRE VALORI (WARN-05)
+ * --------------------------------------
+ * Backoff e notifica-per-episodio esistevano già (l'audit li dava per mancanti):
+ * quello che mancava davvero era uno STATO INTERROGABILE. Con il solo booleano di
+ * connessione, "il WS è caduto un attimo e sto ritentando" e "sono in un guasto
+ * persistente che non si risolverà da solo" erano indistinguibili da fuori —
+ * `perps_ws_connected 0` in entrambi i casi.
+ *
+ *   healthy  → connesso e sottoscritto per la rete corrente
+ *   retrying → giù, riconnessione in corso (col backoff già esistente)
+ *   degraded → giù da oltre la soglia di downtime: fallback REST persistente
+ *
+ * La soglia di `degraded` è LA STESSA della notifica di downtime già esistente
+ * (`PERPS_WS_DOWN_NOTIFY_MS`, alias `PERPS_WS_DEGRADED_MS`), non una seconda:
+ * così "un solo alert all'ingresso in degraded e uno al rientro in healthy" è
+ * esattamente la notifica-per-episodio che c'è già, invece di un secondo canale di
+ * avvisi sullo stesso evento. Nessuna riga di backoff/retry è cambiata.
  */
 
 import client from './hyperliquidClient.js';
@@ -44,6 +62,13 @@ const WS_RECONNECT_BACKOFF_MS = parseInt(process.env.PERPS_WS_RECONNECT_BACKOFF_
 // notifica parte UNA volta per episodio, non a ogni tentativo: un WS che
 // sfarfalla non deve generare rumore su Telegram.
 const WS_DOWN_NOTIFY_MS = parseInt(process.env.PERPS_WS_DOWN_NOTIFY_MS) || 300000;
+// Soglia oltre la quale lo stato del feed diventa `degraded` (WARN-05). È la
+// stessa soglia della notifica qui sopra, così l'ingresso in degraded coincide
+// con l'alert che parte già — un solo avviso per lo stesso evento.
+// `PERPS_WS_DEGRADED_MS` esiste per poterla separare se un giorno servisse, ma il
+// default è deliberatamente identico.
+const WS_DEGRADED_MS = parseInt(process.env.PERPS_WS_DEGRADED_MS) || WS_DOWN_NOTIFY_MS;
+export const WS_STATES = { HEALTHY: 'healthy', RETRYING: 'retrying', DEGRADED: 'degraded' };
 const CANDLE_TTL_MS = 20000;
 // Candele da richiedere di default: abbastanza per scaldare gli indicatori
 // (RSI/EMA/MACD…) su QUALSIASI timeframe. Senza questo, su 1h/4h/1d si
@@ -71,6 +96,7 @@ export class MarketData {
     this.wsDownSince = 0;       // inizio dell'episodio di downtime in corso (0 = WS su)
     this.wsDownNotified = false;// notifica già inviata per QUESTO episodio
     this.lastWsAttemptAt = 0;   // ultimo tentativo di (ri)sottoscrizione, per il backoff
+    this.wsState = WS_STATES.HEALTHY; // healthy | retrying | degraded (WARN-05)
     this.netChangeHooked = false;
   }
 
@@ -121,6 +147,11 @@ export class MarketData {
       return true;
     } catch (error) {
       logger.warn('Market data: WebSocket non disponibile, uso polling REST', error.message);
+      // Lo stato non deve mentire nella finestra tra un tentativo fallito e il
+      // giro di watchdog successivo (inclusa la sottoscrizione iniziale di
+      // `start()`). Solo lo stato: `wsDownSince`/`lastWsAttemptAt`, da cui
+      // dipendono backoff e notifica, restano gestiti dal watchdog.
+      if (this.wsState === WS_STATES.HEALTHY) this.wsState = WS_STATES.RETRYING;
       return false;
     }
   }
@@ -144,6 +175,11 @@ export class MarketData {
       const now = Date.now();
       if (!this.wsDownSince) this.wsDownSince = now;
       const downMs = now - this.wsDownSince;
+
+      // WARN-05 — stato esplicito. `degraded` non al primo fallimento ma dopo la
+      // soglia di TEMPO trascorso: il backoff rallenta già i tentativi, quindi un
+      // contatore di retry non direbbe nulla su quanto dura il guasto.
+      this.wsState = downMs >= WS_DEGRADED_MS ? WS_STATES.DEGRADED : WS_STATES.RETRYING;
 
       if (!this.wsDownNotified && downMs >= WS_DOWN_NOTIFY_MS) {
         this.wsDownNotified = true;
@@ -183,10 +219,15 @@ export class MarketData {
     }
   }
 
-  /** Chiude l'episodio di downtime corrente (WS di nuovo sano). */
+  /**
+   * Chiude l'episodio di downtime corrente (WS di nuovo sano).
+   * Chiamata anche da `stop()`: un feed fermato deliberatamente non è un guasto,
+   * e chi legge lo stato ha comunque `isRunning` per distinguere i due casi.
+   */
   _markWsHealthy() {
     this.wsDownSince = 0;
     this.wsDownNotified = false;
+    this.wsState = WS_STATES.HEALTHY;
   }
 
   /** True se il WebSocket sta consegnando dati freschi. */
@@ -292,7 +333,12 @@ export class MarketData {
       ws: client.wsConnected(),
       wsFresh: this._wsFresh(),
       wsNetwork: this.wsNetwork,
-      wsDownSeconds: this.wsDownSince ? Math.round((Date.now() - this.wsDownSince) / 1000) : 0
+      wsDownSeconds: this.wsDownSince ? Math.round((Date.now() - this.wsDownSince) / 1000) : 0,
+      // WARN-05 — campi ADDITIVI: `ws`/`wsFresh` restano quello che erano, quindi
+      // nessun consumatore esistente (cockpit, /api/perps/risk, tool del
+      // consulente) cambia comportamento.
+      wsState: this.wsState,
+      wsDegradedAfterSeconds: Math.round(WS_DEGRADED_MS / 1000)
     };
   }
 }

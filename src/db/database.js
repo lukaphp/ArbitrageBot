@@ -242,6 +242,15 @@ export class PerpsDatabase {
       () => {
         this._addColumn('positions', 'fee', 'REAL DEFAULT 0');
         this._addColumn('positions', 'close_reason', 'TEXT');
+      },
+      // v3 (WARN-03) — slippage reale dell'esecuzione sul singolo fill.
+      // Colonna ADDITIVA su `trades`: nessuna query esistente la seleziona per
+      // nome (`getBotStats`/`getBotPerformance` leggono `positions`, non `trades`)
+      // e i `SELECT *` la ricevono in più. NULL sui fill registrati prima di
+      // questa migrazione e su quelli senza prezzo di riferimento: uno zero
+      // sarebbe indistinguibile da "eseguito esattamente al prezzo atteso".
+      () => {
+        this._addColumn('trades', 'slippage_pct', 'REAL');
       }
     ];
   }
@@ -681,10 +690,15 @@ export class PerpsDatabase {
 
   // ---- Trades ----
 
+  /**
+   * @param trade.slippagePct (WARN-03) frazione, non percentuale: 0.001 = 0.1%.
+   *   `null`/assente quando non c'è un prezzo di riferimento con cui confrontare
+   *   l'eseguito — non si scrive 0, che significherebbe "nessuno slippage".
+   */
   insertTrade(trade) {
     this.db.prepare(`
-      INSERT INTO trades (bot_id, coin, side, px, sz, fee, hl_oid, ts)
-      VALUES (@botId, @coin, @side, @px, @sz, @fee, @hlOid, @ts)
+      INSERT INTO trades (bot_id, coin, side, px, sz, fee, hl_oid, slippage_pct, ts)
+      VALUES (@botId, @coin, @side, @px, @sz, @fee, @hlOid, @slippagePct, @ts)
     `).run({
       botId: trade.botId || null,
       coin: trade.coin,
@@ -693,6 +707,7 @@ export class PerpsDatabase {
       sz: trade.sz || null,
       fee: trade.fee || 0,
       hlOid: trade.hlOid || null,
+      slippagePct: Number.isFinite(trade.slippagePct) ? trade.slippagePct : null,
       ts: Date.now()
     });
   }

@@ -864,6 +864,7 @@
                     </tbody>
                 </table>
                 </div>
+                <p>Il cooldown <strong>sopravvive al riavvio</strong> del server: prima viveva solo in memoria, e un deploy (o un crash) lo azzerava — riaprendo la porta a una nuova operazione proprio dopo una serie di perdite, che è il momento in cui il cooldown serve. Un cooldown già scaduto al riavvio non viene ripristinato.</p>
 
                 <h4 style="margin-top:20px">3 · Gate deterministico unico</h4>
                 <div class="alert alert-info">
@@ -1076,7 +1077,8 @@
                     <li><strong>prezzi, candele e segnali restano reali e live</strong>;</li>
                     <li><strong>solo l'esecuzione è simulata</strong> da un broker interno.</li>
                 </ul>
-                <p style="margin-bottom:0">È il modo corretto di validare una strategia dopo il backtest e prima del denaro reale: il backtest ti dice come <em>sarebbe</em> andata sui dati passati, il paper trading ti dice come <em>sta</em> andando sul mercato di adesso, senza rischio. I bot in paper mode mostrano un badge <strong>PAPER</strong> nella lista.</p>
+                <p>È il modo corretto di validare una strategia dopo il backtest e prima del denaro reale: il backtest ti dice come <em>sarebbe</em> andata sui dati passati, il paper trading ti dice come <em>sta</em> andando sul mercato di adesso, senza rischio. I bot in paper mode mostrano un badge <strong>PAPER</strong> nella lista.</p>
+                <p style="margin-bottom:0">Lo stato simulato (equity, posizioni virtuali, trigger, storico dei fill) è <strong>persistito</strong>: un riavvio del server non azzera più un forward-test in corso. Prima ripartiva da <code>PAPER_START_EQUITY</code> senza posizioni, e una serie di risultati interrotta da un deploy non valida nulla.</p>
             </div>
         </section>
 
@@ -1364,6 +1366,7 @@
             <div class="card">
                 <h3>Notifiche e comandi da chat</h3>
                 <p>Configura token e chat id <strong>dal pannello</strong> (vengono salvati <strong>cifrati</strong> sul database) oppure via <code>TELEGRAM_BOT_TOKEN</code> / <code>TELEGRAM_CHAT_ID</code>. Ricevi notifiche su entrate, uscite, errori, limiti raggiunti e kill-switch.</p>
+                <p>Tra queste ci sono anche le <strong>anomalie di esecuzione</strong>, che prima non venivano comunicate: un ordine inviato e <strong>mai riempito</strong> (nessuna posizione aperta, nessun TP/SL piazzato) e un <strong>fill parziale</strong> (posizione più piccola di quella pianificata: il messaggio riporta entrambi i numeri, e TP/SL vengono dimensionati su quella riempita). Le notifiche di questo tipo — insieme a quelle che riguardano la protezione della posizione — vengono <strong>ritentate</strong> se Telegram risponde con un rate limit o un errore temporaneo, invece di andare perse in silenzio.</p>
 
                 <div class="table-wrap">
                 <table class="feature-table">
@@ -1466,7 +1469,7 @@
 
                 <div class="faq-item">
                     <h4>Il bot non apre mai una posizione. Perché?</h4>
-                    <p>Apri il <strong>Monitor</strong> del bot: mostra l'ultima valutazione e la motivazione. Le cause più frequenti, in ordine: (1) candele insufficienti a scaldare gli indicatori — su timeframe lunghi serve tempo; (2) conferma multi-timeframe non concorde; (3) gate ML sotto la soglia <code>minProb</code>; (4) un limite di portafoglio raggiunto o un cooldown attivo; (5) kill-switch inserito — resta attivo finché non lo spegni, vedi <em>Risk Engine &amp; Kill-Switch</em> per come farlo.</p>
+                    <p>Apri il <strong>Monitor</strong> del bot: mostra l'ultima valutazione e la motivazione. Le cause più frequenti, in ordine: (1) candele insufficienti a scaldare gli indicatori — su timeframe lunghi serve tempo; il Monitor ora lo dice con un numero (<code>warmingUp</code>: quante candele ha e quante gliene servono — RSI(14) ne vuole 15, ADX(14) 28, MACD di default 35), e finché <code>ready</code> è falso il bot resta su <code>hold</code> qualunque cosa faccia il mercato; (2) conferma multi-timeframe non concorde; (3) gate ML sotto la soglia <code>minProb</code>; (4) un limite di portafoglio raggiunto o un cooldown attivo; (5) kill-switch inserito — resta attivo finché non lo spegni, vedi <em>Risk Engine &amp; Kill-Switch</em> per come farlo.</p>
                 </div>
 
                 <div class="faq-item">

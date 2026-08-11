@@ -11,7 +11,7 @@
 import logger from '../utils/logger.js';
 import metrics from './metrics.js';
 
-const DEFAULTS = { retries: 3, baseMs: 400, maxMs: 8000 };
+const DEFAULTS = { retries: 3, baseMs: 400, maxMs: 8000, metric: 'api_errors_total' };
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -46,7 +46,12 @@ function delayFor(err, attempt, opts) {
 /**
  * Esegue `fn` con retry sugli errori transitori.
  * @param {Function} fn  funzione async da eseguire
- * @param {object} options { retries, baseMs, maxMs, label }
+ * @param {object} options { retries, baseMs, maxMs, label, metric }
+ *   `metric` è il contatore incrementato quando i tentativi si esauriscono:
+ *   default `api_errors_total`, il cui HELP dichiara "errori verso le API
+ *   Hyperliquid". Chi ritenta qualcos'altro (il notifier Telegram, QUAL-01) passa
+ *   il proprio contatore invece di gonfiare quello di Hyperliquid con errori che
+ *   non lo riguardano; `null` per non contare nulla.
  */
 export async function withRetry(fn, options = {}) {
   const opts = { ...DEFAULTS, ...options };
@@ -62,7 +67,7 @@ export async function withRetry(fn, options = {}) {
       await sleep(wait);
     }
   }
-  metrics.inc('api_errors_total'); // tentativi esauriti: errore definitivo
+  if (opts.metric) metrics.inc(opts.metric); // tentativi esauriti: errore definitivo
   throw lastErr;
 }
 

@@ -68,6 +68,68 @@ class RiskManager {
   }
 
   /**
+   * CRIT-01 — interpreta QUANTA size un ordine market ha davvero riempito.
+   *
+   * Su Hyperliquid un "market" è un limit IoC: può riempirsi del tutto, in parte,
+   * o per niente. `_parseOrderResult` espone già `totalSz` (la size eseguita) ma
+   * nessuno la leggeva: il bot registrava sempre la size PIANIFICATA. I tre esiti
+   * richiedono trattamenti diversi, non una sfumatura dello stesso caso:
+   *
+   *  - `none` (totalSz null/0/non numerico): nessuna posizione esiste
+   *    sull'exchange. Il capitale non è mai stato impegnato: non c'è niente da
+   *    correggere più tardi, c'è solo da NON scrivere nulla.
+   *  - `partial`: la posizione esiste, più piccola del previsto. Ogni numero a
+   *    valle (riga DB, TP/SL, DCA, statistiche) deve usare `filled`.
+   *  - `full`: comportamento storico, invariato.
+   *
+   * Vive qui e non in `bot.js` per la stessa ragione di `applyDcaFill`: è
+   * aritmetica sul denaro, va verificabile in isolamento e condivisa con
+   * chiunque altro legga un fill (percorso di apertura e percorso DCA).
+   *
+   * La tolleranza serve al confronto tra due numeri già arrotondati a
+   * `szDecimals`: senza, un fill pieno restituito come 0.9999999999 verrebbe
+   * classificato parziale e notificato come anomalia a ogni apertura.
+   *
+   * @param plannedSize size richiesta all'exchange
+   * @param totalSz     `order.totalSz` come arriva dal broker (può essere null)
+   * @returns { filled, planned, ratio, none, partial, full }
+   */
+  resolveFillSize(plannedSize, totalSz) {
+    const EPS = 1e-9;
+    const planned = Number.isFinite(Number(plannedSize)) ? Number(plannedSize) : 0;
+    const raw = Number(totalSz);
+    const filled = Number.isFinite(raw) && raw > 0 ? raw : 0;
+    const none = filled <= 0;
+    const partial = !none && planned > 0 && filled + Math.max(EPS, planned * EPS) < planned;
+    return {
+      filled,
+      planned,
+      ratio: planned > 0 ? filled / planned : 0,
+      none,
+      partial,
+      full: !none && !partial
+    };
+  }
+
+  /**
+   * WARN-03 — slippage REALE di un'esecuzione: quanto il prezzo medio ottenuto si
+   * discosta dal prezzo di riferimento su cui la decisione è stata presa.
+   *
+   * Entrambi i valori erano già nello stesso scope di `bot._openPosition`
+   * (`order.avgPx` e `snapshot.price`) e la differenza non veniva mai calcolata.
+   * Ritorna una FRAZIONE (0.001 = 0.1%), non una percentuale, coerentemente con
+   * il resto dei rapporti del modulo; `null` quando uno dei due prezzi non è
+   * utilizzabile — nessun valore inventato per un dato che non c'è (una posizione
+   * adottata da `_reconcile` non ha alcun ordine di riferimento).
+   */
+  computeSlippage(avgPx, referencePx) {
+    const avg = Number(avgPx);
+    const ref = Number(referencePx);
+    if (!Number.isFinite(avg) || !Number.isFinite(ref) || avg <= 0 || ref <= 0) return null;
+    return Math.abs(avg - ref) / ref;
+  }
+
+  /**
    * Calcola i prezzi di TP e SL per una posizione.
    * @param side 'long' | 'short'
    * @returns { tpPx, slPx }

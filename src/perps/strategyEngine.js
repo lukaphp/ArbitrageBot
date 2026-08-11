@@ -41,6 +41,35 @@ class StrategyEngine {
     logger.info('📨 Segnale esterno ricevuto', { coin, signal });
   }
 
+  /**
+   * QUAL-01 item 1 — lettura PURA del segnale esterno in coda: nessuna
+   * modifica della coda, nemmeno per i segnali scaduti (che qui vengono
+   * semplicemente ignorati). È la versione da usare in qualunque percorso
+   * DIAGNOSTICO — `getMonitor()`, una UI, un test — dove chiedere "cosa vede il
+   * bot in questo momento?" non deve poter cambiare ciò che il bot vedrà al
+   * prossimo tick.
+   *
+   * Nota sul difetto reale, verificato sul codice: il segnale NON veniva
+   * consumato alla lettura (solo eliminato se scaduto), quindi il caso descritto
+   * dall'audit — "la seconda valutazione non trova più il segnale perché la prima
+   * l'ha consumato" — non poteva accadere così com'era raccontato. Ciò che poteva
+   * accadere è che un percorso di sola lettura modificasse la coda. La semantica
+   * di consumo NON è stata cambiata: sarebbe un cambio di comportamento sul
+   * percorso di trading (un webhook che oggi vale 5 minuti smetterebbe di valere
+   * dopo il primo tick), fuori dallo scope di questo sprint.
+   */
+  _checkExternal(coin) {
+    const s = this.externalSignals.get(coin);
+    if (!s) return null;
+    if (Date.now() - s.ts > 5 * 60 * 1000) return null; // scaduto: ignorato, non rimosso
+    return s.signal;
+  }
+
+  /**
+   * Lettura del segnale esterno CON effetto collaterale (pulizia dei segnali
+   * scaduti). Solo per il loop di trading reale — vedi `_checkExternal` per la
+   * versione pura.
+   */
   _consumeExternal(coin) {
     const s = this.externalSignals.get(coin);
     if (!s) return null;
@@ -109,13 +138,16 @@ class StrategyEngine {
    * @param {object} config  configurazione bot
    * @param {object} snapshot { coin, price, candles, funding }
    * @param {object} state    { inPosition, side }
+   * @param {object} opts     { consume } — `consume: false` per una valutazione di
+   *   sola lettura (diagnostica): stesso verdetto, nessuna modifica alla coda dei
+   *   segnali esterni. Default `true`: il loop reale non cambia comportamento.
    */
-  evaluate(config, snapshot, state = {}) {
+  evaluate(config, snapshot, state = {}, { consume = true } = {}) {
     const ctx = {
       price: snapshot.price,
       candles: snapshot.candles,
       funding: snapshot.funding ?? null,
-      external: this._consumeExternal(snapshot.coin),
+      external: consume ? this._consumeExternal(snapshot.coin) : this._checkExternal(snapshot.coin),
       precomputed: snapshot.precomputed // valori indicatori già pronti (backtest)
     };
 

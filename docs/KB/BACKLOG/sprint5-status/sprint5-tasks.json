@@ -1,0 +1,20 @@
+{
+  "sprint": "Sprint 5",
+  "release": "Release 2 · Sprint 1",
+  "epic": "Epic A — Hardening mainnet",
+  "planningAt": "2026-08-11",
+  "source": "docs/KB/BACKLOG/sprint5.md",
+  "totalSp": 21,
+  "tasks": [
+    { "id": "CRIT-01", "title": "Size reale del fill, non pianificata", "owner": "bruno", "reviewer": "annie", "sp": 3, "priority": "P0", "note": "Include il caso di fill nullo (posizione fantasma), non solo il parziale citato dall'audit" },
+    { "id": "CRIT-02", "title": "Cooldown di portafoglio persistito", "owner": "bruno", "reviewer": "annie", "sp": 2, "priority": "P0" },
+    { "id": "CRIT-03", "title": "Lock di apertura multi-bot stesso coin", "owner": "bruno", "reviewer": "annie", "sp": 3, "priority": "P0", "note": "Il lock riusa execQueue, non introduce una seconda struttura di serializzazione" },
+    { "id": "WARN-06", "title": "Reazione immediata su SL non piazzabile", "owner": "bruno", "reviewer": "annie", "sp": 1, "priority": "P1", "note": "Ex CRIT-04, declassato — severità corretta in release2.md §1" },
+    { "id": "WARN-01", "title": "Rimuovere console.log debug dal logger", "owner": "bruno", "reviewer": "annie", "sp": 1, "priority": "P2" },
+    { "id": "WARN-02", "title": "Bounds/monitoring su execQueue", "owner": "bruno", "reviewer": "annie", "sp": 2, "priority": "P1" },
+    { "id": "WARN-03", "title": "Slippage reale calcolato e loggato", "owner": "bruno", "reviewer": "annie", "sp": 2, "priority": "P1" },
+    { "id": "WARN-04", "title": "Warning esplicito su DEV_FALLBACK", "owner": "bruno", "reviewer": "annie", "sp": 1, "priority": "P1" },
+    { "id": "WARN-05", "title": "Stato esplicito degraded sul WS", "owner": "bruno", "reviewer": "annie", "sp": 3, "priority": "P1", "note": "Il backoff esiste già — aggiunge solo lo stato esplicito" },
+    { "id": "QUAL-01", "title": "Pacchetto qualità (5 minori)", "owner": "bruno", "reviewer": "annie", "sp": 3, "priority": "P2" }
+  ]
+}

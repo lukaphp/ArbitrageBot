@@ -16,7 +16,7 @@ Stato dello sprint, mappa task→proprietario, blocchi che attraversano il lavor
 ## Il meccanismo di aggregazione — è il tuo compito centrale
 
 Ogni membro del team scrive in autonomia il proprio file di stato in
-`docs/KB/BACKLOG/sprint4-status/<nome>.json` (schema e regole in `README.md` nella stessa cartella).
+`docs/KB/BACKLOG/sprint5-status/<nome>.json` (schema e regole in `README.md` nella stessa cartella).
 Tu sei l'unico che li legge **tutti**, e l'unico che produce `aggregate.json` — è così che lo stato
 individuale di ognuno diventa un quadro dello sprint leggibile da chi orchestra il team, senza che
 serva coordinare i cinque tra loro.

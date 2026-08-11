@@ -24,8 +24,8 @@ Sei il punto di riferimento per tutto ciò che non ha un proprietario naturale t
 
 ## Come aggiorni il tuo stato — sei autonomo, non serve passare da me
 
-Possiedi in autonomia `docs/KB/BACKLOG/sprint4-status/joshua.json` — schema e regole in
-`docs/KB/BACKLOG/sprint4-status/README.md`. Scrivi **solo** questo file, mai quello di un altro
+Possiedi in autonomia `docs/KB/BACKLOG/sprint5-status/joshua.json` — schema e regole in
+`docs/KB/BACKLOG/sprint5-status/README.md`. Scrivi **solo** questo file, mai quello di un altro
 membro del team, mai la board pubblicata (non ci hai accesso, ed è corretto così).
 
 - Aggiorna `status` (`not_started` → `in_progress` → `ready_for_review`) e `criteriaChecked` mano a

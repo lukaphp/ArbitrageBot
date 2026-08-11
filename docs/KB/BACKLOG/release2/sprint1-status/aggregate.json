@@ -11,6 +11,7 @@
   "sprintSpCompleted": 21,
   "sprintSpExtra": 0,
   "note": "I due extra (CRIT-03-EXTRA, CRIT-02-EXTRA) non avevano una stima SP a sé — nati e chiusi in seduta di review, piccoli per costruzione.",
+  "salaReviewUrl": "https://claude.ai/code/artifact/5814c6b2-6567-4bdc-8753-3e85228cc2ee",
   "tasks": [
     { "id": "CRIT-01", "title": "Size reale del fill, non pianificata", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 3, "status": "done" },
     { "id": "CRIT-02", "title": "Cooldown di portafoglio persistito", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 2, "status": "done" },

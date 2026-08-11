@@ -366,6 +366,8 @@ a sé, piccoli per costruzione). `npm test`: 551/551 verdi (era 460 a inizio spr
 125 file. Nessun commit fatto durante l'implementazione — tutto il lavoro è stato verificato sul
 working tree prima di essere reso definitivo.
 
+**Sala Review (narrata, con audio):** [Bruno, Annie e Jordan presentano lo sprint](https://claude.ai/code/artifact/5814c6b2-6567-4bdc-8753-3e85228cc2ee) — una sezione per persona, con le prove reali dietro ogni storia. Testo di questo paragrafo qui sotto per chi preferisce leggere.
+
 **Doppia revisione indipendente, non coordinata tra le due:**
 - **Annie** (correttezza/test) — ha **riprodotto di persona** lo scenario "rosso prima" di CRIT-03
   disattivando il lock e osservando due ordini reali arrivare all'exchange; ha interrogato

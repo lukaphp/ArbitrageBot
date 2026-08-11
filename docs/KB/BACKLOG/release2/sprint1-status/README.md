@@ -10,7 +10,8 @@ esistono `joshua.json`/`maya.json` per questo sprint.
 |:---|:---|:---|
 | `sprint1-tasks.json` | Io/PO (statico) | Elenco canonico dei task — fonte: `docs/KB/BACKLOG/release2/sprint1.md` |
 | `bruno.json` | bruno | Stato di tutte e 10 le storie (CRIT-01/02/03, WARN-01…06, QUAL-01) |
-| `annie.json` | annie | Note di review — revisore designata per l'intero sprint, non un sottoinsieme |
+| `annie.json` | annie | Note di review lato correttezza/test — revisore designata per l'intero sprint |
+| `jordan.json` | jordan | Note di review lato rischio quantitativo — aggiunto come revisore per **questo** sprint (decisione PO, 11 agosto): la stessa epica letta con la lente "questo fix riduce davvero il rischio che dice di ridurre?", non solo "il codice è corretto e testato?" |
 | `aggregate.json` | roger (o Claude in sessione di review, come Sprint 3/4) | Sintesi per la board visuale |
 
 ## Schema di un file di stato agente

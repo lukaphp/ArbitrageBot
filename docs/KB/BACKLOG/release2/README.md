@@ -88,13 +88,17 @@ logica di serializzazione.
 
 ---
 
-## 3. EPIC B — Completamento Sprint 4 e debito residuo
+## 3. EPIC B — Completamento Release 1 e debito residuo
 
-Non nuove capacità: chiudere quello che Sprint 4 ha lasciato esplicitamente aperto.
+Non nuove capacità: chiudere quello che Release 1 (Sprint 1-4) ha lasciato esplicitamente aperto —
+inclusi due item più vecchi di Sprint 4, riportati qui in occasione della riorganizzazione della
+board in Release 1 (archiviata) / Release 2 (in corso), l'11 agosto.
 
 | ID | Storia | Owner | SP | Note |
 |:--|:---|:---|:--:|:---|
-| OPS-02 | Verifica reale backup/restore sul VPS | PO/Claude | 1 | Invariato da Sprint 3, mai eseguito |
+| CI-01 | `harden-runner` da audit a block in CI | Joshua | 2 | Da Sprint 2 — differita perché servivano 3-5 run reali in modalità audit prima di poter compilare l'allowlist; quella dipendenza temporale è nel frattempo trascorsa, va solo ripresa in mano |
+| CHORE-01 | Verifica igiene `.npmrc` | PO | 1 | Da Sprint 2 — nessun agente ha accesso a `.npmrc` (protezione sandbox), resta ispezione diretta |
+| OPS-02 | Verifica reale backup/restore sul VPS | PO/Claude | 1 | Da Sprint 3, mai eseguito |
 | OPS-03r | Uptime esterno su `/health` | PO/Claude | 1 | Residuo Sprint 3/4 |
 | ADV-OPS-01 | Sessione reale con `AGENTS_ENABLED=true`: misurare il costo vero di una conversazione advisor vs la stima dello spike | PO | 1 | Prerequisito tecnico anche per Epic D/E — farla presto |
 | OBS-OPS-01 | Provare OBS-01 (Grafana) sul VPS reale, non solo su Docker locale | PO/Claude | 1 | Nessun agente ha accesso SSH |
@@ -106,8 +110,9 @@ Non nuove capacità: chiudere quello che Sprint 4 ha lasciato esplicitamente ape
 | DEBT-06 | Focus trap nel drawer del consulente | Maya | 1 | Piccolo, isolato |
 | LLM-PRICE-01 | Riverificare i prezzi in `pricing.models` (LLM-01) contro i listini pubblici reali | Joshua | 1 | Scritti senza accesso rete al momento di LLM-01 |
 
-**Totale Epic B: 13 SP.** Quattro item (OPS-02, OPS-03r, ADV-OPS-01, OBS-OPS-01) restano in carico
-diretto al PO — non delegabili ad agenti per la stessa ragione di sempre (accesso SSH/spesa reale).
+**Totale Epic B: 16 SP.** Cinque item (CHORE-01, OPS-02, OPS-03r, ADV-OPS-01, OBS-OPS-01) restano in
+carico diretto al PO — non delegabili ad agenti per la stessa ragione di sempre (accesso
+SSH/`.npmrc`/spesa reale).
 
 ---
 
@@ -199,21 +204,25 @@ di default in qualunque ambiente.
 | Epica | SP | Blocca/dipende da |
 |:--|:--:|:---|
 | A — Hardening mainnet | 21 | Nessuna — parte per prima |
-| B — Completamento Sprint 4 | 13 | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E |
+| B — Completamento Release 1 | 16 | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E |
 | C — Multi-provider Analyst | 5 | Nessuna |
 | D — Consulente proattivo | 6 | ADV-OPS-01 (Epic B) |
 | E — Advisor fase 2 | 3 | ADV-OPS-01 (Epic B), idealmente dopo D |
-| **Totale release** | **48** | |
+| **Totale release** | **51** | |
 
-**Proposta di distribuzione su sprint** (indicativa, da confermare in refinement):
+**Distribuzione su sprint** (numerazione propria di Release 2 — non prosegue quella di Release 1,
+per decisione esplicita del PO l'11 agosto: questa release riparte da Sprint 1):
 
-- **Sprint 5 — Epic A per intero** (21 SP): coerente con la decisione "prima epica, blocca le altre".
-- **Sprint 6 — Epic B + Epic C** (13 + 5 = 18 SP): completamento operativo e multi-provider Analyst,
-  nessuna dipendenza tra loro, parallelizzabili.
-- **Sprint 7 — Epic D + Epic E** (6 + 3 = 9 SP, sprint più leggero, spazio per eventuale scivolamento
-  da Sprint 5/6): il consulente proattivo e la sua prima capacità di scrittura, in questo ordine
-  perché E dipende concettualmente da D (avere il consulente già integrato nel monitoraggio prima di
-  dargli la possibilità di proporre).
+- **Sprint 1 — Epic A per intero** (21 SP): coerente con la decisione "prima epica, blocca le altre".
+  Pianificato in dettaglio in `sprint1.md`.
+- **Sprint 2 (proposto) — Epic B + Epic C** (16 + 5 = 21 SP): completamento operativo/debito residuo
+  e multi-provider Analyst, nessuna dipendenza tra loro, parallelizzabili.
+- **Sprint 3 (proposto) — Epic D + Epic E** (6 + 3 = 9 SP, sprint più leggero, spazio per eventuale
+  scivolamento da Sprint 1/2): il consulente proattivo e la sua prima capacità di scrittura, in
+  questo ordine perché E dipende concettualmente da D (avere il consulente già integrato nel
+  monitoraggio prima di dargli la possibilità di proporre).
 
-*Epiche definite l'11 agosto 2026. Il refinement dettagliato (storie con criteri di accettazione) si
-fa sprint per sprint, all'avvio di ciascuno — stesso processo di Sprint 3/4.*
+*Epiche definite l'11 agosto 2026, riviste lo stesso giorno per la numerazione propria di Release 2
+e i due item riportati da Sprint 2 di Release 1 (CI-01, CHORE-01). Il refinement dettagliato (storie
+con criteri di accettazione) si fa sprint per sprint, all'avvio di ciascuno — stesso processo di
+Release 1.*

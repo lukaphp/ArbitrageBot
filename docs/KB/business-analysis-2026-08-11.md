@@ -63,7 +63,7 @@ quasi identici — conseguenza nota e accettata dell'architettura attuale, non u
 promemoria da tenere d'occhio quando cresce il numero di strategie generate.
 
 **4 bug critici, trovati e non ancora corretti** — dall'audit indipendente dell'11 agosto, verificati
-personalmente sul codice reale (dettaglio in `docs/KB/BACKLOG/release2.md` §1-2): size di posizione
+personalmente sul codice reale (dettaglio in `docs/KB/BACKLOG/release2/README.md` §1-2): size di posizione
 non allineata al fill reale, cooldown di portafoglio che sparisce a un riavvio, race di apertura tra
 bot sullo stesso mercato. Operare su mainnet nello stato attuale aggiunge rischio operativo *sopra*
 il rischio di mercato.
@@ -105,7 +105,7 @@ lo giustifichi inverte l'ordine raccomandato.
 Il valore reale oggi non è "un sistema con rendimento dimostrato" — non lo è. È **una piattaforma
 pronta a validare in sicurezza se una strategia ha un vantaggio**, con i freni già installati prima
 di chiedersi se il motore va forte. Tre condizioni, in ordine, prima di considerare capitale reale:
-chiudere i 4 critici dell'audit (Epic A, `release2.md`); accumulare uno storico testnet abbastanza
+chiudere i 4 critici dell'audit (Epic A, `docs/KB/BACKLOG/release2/README.md`); accumulare uno storico testnet abbastanza
 lungo da dire qualcosa di statisticamente onesto; verificare almeno una volta che il backup funzioni
 davvero (OPS-02). Nessuna delle tre costa capitale — tutte e tre costano tempo.
 

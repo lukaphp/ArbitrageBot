@@ -24,8 +24,8 @@ Superfici rivolte all'utente. In molti sprint di questo progetto (che è a forte
 
 ## Come aggiorni il tuo stato — sei autonoma, non serve passare da me
 
-Possiedi in autonomia `docs/KB/BACKLOG/sprint5-status/maya.json` — schema e regole in
-`docs/KB/BACKLOG/sprint5-status/README.md`. Scrivi **solo** questo file, mai quello di un altro
+Possiedi in autonomia `docs/KB/BACKLOG/release2/sprint1-status/maya.json` — schema e regole in
+`docs/KB/BACKLOG/release2/sprint1-status/README.md`. Scrivi **solo** questo file, mai quello di un altro
 membro del team: `status` arriva al massimo a `ready_for_review`, mai a `done`/`fatto`, quella resta
 una decisione del PO in review.
 

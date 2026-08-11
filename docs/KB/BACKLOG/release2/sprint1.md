@@ -1,9 +1,9 @@
-# Sprint 5 — Release 2 · Sprint 1 — Hardening mainnet (Epic A)
+# Release 2 · Sprint 1 — Hardening mainnet (Epic A)
 
 **Team:** Nautilus · **Stato:** pianificato — refinement tenuto l'11 agosto 2026, subito dopo la
-definizione delle epiche di `docs/KB/BACKLOG/release2.md`. Questo sprint è **Epic A per intero**:
+definizione delle epiche di `docs/KB/BACKLOG/release2/README.md`. Questo sprint è **Epic A per intero**:
 i 4 critici e i 5 importanti dell'audit indipendente (`docs/AUDIT_REPORT.md`), verificati riga per
-riga sul codice reale prima di questo planning (`release2.md` §1), più un pacchetto di 5 minori.
+riga sul codice reale prima di questo planning (`release2/README.md` §1), più un pacchetto di 5 minori.
 Nessuna feature nuova in questo sprint — solo correttezza e resilienza su ciò che già esiste, per
 decisione esplicita del PO ("prima epica, blocca le altre").
 
@@ -16,7 +16,7 @@ decisione esplicita del PO ("prima epica, blocca le altre").
 | 1 | Size reale del fill, non pianificata | Audit CRIT-01 | ✅ (`order.totalSz` confermato nel parsing) | 3 |
 | 2 | Cooldown di portafoglio persistito | Audit CRIT-02 | ✅ | 2 |
 | 3 | Lock di apertura multi-bot stesso coin | Audit CRIT-03 | ✅ | 3 |
-| 4 | Reazione immediata su SL non piazzabile | Audit CRIT-04 (declassato a WARN, vedi `release2.md` §1) | ✅, severità corretta | 1 |
+| 4 | Reazione immediata su SL non piazzabile | Audit CRIT-04 (declassato a WARN, vedi `release2/README.md` §1) | ✅, severità corretta | 1 |
 | 5 | Rimuovere `console.log` di debug | Audit WARN-01 | ✅ | 1 |
 | 6 | Bounds/monitoring su `execQueue` | Audit WARN-02 | ✅ | 2 |
 | 7 | Slippage reale calcolato e loggato | Audit WARN-03 | ✅ | 2 |
@@ -139,7 +139,7 @@ sull'exchange.
 
 ### 0.4 · Reazione immediata su SL non piazzabile *(ex CRIT-04, declassato)*
 
-**Verificato e corretto rispetto all'audit** (`release2.md` §1): il claim "aspetta il tick successivo
+**Verificato e corretto rispetto all'audit** (`release2/README.md` §1): il claim "aspetta il tick successivo
 (10s)" è falso — `_ensureStopLoss()` in `bot.js` reagisce già nello stesso tick. Il problema reale è
 più piccolo: quando `placeTriggerOrder` restituisce `res.oid === null` (fallimento immediato,
 inequivocabile), il codice fa comunque una `_findStopOrder()` — una chiamata API in più, non un'attesa
@@ -311,7 +311,7 @@ ambiguità) — presi per buoni dall'audit, ciascuno con test-first come da conv
 2. `npm test` e `npm run lint` verdi.
 3. Documentazione aggiornata dove la superficie utente/operativa cambia (`MANUAL.md`, `DEPLOY.md` se
    emergono nuove variabili di configurazione — es. soglia di `degraded` per WARN-05).
-4. Status file aggiornato in `sprint5-status/`.
+4. Status file aggiornato in `docs/KB/BACKLOG/release2/sprint1-status/`.
 5. Review col PO a fine sprint, task per task, con evidenze.
 
 **Invarianti specifiche di questo sprint:**

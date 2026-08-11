@@ -491,7 +491,7 @@ occupa **solo** di risk management ed esecuzione. È una divisione del lavoro se
 
 > ℹ️ **Aggiornamento (Sprint 1, SEC-04).** L'endpoint è dietro `requireAuth` + rate limit + secret a
 > confronto costante — **non raggiungibile da TrendSpider/TradingView così com'è**, per scelta
-> esplicita (opzione B, vedi [sprint1.md](../BACKLOG/sprint1.md)), non per svista. Aprirlo davvero
+> esplicita (opzione B, vedi [sprint1.md](../BACKLOG/release1/sprint1.md)), non per svista. Aprirlo davvero
 > (HMAC, whitelist del path, anti-replay) resta un'opzione futura, non un debito di sicurezza attuale.
 
 **Spunti operativi**

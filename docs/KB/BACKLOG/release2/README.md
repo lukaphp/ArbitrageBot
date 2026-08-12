@@ -242,3 +242,4 @@ un refinement dedicato prima di poter stimare SP.
 | Candidato | Tipo | Origine | Documento |
 |:--|:--|:--|:--|
 | Sistema Neofita-Maestro — memoria esperienziale interna, riduzione dipendenza da LLM esterni | Architecture Spike & R&D | Richiesta diretta del PO, 12 agosto 2026 | [`spike-neofita-maestro.md`](spike-neofita-maestro.md) |
+| Integrazione MetaTrader (MT4/MT5) come layer di esecuzione alternativo/di supporto | Architecture Spike & R&D | Richiesta diretta del PO, 12 agosto 2026 | [`spike-metatrader-integration.md`](spike-metatrader-integration.md) |

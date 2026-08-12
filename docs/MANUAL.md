@@ -548,6 +548,22 @@ controllo dell'interfaccia: sposta dove finiscono i tuoi dati e i tuoi soldi, e
 resta una decisione deliberata da prendere sui segreti del server. Nessuna di
 quelle chiavi è obbligatoria: senza, tutto funziona come prima.
 
+**Lo stesso vale per l'Analyst**, con una manopola propria e separata:
+`AGENT_ANALYST_PROVIDER` (default `anthropic`, stessi valori ammessi). Sono due
+variabili distinte per lo stesso motivo per cui i due agenti hanno già modelli
+distinti: poter mandare la *chat* su un fornitore economico senza spostarci anche
+l'*analisi* che produce le proposte operative. Cambiare fornitore non cambia il
+modello — `AGENT_ANALYST_MODEL` resta la manopola del modello.
+
+> ℹ️ **Il preventivo dell'analisi cambia natura, e lo dichiara.** Con Claude il
+> primo input è **contato esattamente** (esiste un endpoint gratuito che lo fa).
+> Gli altri fornitori non offrono un conteggio equivalente, quindi il preventivo
+> usa una **stima** calcolata localmente sul testo che verrebbe spedito: il
+> modale la etichetta come stimata invece di presentarla come una misura, perché
+> è il numero su cui decidi se spendere. Per lo stesso motivo, con quei fornitori
+> l'indicatore del *prompt caching* è spento: in quel formato i punti di cache
+> non sono controllabili dal client, e mostrarlo attivo sarebbe falso.
+
 > ⚠️ **Se cambi fornitore, il modello va provato prima di fidarsi.** In questo
 > sistema ogni azione passa da una chiamata di strumento controllata, quindi un
 > modello che gestisce male quel formato non è un problema di qualità delle
@@ -555,6 +571,7 @@ quelle chiavi è obbligatoria: senza, tutto funziona come prima.
 > qualunque fornitore — il costo viene calcolato sul listino di *quel* modello,
 > non su quello di Claude — ma la bontà del modello in sé va verificata sul
 > campo, e i modelli di default non sono stati cambiati proprio per questo.
+> Vale a maggior ragione per l'Analyst, che produce le proposte operative.
 
 > 💡 **Cosa questa versione non fa.** Non propone azioni e non parla: sono state
 > escluse deliberatamente da questa iterazione. Prima il consulente deve dimostrare

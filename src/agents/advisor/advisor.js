@@ -331,11 +331,15 @@ class Advisor {
     this._busy.add(sessionId);
     const model = this.cfg.advisorModel;
     const maxIterations = this.cfg.advisorMaxIterations || 5;
+    const maxToolCalls = this.cfg.advisorMaxToolCalls || 12;
     const acc = emptyUsage();
     const toolsUsed = [];
     const deniedTools = [];
     let iterations = 0;
     let reply = null;
+    // DEBT-02 — contabilità delle tool-call del turno, separata dalle iterazioni.
+    let toolCalls = 0;
+    let skippedTools = [];
 
     try {
       db.insertChatMessage({ sessionId, role: 'user', content: text });
@@ -377,9 +381,17 @@ class Advisor {
 
         if (res.stopReason === 'tool_use') {
           apiMessages.push(provider.assistantTurnFromResult(res));
+          const requested = res.content.filter(b => b.type === 'tool_use');
+          if (!requested.length) throw new Error('Il modello ha chiesto strumenti senza indicarne nessuno');
           const results = [];
-          for (const block of res.content) {
-            if (block.type !== 'tool_use') continue;
+          for (const block of requested) {
+            // DEBT-02 — il cap si applica PRIMA di eseguire, non dopo: lo scopo è
+            // non pagare il lavoro locale, quindi contare a posteriori non
+            // servirebbe a nulla. Contano anche gli strumenti fuori allowlist:
+            // sono comunque tentativi di tool-call, e non conteggiarli lascerebbe
+            // un modo di consumare iterazioni con nomi inventati.
+            if (toolCalls >= maxToolCalls) { skippedTools.push(block.name); continue; }
+            toolCalls++;
             if (isAllowedTool(block.name)) toolsUsed.push(block.name);
             else deniedTools.push(block.name);
             const out = await runAdvisorTool(block.name, block.input || {}, { sessionId })
@@ -388,7 +400,10 @@ class Advisor {
             db.insertChatMessage({ sessionId, role: 'tool', content: payload, toolName: block.name });
             results.push({ type: 'tool_result', tool_use_id: block.id, content: payload });
           }
-          if (!results.length) throw new Error('Il modello ha chiesto strumenti senza indicarne nessuno');
+          // Cap raggiunto: il turno si ferma qui. Non si rimandano i risultati
+          // parziali al modello — sarebbe un'altra iterazione da pagare per una
+          // risposta che comunque non potrebbe usare gli strumenti mancanti.
+          if (skippedTools.length) break;
           apiMessages.push({ role: 'user', content: results });
           continue;
         }
@@ -400,7 +415,14 @@ class Advisor {
       const usage = summarizeUsage(model, acc);
       this._addSpend(usage.cost);
 
-      if (!reply) {
+      if (!reply && skippedTools.length) {
+        // DEBT-02 — fermato dal cap di tool-call, non da quello di iterazioni: sono
+        // due limiti diversi e meritano due messaggi diversi, altrimenti chi legge
+        // non sa quale manopola alzare (`AGENT_ADVISOR_MAX_TOOL_CALLS` vs
+        // `AGENT_ADVISOR_MAX_ITERATIONS`).
+        logger.warn(`💬 Advisor: cap di ${maxToolCalls} tool-call per turno raggiunto (sessione ${sessionId}, ${toolCalls} eseguite, ${skippedTools.length} non eseguite: ${skippedTools.join(', ')}, $${usage.cost.toFixed(4)} spesi)`);
+        reply = `Mi sono fermato al limite di ${maxToolCalls} consultazioni di dati per un singolo turno (ne servivano altre ${skippedTools.length}). Ho letto: ${toolsUsed.join(', ') || 'nessuno strumento'}. Il costo di questo turno è stato comunque sostenuto. Restringi la domanda (per esempio un solo mercato per volta) oppure alza il limite con AGENT_ADVISOR_MAX_TOOL_CALLS se questo tipo di analisi ti serve spesso.`;
+      } else if (!reply) {
         // Cap di iterazioni esaurito senza risposta: il turno è costato per intero
         // e non produce nulla. Va detto all'utente con queste parole, non lasciato
         // come una risposta vuota che sembra un problema di rete.
@@ -421,13 +443,18 @@ class Advisor {
       db.insertAudit('advisor', 'chat.turn', {
         sessionId, costUsd: Number(usage.cost.toFixed(6)), toolsUsed,
         deniedTools: deniedTools.length ? deniedTools : undefined,
-        model, iterations, tokensIn: usage.tokensIn, tokensOut: usage.tokensOut
+        model, iterations, tokensIn: usage.tokensIn, tokensOut: usage.tokensOut,
+        // DEBT-02 — il conteggio è sempre in audit; le non-eseguite solo quando il
+        // cap è scattato, così un turno normale non porta rumore.
+        toolCalls,
+        toolCapHit: skippedTools.length ? true : undefined,
+        skippedTools: skippedTools.length ? skippedTools : undefined
       });
 
       this.lastTurnAt = Date.now();
       this.lastError = null;
       const budgetAfter = this.budget();
-      logger.info(`💬 Advisor: turno completato — ${model} · $${usage.cost.toFixed(4)} · ${iterations} iter · strumenti: ${toolsUsed.join(', ') || '—'}`);
+      logger.info(`💬 Advisor: turno completato — ${model} · $${usage.cost.toFixed(4)} · ${iterations} iter · ${toolCalls} tool-call · strumenti: ${toolsUsed.join(', ') || '—'}`);
 
       return {
         messageId: assistantMsgId,
@@ -440,6 +467,8 @@ class Advisor {
         tokensOut: usage.tokensOut,
         model,
         iterations,
+        toolCalls,
+        toolCapHit: skippedTools.length > 0,
         droppedTurns: built.droppedTurns
       };
     } catch (e) {
@@ -490,6 +519,7 @@ class Advisor {
       hasApiKey: !!process.env.ANTHROPIC_API_KEY,
       windowTurns: this.windowTurns,
       maxIterations: this.cfg.advisorMaxIterations || 5,
+      maxToolCalls: this.cfg.advisorMaxToolCalls || 12,
       retentionDays: this.retentionDays,
       budget: b,
       writeToolsAvailable: 0, // fase 1: nessuno strumento di scrittura, per costruzione

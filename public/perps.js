@@ -2088,6 +2088,13 @@ class PerpsApp {
     set('estModel', est.model);
     set('estCache', est.cachingEnabled ? '⚡ prompt caching attivo' : '');
     set('estFirstInput', tok(est.firstInput));
+    // LLM-04: dice se quel numero è un conteggio esatto o una stima. `countTokens`
+    // esiste solo su Anthropic; sugli altri fornitori il primo input è un'euristica
+    // locale e presentarla come misura sarebbe un dato disonesto proprio nel modale
+    // in cui si decide se spendere. `firstInputExact === false` è il caso stimato;
+    // se il campo manca (risposta di un server più vecchio) non si afferma nulla.
+    set('estFirstInputKind', est.firstInputExact === false ? '(stimati: questo fornitore non offre un conteggio esatto)'
+      : est.firstInputExact === true ? '(misurati esattamente)' : '');
     set('estMaxIter', est.maxIterations);
     set('estSpent', this._fmtCost(est.spentTotal));
 

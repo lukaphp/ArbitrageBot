@@ -770,7 +770,12 @@
                 </table>
 
                 <p class="est-note">
-                    Solo il primo input è misurato esattamente (<span id="estFirstInput">—</span> token).
+                    <!-- LLM-04: "misurato esattamente" non è più vero per ogni fornitore —
+                         countTokens è un endpoint Anthropic. Il qualificatore lo scrive
+                         perps.js in base a `firstInputExact`, invece di essere asserito qui
+                         in modo fisso: un preventivo che si dichiara esatto quando è stimato
+                         è un dato disonesto nel modale che decide una spesa. -->
+                    Primo input: <span id="estFirstInput">—</span> token <span id="estFirstInputKind"></span>.
                     Il costo finale dipende da quante iterazioni il modello decide di fare
                     (massimo <span id="estMaxIter">—</span>) e da quanto scrive.
                 </p>

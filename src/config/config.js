@@ -227,6 +227,18 @@ export const HYPERLIQUID_CONFIG = {
     // quello dell'Analyst (10) perché in chat il transcript si rispedisce a ogni
     // iterazione e il costo cresce in fretta.
     advisorMaxIterations: parseInt(process.env.AGENT_ADVISOR_MAX_ITERATIONS) || 5,
+    // DEBT-02 — tetto sul NUMERO TOTALE di tool-call in un turno, distinto da
+    // `advisorMaxIterations`. Non è una ridondanza: il cap di iterazioni limita i
+    // giri di andata/ritorno col modello, ma dentro UN singolo giro il modello può
+    // chiedere quanti strumenti vuole (il loop su `res.content` li esegue tutti),
+    // quindi con 5 iterazioni e 15 strumenti in allowlist il massimo teorico è 75
+    // esecuzioni. Quelle chiamate non costano token in proporzione — sono
+    // "gratuite" per il budget monetario di ADV-03 — ma costano CPU e latenza
+    // locali: `run_backtest`, `scan_markets`, `ml_predict` e `get_candles` sono
+    // tutt'altro che gratis sulla macchina. Segnalato da Annie in review Sprint 4.
+    // Default 12: lascia spazio a un turno legittimo (tipicamente 1-3 strumenti
+    // per iterazione) e taglia solo la coda patologica.
+    advisorMaxToolCalls: parseInt(process.env.AGENT_ADVISOR_MAX_TOOL_CALLS) || 12,
     // ADV-03 — budget mensile DI DEFAULT, il profilo più stretto dello spike
     // §4.3. Il valore effettivo vive in `settings` e si modifica SOLO da Telegram
     // (conferma a due passi): nessuna rotta web lo tocca.
@@ -299,7 +311,14 @@ export const HYPERLIQUID_CONFIG = {
     // Fornitore usato dal consulente conversazionale: 'anthropic' (default),
     // 'deepseek' o 'openrouter'. Cambiare questo NON cambia il modello di
     // default: `AGENT_ADVISOR_MODEL` resta la manopola del modello.
-    advisorProvider: process.env.AGENT_ADVISOR_PROVIDER || 'anthropic'
+    advisorProvider: process.env.AGENT_ADVISOR_PROVIDER || 'anthropic',
+    // LLM-02/03 — stessa manopola per l'Analyst, simmetrica in nome, valori
+    // ammessi e default. Sono DUE variabili e non una perché i due agenti hanno
+    // già modelli separati per lo stesso motivo (compiti diversi): poter mandare
+    // la chat su un fornitore economico senza spostarci anche l'analisi che
+    // produce le proposte operative. Anche qui cambiare fornitore NON cambia il
+    // modello: `AGENT_ANALYST_MODEL` resta la manopola del modello.
+    analystProvider: process.env.AGENT_ANALYST_PROVIDER || 'anthropic'
   }
 };
 

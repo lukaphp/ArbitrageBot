@@ -205,6 +205,26 @@ AGENT_SKIP_IF_PENDING=1            # salta la run periodica se ci sono già N pr
                                    # non decise (0 = disattivato). Misurato: −33% di
                                    # spesa sullo storico, vedi MANUAL.md §12
 
+AGENT_ANALYST_PROVIDER=anthropic   # fornitore LLM dell'Analyst: anthropic (default),
+                                   # deepseek o openrouter. Simmetrica ad
+                                   # AGENT_ADVISOR_PROVIDER e indipendente da essa: la
+                                   # chat può stare su un fornitore economico senza
+                                   # spostarci anche l'analisi che produce le proposte.
+                                   # Non cambia il modello (AGENT_ANALYST_MODEL) e non
+                                   # richiede chiavi nuove: senza, tutto resta Anthropic.
+                                   # Sui fornitori senza countTokens il preventivo
+                                   # dell'analisi diventa una STIMA, ed è dichiarata tale
+
+AGENT_ADVISOR_MAX_ITERATIONS=5     # giri di andata/ritorno col modello in un turno di chat
+AGENT_ADVISOR_MAX_TOOL_CALLS=12    # tetto sul NUMERO TOTALE di consultazioni di dati in un
+                                   # turno di chat. Distinto dal precedente: dentro UN solo
+                                   # giro il modello può chiedere più strumenti insieme, e
+                                   # alcuni (run_backtest, scan_markets, ml_predict) costano
+                                   # CPU locale sulla stessa macchina che fa girare i bot —
+                                   # un costo che il budget mensile in $ non vede, perché
+                                   # conta i token. Raggiunto il tetto il turno si ferma con
+                                   # un messaggio esplicito, non con un errore
+
 ```
 
 > ⚠️ **`APP_PASSWORD_HASH` non va messa in un file letto da `env_file:` di Docker

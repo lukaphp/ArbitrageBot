@@ -84,6 +84,60 @@ export function simulateRun({
   return { tokensIn: 0, cacheWrite, cacheRead, tokensOut, promptTokens: cacheWrite + cacheRead, iterations };
 }
 
+/** Testo piatto da un blocco `system` del formato interno (stringa o blocchi). */
+function textOfBlocks(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  const arr = Array.isArray(value) ? value : [value];
+  return arr.map(b => (typeof b === 'string' ? b : (b?.text || ''))).join('\n');
+}
+
+/**
+ * LLM-04 — STIMA (non misura) dei token di prompt di una richiesta.
+ *
+ * Perché serve: `messages.countTokens` è un endpoint Anthropic, gratuito ed
+ * esatto, che nel dialetto compatibile OpenAI non ha equivalente. Senza
+ * un'alternativa, `analyst.estimate()` non può dare un preventivo su
+ * DeepSeek/OpenRouter — e "preventivo prima di spendere" è una regola del
+ * progetto, non un optional.
+ *
+ * ⚠️ È un'EURISTICA, e va trattata come tale da chi la consuma: conta i
+ * caratteri di ciò che viene effettivamente spedito e divide per
+ * `CHARS_PER_TOKEN`. Non conosce il tokenizzatore del fornitore, quindi lo
+ * scostamento tipico è di qualche punto percentuale e può essere maggiore su
+ * testo molto denso di simboli (JSON, numeri) dove i token sono più corti della
+ * media. Per questo `analyst.estimate()` la dichiara (`firstInputExact: false`)
+ * invece di presentarla come un conteggio.
+ *
+ * Le definizioni degli strumenti si contano SERIALIZZATE: `TOOL_DEFS` viaggia
+ * nella richiesta come JSON (nomi, descrizioni e schemi), ed è la parte più
+ * grossa del prompt di una run dell'Analyst — ometterla darebbe una stima
+ * sbagliata di un ordine di grandezza, cioè un preventivo inutile.
+ */
+export function estimatePromptTokens({ system, tools, messages } = {}) {
+  let chars = textOfBlocks(system).length;
+
+  for (const t of tools || []) {
+    chars += JSON.stringify(t || {}).length;
+  }
+
+  for (const m of messages || []) {
+    const content = m?.content;
+    if (typeof content === 'string') { chars += content.length; continue; }
+    for (const block of Array.isArray(content) ? content : []) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'text') chars += String(block.text || '').length;
+      // Un `tool_result` viaggia col suo payload; un `tool_use` con gli argomenti
+      // serializzati. Entrambi sono prompt pagato, non metadati da ignorare.
+      else if (block.type === 'tool_result') chars += String(typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '')).length;
+      else if (block.type === 'tool_use') chars += JSON.stringify(block.input ?? {}).length + String(block.name || '').length;
+      else chars += JSON.stringify(block).length;
+    }
+  }
+
+  return Math.ceil(chars / CHARS_PER_TOKEN);
+}
+
 // Modelli già segnalati come privi di listino: si avvisa una volta sola, non a
 // ogni turno (una riga di log per chiamata seppellirebbe l'avviso invece di darlo).
 const warnedUnpriced = new Set();
@@ -191,5 +245,5 @@ export function summarizeUsage(model, acc) {
 export default {
   CACHE_WRITE_MULT, CACHE_READ_MULT, TOOL_RESULT_CHAR_CAP, TOOL_RESULT_TOKENS, CHARS_PER_TOKEN,
   moveCacheBreakpoint, simulateRun, priceOf, resolvePricing, hasPricing,
-  accumulateUsage, emptyUsage, summarizeUsage
+  accumulateUsage, emptyUsage, summarizeUsage, estimatePromptTokens
 };

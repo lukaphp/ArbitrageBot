@@ -1,22 +1,34 @@
 /**
- * ANALYST AGENT (Claude, advisory)
- * ================================
+ * ANALYST AGENT (advisory)
+ * ========================
  *
  * Gira periodicamente: raccoglie evidenze con strumenti read-only, ragiona con
- * Claude e produce PROPOSTE che finiscono nella coda di approvazione. Non esegue
- * mai nulla.
+ * un modello LLM e produce PROPOSTE che finiscono nella coda di approvazione.
+ * Non esegue mai nulla.
  *
  * Supervisionato dal runtime (tick in try/catch). Rispetta un cap di run/ora per
  * controllare costi e latenza.
+ *
+ * LLM-02/03 — parla col modello attraverso `providers/`, non più con l'SDK
+ * Anthropic diretto: `AGENT_ANALYST_PROVIDER` sceglie il fornitore, esattamente
+ * come `AGENT_ADVISOR_PROVIDER` fa per il consulente. Il formato canonico interno
+ * resta quello Anthropic-like (blocchi `text`/`tool_use`/`tool_result`, system
+ * con `cache_control`), quindi il loop di tool-use qui sotto non è cambiato: è
+ * l'adattatore a tradurre per i fornitori che parlano il dialetto OpenAI. Il
+ * default resta `anthropic` e nessuna chiave nuova è obbligatoria.
  */
 
 import { getClient } from './client.js';
+import { getProvider, ProviderError } from '../providers/index.js';
 import { TOOL_DEFS, runTool } from './tools.js';
 import { SYSTEM_PROMPT } from './prompts.js';
 import proposals from '../proposals.js';
 // ADV-01: contabilità token/costo e prompt caching condivisi con il consulente
 // conversazionale. Stessa matematica, un solo posto dove vive (vedi usage.js).
-import { priceOf, simulateRun, moveCacheBreakpoint, TOOL_RESULT_CHAR_CAP, TOOL_RESULT_TOKENS } from '../usage.js';
+import {
+  priceOf, simulateRun, moveCacheBreakpoint, estimatePromptTokens,
+  TOOL_RESULT_CHAR_CAP, TOOL_RESULT_TOKENS
+} from '../usage.js';
 import db from '../../db/database.js';
 import { HYPERLIQUID_CONFIG } from '../../config/config.js';
 import logger from '../../utils/logger.js';
@@ -101,6 +113,47 @@ class Analyst {
 
   get cfg() { return HYPERLIQUID_CONFIG.agents; }
   get intervalMs() { return (this.cfg.cadenceMin || 30) * 60 * 1000; }
+  /** LLM-02 — fornitore configurato, simmetrico a `advisor.providerName`. */
+  get providerName() { return this.cfg.analystProvider || 'anthropic'; }
+
+  /**
+   * Il fornitore con cui parlare, dietro l'interfaccia comune.
+   *
+   * Non memoizzato, per la stessa ragione dell'advisor: `AGENT_ANALYST_PROVIDER`
+   * e la presenza delle chiavi possono cambiare tra un riavvio e l'altro, e una
+   * cache qui sarebbe uno stato in più da invalidare per niente. Il modello è un
+   * parametro perché `run()`/`estimate()` accettano un override per singola run
+   * (`opts.model`), quindi non è sempre quello di configurazione.
+   */
+  _provider(model) {
+    return getProvider({ provider: this.providerName, model });
+  }
+
+  /**
+   * Il fornitore è utilizzabile? Ritorna un MOTIVO leggibile, mai un fallback
+   * silenzioso su Anthropic: cambiare fornitore sotto il naso di chi ne ha
+   * chiesto un altro rende impossibile capire su cosa si sta spendendo.
+   *
+   * Il percorso Anthropic conserva il messaggio storico parola per parola
+   * (`ANTHROPIC_API_KEY mancante`): è quello che la UI mostra già e cambiarlo
+   * sarebbe una regressione osservabile a fronte di zero guadagni.
+   */
+  _providerAvailability(model) {
+    if (this.providerName === 'anthropic') {
+      if (!getClient()) return { ok: false, error: 'ANTHROPIC_API_KEY mancante' };
+      return { ok: true };
+    }
+    try {
+      const provider = this._provider(model);
+      if (!provider.isAvailable()) {
+        return { ok: false, error: provider.unavailableReason(), code: 'provider_unavailable' };
+      }
+      return { ok: true, provider };
+    } catch (e) {
+      const code = e instanceof ProviderError ? `provider_${e.code}` : 'provider_error';
+      return { ok: false, error: e.message, code };
+    }
+  }
 
   /** Pausa/stop persistiti in settings: sopravvivono a un riavvio del processo. */
   isPaused() {
@@ -207,10 +260,12 @@ class Analyst {
       this.lastError = 'Analyst in pausa';
       return { error: this.lastError, paused: true };
     }
-    const anthropic = getClient();
-    if (!anthropic) { this.lastError = 'ANTHROPIC_API_KEY mancante'; return { error: this.lastError }; }
-
     const model = opts.model || this.cfg.analystModel;
+    // LLM-02: il controllo di disponibilità sta PRIMA di contare la run nel cap
+    // orario e di marcare `_busy`, esattamente com'era prima con getClient().
+    const avail = this._providerAvailability(model);
+    if (!avail.ok) { this.lastError = avail.error; return { error: this.lastError, code: avail.code }; }
+
     const maxProposals = Math.min(opts.maxProposals || 5, 8);
 
     this.runTimestamps.push(Date.now());
@@ -231,26 +286,30 @@ class Analyst {
     let iterations = 0;
     try {
       let final = null;
+      // LLM-02: da qui in giù il codice non sa con quale fornitore sta parlando.
+      const provider = avail.provider || this._provider(model);
       for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
         if (controller.signal.aborted) throw new Error('Run annullata (stop)');
         iterations = i + 1;
         moveCacheBreakpoint(messages);
-        const res = await anthropic.messages.create({
-          model,
-          max_tokens: 3000,
+        const res = await provider.createChatCompletion({
           system: CACHED_SYSTEM,
+          messages,
           tools: TOOL_DEFS,
-          messages
-        }, { signal: controller.signal });
+          maxTokens: MAX_TOKENS_PER_CALL,
+          signal: controller.signal
+        });
         // `input_tokens` è il solo residuo NON cachato: il totale del prompt è
-        // input + cache_creation + cache_read.
+        // input + cache_creation + cache_read. L'adattatore compatibile OpenAI
+        // restituisce l'uso già in questa forma (vedi `normalizeUsage`), quindi
+        // il conteggio qui non dipende dal fornitore.
         tokensIn += res.usage?.input_tokens || 0;
         cacheWrite += res.usage?.cache_creation_input_tokens || 0;
         cacheRead += res.usage?.cache_read_input_tokens || 0;
         tokensOut += res.usage?.output_tokens || 0;
 
-        if (res.stop_reason === 'tool_use') {
-          messages.push({ role: 'assistant', content: res.content });
+        if (res.stopReason === 'tool_use') {
+          messages.push(provider.assistantTurnFromResult(res));
           const toolResults = [];
           for (const block of res.content) {
             if (block.type === 'tool_use') {
@@ -293,11 +352,16 @@ class Analyst {
       this.lastProposalCount = created;
       db.insertAudit('analyst', 'run.completed', {
         summary: this.lastSummary, proposals: created, model,
+        // LLM-02: quale fornitore ha prodotto queste proposte. Senza, con più
+        // fornitori configurabili non si potrebbe più risalire dall'esito alla
+        // fonte — e il confronto di qualità tra fornitori è proprio il motivo per
+        // cui l'astrazione esiste.
+        provider: provider.name,
         tokensIn: promptTokens, tokensOut, cacheWrite, cacheRead, iterations,
         cost: Number(cost.toFixed(5))
       });
       logger.info(
-        `🧠 Analyst: run completato — ${created} proposte · ${model} · $${cost.toFixed(4)} ` +
+        `🧠 Analyst: run completato — ${created} proposte · ${provider.name}/${model} · $${cost.toFixed(4)} ` +
         `(${promptTokens}+${tokensOut} tok · ${iterations} iter · cache ${(cacheHitRate * 100).toFixed(0)}% riletta)`,
         { summary: this.lastSummary }
       );
@@ -323,35 +387,81 @@ class Analyst {
   }
 
   /**
-   * Preventivo pre-run. Il primo input è misurato esattamente con countTokens
-   * (chiamata gratuita, nessuna inferenza); il resto è un intervallo perché
-   * numero di iterazioni e lunghezza delle risposte li decide il modello.
+   * Preventivo pre-run. Il resto è un intervallo perché numero di iterazioni e
+   * lunghezza delle risposte li decide il modello.
+   *
+   * LLM-04 — come si ottiene il primo input dipende dal fornitore:
+   *
+   *  - **Anthropic**: `messages.countTokens`, che è ESATTO e GRATUITO. Non viene
+   *    sostituito con una stima: rimpiazzare una misura esatta a costo zero con
+   *    un'approssimazione sarebbe un peggioramento senza compenso.
+   *  - **Altri fornitori**: non esiste un equivalente di `countTokens` nel
+   *    dialetto compatibile OpenAI, quindi si usa l'euristica di
+   *    `estimatePromptTokens`, che è locale e istantanea (nessuna rete: il
+   *    preventivo non rallenta e non può fallire per un fornitore raggiungibile
+   *    a fatica). Il risultato è DICHIARATO come stima via `firstInputExact:
+   *    false` e `estimateMethod`, così nessun consumatore può confonderla con un
+   *    conteggio.
+   *
+   * Sul percorso Anthropic l'euristica viene calcolata comunque — è aritmetica
+   * locale, costa nulla — e riportata in `heuristicFirstInput`/`heuristicError`
+   * accanto al valore esatto: è il modo di far accumulare al sistema la
+   * calibrazione dell'euristica sui prompt VERI, senza spendere un centesimo e
+   * senza dover credere a una taratura fatta a occhio.
    */
   async estimate(opts = {}) {
-    const anthropic = getClient();
-    if (!anthropic) return { error: 'ANTHROPIC_API_KEY mancante' };
-
     const model = opts.model || this.cfg.analystModel;
+    const avail = this._providerAvailability(model);
+    if (!avail.ok) return { error: avail.error, code: avail.code };
+
     const maxProposals = Math.min(opts.maxProposals || 5, 8);
     const briefing = buildBriefing({ ...opts, maxProposals });
+    const messages = [{ role: 'user', content: [{ type: 'text', text: briefing }] }];
 
-    let counted;
-    try {
-      counted = await anthropic.messages.countTokens({
-        model,
-        system: CACHED_SYSTEM,
-        tools: TOOL_DEFS,
-        messages: [{ role: 'user', content: [{ type: 'text', text: briefing }] }]
-      });
-    } catch (e) {
-      // Un 401 qui non è un problema del preventivo: la stessa chiave serve per
-      // l'analisi, quindi lanciarla comunque fallirebbe allo stesso modo.
-      if (e?.status === 401) {
-        return { error: 'Chiave API Anthropic non valida o revocata: l\'analisi non può partire. Genera una nuova chiave su console.anthropic.com, aggiorna ANTHROPIC_API_KEY nel file .env e riavvia il server.', code: 'auth_error' };
+    // Sempre calcolata: sul percorso Anthropic serve come termine di confronto,
+    // sugli altri è il preventivo stesso.
+    const heuristicFirstInput = estimatePromptTokens({ system: CACHED_SYSTEM, tools: TOOL_DEFS, messages });
+
+    let firstInput = heuristicFirstInput;
+    let firstInputExact = false;
+    let estimateMethod = 'heuristic';
+    let heuristicError = null;
+
+    if (this.providerName === 'anthropic') {
+      const anthropic = getClient();
+      let counted;
+      try {
+        counted = await anthropic.messages.countTokens({
+          model,
+          system: CACHED_SYSTEM,
+          tools: TOOL_DEFS,
+          messages
+        });
+      } catch (e) {
+        // Un 401 qui non è un problema del preventivo: la stessa chiave serve per
+        // l'analisi, quindi lanciarla comunque fallirebbe allo stesso modo.
+        if (e?.status === 401) {
+          return { error: 'Chiave API Anthropic non valida o revocata: l\'analisi non può partire. Genera una nuova chiave su console.anthropic.com, aggiorna ANTHROPIC_API_KEY nel file .env e riavvia il server.', code: 'auth_error' };
+        }
+        throw e;
       }
-      throw e;
+      firstInput = counted.input_tokens;
+      firstInputExact = true;
+      estimateMethod = 'countTokens';
+      // Scostamento relativo dell'euristica rispetto alla misura esatta, con il
+      // segno: positivo = l'euristica sovrastima. Loggato solo quando è grosso,
+      // perché è l'unico caso che richieda di ritarare qualcosa.
+      if (firstInput > 0) {
+        heuristicError = (heuristicFirstInput - firstInput) / firstInput;
+        if (Math.abs(heuristicError) > 0.25) {
+          logger.warn(
+            `🧠 Analyst: l'euristica di stima token è fuori del ${(heuristicError * 100).toFixed(0)}% ` +
+            `sul prompt reale (stimati ${heuristicFirstInput}, esatti ${firstInput}). ` +
+            'Sui fornitori senza countTokens il preventivo eredita questo scostamento.'
+          );
+        }
+      }
     }
-    const firstInput = counted.input_tokens;
 
     const scenarios = {
       // Nessun tool: il modello risponde subito. È il pavimento reale.
@@ -363,9 +473,21 @@ class Analyst {
 
     return {
       model,
+      provider: this.providerName,
       firstInput,
+      // LLM-04 — il preventivo dice SEMPRE come è stato ottenuto il numero. Un
+      // consumatore che mostra `firstInput` senza guardare questi campi mostra
+      // una stima come se fosse un conteggio.
+      firstInputExact,
+      estimateMethod,
+      heuristicFirstInput,
+      heuristicError,
       maxIterations: MAX_TOOL_ITERATIONS,
-      cachingEnabled: true,
+      // Era `true` fisso. Con più fornitori è falso: nel dialetto compatibile
+      // OpenAI i breakpoint di cache non sono controllabili dal client (li
+      // ignora `openaiCompatible.js`), quindi dichiarare il caching attivo lì
+      // sarebbe un dato disonesto in un modale che serve a decidere una spesa.
+      cachingEnabled: this.providerName === 'anthropic',
       spentTotal: this.costTotal(),
       scenarios
     };
@@ -415,6 +537,8 @@ class Analyst {
       paused: this.isPaused(),
       busy: this._busy,
       model: this.cfg.analystModel,
+      // LLM-02: simmetrico a `advisor.status().provider`.
+      provider: this.providerName,
       hasApiKey: !!process.env.ANTHROPIC_API_KEY,
       runsThisHour: this.runTimestamps.length,
       maxCallsPerHour: this.cfg.maxCallsPerHour,

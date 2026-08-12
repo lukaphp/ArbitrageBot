@@ -19,22 +19,41 @@ jobs:
       #
       # ── Da dove viene questa lista (verificata il 2026-08-12) ──────────────────────
       # Non è la lista generica "npm + GitHub": è l'unione degli endpoint OSSERVATI su
-      # 31 run in audit dal 9 al 12 agosto, tutti conclusi success. Fonte: il passo
-      # `Post Harden Runner` riversa nel log del job il registro dell'agente, con righe
+      # 31 run in audit dal 9 al 12 agosto, PIÙ due scoperti solo dal primo run reale in
+      # block (vedi "PERCHÉ L'AUDIT NON BASTAVA"). Fonte: il passo `Post Harden Runner`
+      # riversa nel log del job il registro dell'agente, con righe
       # `endpoint called ip address:port <ip>:<porta>, domain: <host>, process: <proc>`.
       # Il campo `process` è la ragione per cui ho letto il log invece della pagina
       # insights: è quello che distingue il traffico DEL JOB da quello del runner.
       # Per rileggerli:
-      #   gh run view <run-id> --log | grep "endpoint called"
+      #   gh run view <run-id> --log | grep -E "endpoint called|domain not allowed"
       #
       # Ogni voce, con il processo che l'ha chiamata e il passo che la causa:
-      #   github.com                        git-remote-http   Checkout (fetch del repo)
-      #   registry.npmjs.org                node              npm ci, npm rebuild, npm audit
-      #   tuf-repo-cdn.sigstore.dev         node              npm audit signatures (radice TUF)
-      #   results-receiver.actions.…        node/Runner.Worker servizio results di Actions
-      #   productionresultssa12.blob.…      node              cache npm di setup-node
-      #   agent.api.stepsecurity.io         (agente)          regole di detection di harden-runner
-      #   prod.app-api.stepsecurity.io      (agente)          telemetria di harden-runner
+      #   github.com                       git-remote-http    Checkout (fetch del repo)
+      #   registry.npmjs.org               node               npm ci, npm rebuild, npm audit
+      #   tuf-repo-cdn.sigstore.dev        node               npm audit signatures (radice TUF)
+      #   results-receiver.actions.…       node/Runner.Worker servizio results di Actions
+      #   release-assets.githubusercontent prebuild-install   binario precompilato better-sqlite3
+      #   nodejs.org                       node-gyp           header di Node, se la compilazione
+      #                                                       deve partire davvero (fallback)
+      #   agent.api.stepsecurity.io        (agente)           regole di detection di harden-runner
+      #   prod.app-api.stepsecurity.io     (agente)           telemetria di harden-runner
+      #
+      # ── PERCHÉ L'AUDIT NON BASTAVA, e va saputo prima di fidarsi di dati di audit ──
+      # I 31 run in audit NON hanno mai mostrato `release-assets.githubusercontent.com`
+      # né `nodejs.org`, e il primo run in block è fallito esattamente su quei due, al
+      # passo `rebuild:native`. Il motivo NON è che l'osservazione fosse troppo corta:
+      # tutti e 31 girarono sullo stesso branch con la cache npm CALDA. `prebuild-install`
+      # tiene il binario già compilato in `~/.npm/_prebuilds`, che sta DENTRO la directory
+      # che `setup-node` mette in cache con `cache: 'npm'` — quindi trovava il .node in
+      # locale e non usciva in rete. Al primo run con cache fredda ("npm cache is not
+      # found", perché le cache di Actions non sono condivise tra branch paralleli)
+      # `prebuild-install` è andato in rete, è stato bloccato, e il fallback
+      # `node-gyp rebuild` ha chiesto gli header a nodejs.org, bloccato anche lui.
+      # Lezione riutilizzabile: un audit su cache calda descrive UN SOLO cammino di rete.
+      # Qui non era un rischio teorico — la cache si invalida a ogni cambio di
+      # package-lock.json, quindi la CI si sarebbe rotta al primo aggiornamento di
+      # dipendenze, cioè lontano da questa modifica e in modo difficile da collegare.
       #
       # Le due voci stepsecurity.io sono ESPLICITE anche se nei log di audit compaiono
       # solo come `domain resolved` e mai come `endpoint called` — cioè l'agente pare
@@ -48,26 +67,32 @@ jobs:
       #   chiamati dal processo `provjobd` (il demone di provisioning della VM, non il
       #   job). Il suffisso di regione ruota — ne ho visti 4 diversi su 31 run — quindi
       #   elencarli sarebbe inseguire un bersaglio mobile per traffico che non è nostro.
-      # - nodejs.org / objects.githubusercontent.com: `setup-node` trova sempre Node 22
-      #   nella tool cache dell'immagine ("Found in cache @ /opt/hostedtoolcache/node/…"),
-      #   quindi non scarica nulla. Se un domani l'immagine del runner non avesse più la
-      #   22.x precaricata, il primo sintomo sarebbe un blocco QUI: è il posto da guardare.
+      #   Verificato sul run in block: non compaiono tra i `domain not allowed`.
+      # - productionresultssaNN.blob.core.windows.net (cache di Actions): NON va scritto
+      #   a mano. Il numero ruota davvero — misurato sa12 in tutti e 31 i run di audit e
+      #   sa10 al primo run in block — e harden-runner risolve da sé l'host corrente e lo
+      #   aggiunge a runtime ("Adding cacheHost: … to allowed-endpoints"; nel log in block
+      #   si legge sa10 in `Allowed domains:` senza che sia in questa lista). Metterlo
+      #   qui significherebbe pubblicare un valore già sbagliato al prossimo giro.
+      # - codeload.github.com e actions-results-receiver-production.githubapp.com: risolti
+      #   via DNS ma mai contattati, né in audit né in block. Un DNS senza connect non è
+      #   un endpoint da consentire.
       #
       # DUE COMPORTAMENTI DI harden-runner DA SAPERE PRIMA DI TOCCARE QUESTA LISTA
-      # (letti in src/setup.ts allo SHA pinnato, non dedotti):
-      # 1. In block mode l'action risolve da sé l'host corrente della cache di Actions e
-      #    lo AGGIUNGE all'allowlist a runtime ("Adding cacheHost: … to allowed-endpoints").
-      #    Il numero in `productionresultssaNN` è quindi coperto anche se GitHub lo ruota;
-      #    la voce qui sotto è quella misurata (sa12 in tutti e 31 i run) e resta come
-      #    documentazione dell'osservazione, non come unica difesa.
+      # (letti in src/setup.ts e src/cache.ts allo SHA pinnato, non dedotti):
+      # 1. L'auto-aggiunta dell'host di cache descritta sopra avviene solo in block mode e
+      #    solo se `isValidEvent()`, che è semplicemente "GITHUB_REF è presente" — vero per
+      #    push e pull_request, cioè per entrambi i trigger di questo workflow.
       # 2. Se quella risoluzione FALLISCE, l'action degrada da sola a `audit`
       #    ("Unable to fetch cacheURL" → "Switching egress-policy to audit mode"). È un
       #    fail-open: il job resta verde ma NON sta più bloccando. Non si nota dal solo
       #    esito del run, va cercato nel log del passo Harden Runner.
       #
-      # Un endpoint bloccato NON fa fallire il job da solo: harden-runner lo registra e
-      # la chiamata fallisce. Quindi "CI verde" non è la prova che la policy sia giusta —
-      # va letto il log in cerca di blocchi, ed è così che è stata chiusa questa storia.
+      # Un endpoint bloccato NON fa fallire il job da solo: harden-runner lo registra come
+      # `domain not allowed` e la chiamata fallisce — qui è fallita fino a rompere lo step,
+      # ma un blocco su una chiamata non essenziale resterebbe invisibile. Quindi "CI verde"
+      # non è la prova che la policy sia giusta: va letto il log in cerca di
+      # `domain not allowed`, ed è così che è stata chiusa questa storia.
       - name: Harden Runner
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
         with:
@@ -77,9 +102,10 @@ jobs:
           allowed-endpoints: >
             agent.api.stepsecurity.io:443
             github.com:443
+            nodejs.org:443
             prod.app-api.stepsecurity.io:443
-            productionresultssa12.blob.core.windows.net:443
             registry.npmjs.org:443
+            release-assets.githubusercontent.com:443
             results-receiver.actions.githubusercontent.com:443
             tuf-repo-cdn.sigstore.dev:443
 

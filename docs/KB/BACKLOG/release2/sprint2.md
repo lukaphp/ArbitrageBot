@@ -439,6 +439,8 @@ non un'omissione dello sprint). `npm test`: 648/648 verdi (era 592 a inizio spri
 133 file. Tutto il lavoro implementato in worktree isolati e integrato in `feat/perps-hardening` dopo
 verifica indipendente ad ogni passaggio — nessun commit fatto alla cieca sul branch condiviso.
 
+**Sala Review (narrata, con audio):** [Bruno, Joshua, Maya, Annie e Jordan presentano lo sprint](https://claude.ai/code/artifact/64805c3f-46f1-454a-8422-fd2424478075) — una sezione per persona, con le prove reali dietro ogni storia.
+
 **Le 10 storie di sviluppo, tutte verificate `pass` o `pass con rilievo minore` da Annie**
 (correttezza/test) e riviste da Jordan (rischio): CI-01, DEBT-02, DEBT-03, DEBT-04, DEBT-05, DEBT-06,
 LLM-PRICE-01, **CRIT-05**, LLM-02 (con LLM-03), LLM-04. Le 3 storie operative dirette (OPS-02,

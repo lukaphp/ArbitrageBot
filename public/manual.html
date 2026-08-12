@@ -1310,6 +1310,13 @@
                 </div>
 
                 <div class="alert alert-info">
+                    <span class="alert-icon">🔧</span>
+                    <div>
+                        <strong>Un secondo limite, distinto dal budget.</strong> Un singolo turno può chiedere solo strumenti in sola lettura, mai una scrittura — ma senza un tetto, un turno complesso potrebbe comunque richiederne decine in sequenza (fino a 75 nel caso peggiore), pesando sulla stessa macchina che fa girare i bot anche se il costo in token resta basso. <code>AGENT_ADVISOR_MAX_TOOL_CALLS</code> (default <strong>12</strong>) limita quante chiamate a strumenti un turno può eseguire davvero. Se lo superi, il turno si ferma con un messaggio <strong>diverso</strong> da quello del budget — dice esplicitamente che è il limite di chiamate, non quello di spesa, così sai quale manopola alzare.
+                    </div>
+                </div>
+
+                <div class="alert alert-info">
                     <span class="alert-icon">💡</span>
                     <div>
                         <strong>Cosa questa versione non fa.</strong> Non propone azioni e non parla: sono state escluse deliberatamente da questa iterazione. Prima il consulente deve dimostrare di dire cose vere sui tuoi dati; dargli la possibilità di proporre operazioni è un passo successivo, con le sue verifiche.

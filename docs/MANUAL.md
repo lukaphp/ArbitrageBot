@@ -601,6 +601,15 @@ modo, se il consulente è disattivato lato server (`AGENTS_ENABLED=false`) o man
 la chiave API, il drawer mostra il motivo per esteso e disabilita il campo di
 invio — **il resto del cockpit continua a funzionare normalmente**.
 
+**Un secondo limite, distinto dal budget.** Un singolo turno può chiedere solo
+strumenti in sola lettura, mai una scrittura — ma senza un tetto, un turno
+complesso potrebbe comunque richiederne decine in sequenza (fino a 75 nel caso
+peggiore), pesando sulla stessa macchina che fa girare i bot anche se il costo in
+token resta basso. `AGENT_ADVISOR_MAX_TOOL_CALLS` (default **12**) limita quante
+chiamate a strumenti un turno può eseguire davvero. Se lo superi, il turno si
+ferma con un messaggio **diverso** da quello del budget — dice esplicitamente che
+è il limite di chiamate, non quello di spesa, così sai quale manopola alzare.
+
 **Con quale modello parla.** Di default Claude, tramite `ANTHROPIC_API_KEY`. Il
 consulente può però essere puntato su un altro fornitore compatibile con il
 formato OpenAI — DeepSeek diretto oppure OpenRouter, che fa da gateway verso

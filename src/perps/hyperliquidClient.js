@@ -27,6 +27,9 @@ if (typeof globalThis.require === 'undefined') {
 }
 import agentWallet from './agentWallet.js';
 import execQueue from './execQueue.js';
+// CRIT-05: composizione pura dell'equity. `riskManager` importa solo config e
+// logger, quindi nessun ciclo di import.
+import { composeEquity } from './riskManager.js';
 import { withRetry } from './retry.js';
 import metrics from './metrics.js';
 import db from '../db/database.js';
@@ -343,9 +346,15 @@ class HyperliquidClient {
   /** Stato account normalizzato: equity, margine, posizioni aperte, saldo Spot. */
   async getAccount(masterAddress, network = this.network) {
     const sdk = await this.getReadSdk(network);
-    const [state, spotUsdc] = await Promise.all([
+    const [state, spot] = await Promise.all([
       withRetry(() => sdk.info.perpetuals.getClearinghouseState(masterAddress), { label: 'getAccount' }),
-      this.getSpotUsdc(masterAddress, network).catch(() => 0)
+      // Un fallimento qui NON è silenzioso: senza lo Spot l'equity risulta pari
+      // al solo `accountValue`, cioè sottostimata su account unificato — e su un
+      // percorso che alimenta il sizing va detto, non ingoiato.
+      this.getSpotUsdcState(masterAddress, network).catch(e => {
+        logger.error(`Perps: stato Spot non leggibile per ${masterAddress}: ${e.message}. L'equity di questo giro esclude il collaterale Spot.`);
+        return { total: 0, hold: 0 };
+      })
     ]);
     const ms = state.marginSummary || {};
     const positions = (state.assetPositions || [])
@@ -366,15 +375,27 @@ class HyperliquidClient {
         };
       });
     const accountValue = parseFloat(ms.accountValue || '0');
+    // CRIT-05 — la composizione dell'equity è un calcolo puro e vive in
+    // riskManager (condiviso col backtester e testabile in isolamento): qui c'è
+    // solo l'I/O. Prima era `accountValue + spotUsdc` inline, che su account
+    // unificato contava il margine impegnato due volte.
+    const composed = composeEquity({ accountValue, spotTotal: spot.total, spotHold: spot.hold });
     return {
       accountValue,
       // Equity utilizzabile per il trading: con gli account unificati Hyperliquid
-      // il saldo Spot fa già da collaterale per i perpetual, quindi va incluso.
-      equity: accountValue + spotUsdc,
+      // il saldo Spot fa già da collaterale per i perpetual, quindi va incluso —
+      // ma solo la parte LIBERA, perché quella bloccata è già dentro accountValue.
+      equity: composed.equity,
       totalMarginUsed: parseFloat(ms.totalMarginUsed || '0'),
       totalNtlPos: parseFloat(ms.totalNtlPos || '0'),
       withdrawable: parseFloat(state.withdrawable || '0'),
-      spotUsdc,
+      // Significato INVARIATO (pool Spot intero): lo consumano telegramControl,
+      // public/perps.js e lo strumento get_account dell'Analyst, e ridefinirlo
+      // sotto di loro sarebbe una regressione silenziosa.
+      spotUsdc: spot.total,
+      // Campi NUOVI ed espliciti, additivi.
+      spotAvailable: composed.spotAvailable,
+      spotHold: composed.spotHold,
       positions
     };
   }
@@ -471,14 +492,35 @@ class HyperliquidClient {
     }, { label: 'submitSignedAction' });
   }
 
-  /** Saldo USDC nel wallet Spot (HyperCore) del master. */
-  async getSpotUsdc(masterAddress, network = this.network) {
+  /**
+   * Stato USDC nel wallet Spot (HyperCore) del master: pool intero E quota
+   * bloccata come margine dei perpetual.
+   *
+   * CRIT-05 — `hold` va restituito, non scartato: su account unificato è
+   * esattamente la parte di `total` che è già impegnata nei perp, e ignorarla è
+   * ciò che faceva contare due volte il margine nell'equity (vedi
+   * `riskManager.composeEquity`).
+   *
+   * @returns { total, hold }
+   */
+  async getSpotUsdcState(masterAddress, network = this.network) {
     const url = `${this.endpoints(network).api}/info`;
     const { data } = await withRetry(() => axios.post(url, { type: 'spotClearinghouseState', user: masterAddress }, {
       headers: { 'Content-Type': 'application/json' }, timeout: 10000
     }), { label: 'getSpotUsdc' });
     const usdc = (data?.balances || []).find(b => b.coin === 'USDC');
-    return usdc ? parseFloat(usdc.total) : 0;
+    if (!usdc) return { total: 0, hold: 0 };
+    return { total: parseFloat(usdc.total || '0') || 0, hold: parseFloat(usdc.hold || '0') || 0 };
+  }
+
+  /**
+   * Saldo USDC nel wallet Spot (HyperCore) del master: il pool INTERO.
+   * Significato invariato — è ciò che i consumatori esistenti si aspettano
+   * (`telegramControl`, la UI, lo strumento `get_account` dell'Analyst).
+   */
+  async getSpotUsdc(masterAddress, network = this.network) {
+    const { total } = await this.getSpotUsdcState(masterAddress, network);
+    return total;
   }
 
   // ---- Esecuzione ordini (firmati dall'agent) ----

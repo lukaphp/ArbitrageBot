@@ -11,12 +11,70 @@
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
 
+/**
+ * CRIT-05 — composizione dell'equity su account unificato Hyperliquid.
+ *
+ * Il problema che risolve. Con account unificato esiste **un solo** pool di
+ * collaterale USDC, non due: `spotClearinghouseState.balances[USDC].total` è il
+ * pool INTERO e `…hold` è la porzione già bloccata come margine dei perpetual,
+ * mentre `marginSummary.accountValue` non è un pool indipendente — è la vista
+ * mark-to-market della fetta di collaterale impegnata nei perp (≈ margine
+ * impegnato + PnL non realizzato + funding). Sommare `accountValue + spot.total`
+ * conta quindi il margine impegnato **due volte**.
+ *
+ * La premessa del `+ spotUsdc` originale (commit `9e3a236`, "supporto account
+ * unificati") era giusta e risolveva un vero falso "Equity nullo" a conto piatto:
+ * sbagliato era solo l'addendo — serviva lo Spot **libero**, non il `total`. Per
+ * questo è sopravvissuto a una review, ed è invisibile a conto piatto
+ * (`accountValue = 0` → la somma è corretta): si manifesta solo con posizione
+ * aperta.
+ *
+ * La proprietà che rende la formula giusta, e che il test verifica: **aprire una
+ * posizione non cambia l'equity** (a meno di fee e PnL). Il collaterale si sposta
+ * da `spot` libero a `accountValue`, e la somma resta.
+ *
+ * Nota sulla robustezza: la correttezza NON dipende dall'identità empirica
+ * `spot.hold == totalMarginUsed` (verificata sulla demo, ma che potrebbe non
+ * reggere con ordini di apertura pendenti, che bloccano collaterale senza essere
+ * ancora margine di posizione). Qui si calcola lo Spot **davvero libero** come
+ * `total - hold`: qualunque cosa `hold` includa, quel che resta è disponibile, e
+ * la somma non conta niente due volte.
+ *
+ * Funzione PURA e fuori dalla classe: la usano `hyperliquidClient.getAccount()`
+ * (che è I/O) e i test in isolamento, senza dover costruire un client.
+ *
+ * @returns { equity, spotAvailable, spotTotal, spotHold, doubleCounted }
+ */
+export function composeEquity({ accountValue = 0, spotTotal = 0, spotHold = 0 } = {}) {
+  const av = Number.isFinite(Number(accountValue)) ? Number(accountValue) : 0;
+  const total = Number.isFinite(Number(spotTotal)) ? Number(spotTotal) : 0;
+  // `hold` non può eccedere il pool né essere negativo: un dato fuori range
+  // sarebbe una risposta malformata, e lasciarlo passare produrrebbe uno Spot
+  // "libero" negativo che gonfierebbe o azzererebbe l'equity in silenzio.
+  const holdRaw = Number.isFinite(Number(spotHold)) ? Number(spotHold) : 0;
+  const hold = Math.min(Math.max(holdRaw, 0), Math.max(total, 0));
+  const spotAvailable = Math.max(0, total - hold);
+  return {
+    equity: av + spotAvailable,
+    spotAvailable,
+    spotTotal: total,
+    spotHold: hold,
+    // Quanto la formula precedente (`accountValue + spot.total`) sovrastimava.
+    // Esposto perché è la grandezza da guardare per capire se un'equity storica
+    // in `risk_equity_history` è gonfiata, e di quanto.
+    doubleCounted: hold
+  };
+}
+
 class RiskManager {
   /** Arrotonda la size al numero di decimali consentito dal mercato. */
   roundSize(size, szDecimals = 3) {
     const f = Math.pow(10, szDecimals);
     return Math.floor(size * f) / f;
   }
+
+  /** CRIT-05 — anche come metodo, per i chiamanti che hanno già il singleton. */
+  composeEquity(input) { return composeEquity(input); }
 
   /**
    * Calcola la size (in unità di coin) da aprire.

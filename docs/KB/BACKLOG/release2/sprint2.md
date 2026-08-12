@@ -489,8 +489,19 @@ fix su qualunque istanza con storico gonfiato** (oggi solo la demo demo `:8091`;
 
 9 candidati di refinement raccolti da Annie in
 `docs/KB/BACKLOG/release2/sprint2-status/annie.json`, più il piano d'azione per priorità di Jordan in
-`sprint2-status/jordan.json` — tra questi, la decisione bloccante su CRIT-05/drawdown resta la
-priorità 1 per il prossimo passo, prima di qualunque deploy.
+`sprint2-status/jordan.json`.
+
+**Decisione presa e deploy eseguito, la sera del 12 agosto**: il PO ha scelto di troncare lo storico
+(demo `:8091` — `risk_equity_history` e `risk_drawdown_state`) e ripartire pulito, non lasciare il
+salto visibile né rimandare il deploy. Eseguito: immagine ricostruita con il codice di Sprint 2, le
+due tabelle troncate sulla sola istanza demo (bot/posizioni/trade invariati — verificato 2 bot, 5
+posizioni, 5 trade identici prima e dopo), container riavviato. **Un residuo trovato e corretto in
+seduta**: una scrittura del vecchio container, in corsa tra il truncate e il riavvio, ha inserito
+un'ultima riga con l'equity ancora gonfiata (1079.34) prima di spegnersi — individuata e rimossa,
+`risk_drawdown_state` ricalcolato una seconda volta. Stato finale verificato: equity stabile ~$977.70,
+drawdown 0.002% (rumore reale, non un artefatto). **La produzione (porta 8080) non è stata toccata**
+in questo passaggio — resta sulla build precedente finché non sarà oggetto di una decisione di deploy
+separata.
 
 *Refinement chiuso il 12 agosto 2026. Review chiusa il 12 agosto 2026 — 19/24 SP verificati, 5 SP in
-attesa del PO.*
+attesa del PO. CRIT-05 deployata sulla demo lo stesso giorno.*

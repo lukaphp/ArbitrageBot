@@ -146,7 +146,7 @@ const warnedUnpriced = new Set();
  * Risolve la tariffa di un modello. Due livelli, in quest'ordine:
  *
  *  1. **listino per MODELLO** (`pricing.models`, LLM-01) — match esatto, poi per
- *     prefisso più lungo (copre le varianti datate tipo `deepseek-chat-2024-08`);
+ *     prefisso più lungo (copre le varianti datate tipo `deepseek-v4-pro-2026-08`);
  *  2. **tier Anthropic per sottostringa** del nome (opus/haiku/sonnet) — il
  *     comportamento storico, che resta per non dover elencare ogni versione di
  *     Claude.

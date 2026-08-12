@@ -27,10 +27,22 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+/**
+ * Il modello va scritto qui a mano e non derivato da `pricing.models`: config.js
+ * fotografa l'ambiente al caricamento, quindi `AGENT_ADVISOR_MODEL` deve essere già
+ * impostata PRIMA di importare la config da cui vorremmo leggerlo. Il vincolo è
+ * l'ordine degli import, non una scelta.
+ * Quello che invece NON è inchiodato è la TARIFFA (vedi il test sul costo del turno):
+ * viene letta dal listino. Così un aggiornamento di prezzo non rompe questo file, e
+ * una RINOMINA dell'ID fallisce subito con un messaggio che dice cosa fare — che è il
+ * modo in cui il ritiro di `deepseek-chat` (2026-07-24, LLM-PRICE-01) è stato scoperto.
+ */
+const ADVISOR_MODEL = 'deepseek-v4-pro';
+
 // Prima di qualunque import: config.js fotografa l'ambiente al caricamento.
 process.env.AGENTS_ENABLED = 'true';
 process.env.AGENT_ADVISOR_PROVIDER = 'deepseek';
-process.env.AGENT_ADVISOR_MODEL = 'deepseek-chat';
+process.env.AGENT_ADVISOR_MODEL = ADVISOR_MODEL;
 process.env.DEEPSEEK_API_KEY = 'chiave-finta-mai-inviata';
 delete process.env.ANTHROPIC_API_KEY; // il percorso Anthropic non deve servire
 
@@ -48,6 +60,14 @@ const { default: botManager } = await import('../src/perps/botManager.js');
 const { default: client } = await import('../src/perps/hyperliquidClient.js');
 const { default: paperBroker } = await import('../src/perps/paperBroker.js');
 const { default: marketData } = await import('../src/perps/marketData.js');
+const { HYPERLIQUID_CONFIG } = await import('../src/config/config.js');
+
+// La tariffa del modello viene dal listino, non riscritta qui (vedi nota su
+// ADVISOR_MODEL). Se l'ID viene rinominato in config.js, il test si ferma QUI con un
+// messaggio utile, invece di sbagliare un confronto di centesimi 200 righe più sotto.
+const ADVISOR_RATE = HYPERLIQUID_CONFIG.agents?.pricing?.models?.[ADVISOR_MODEL];
+assert.ok(ADVISOR_RATE,
+  `"${ADVISOR_MODEL}" non è più nel listino agents.pricing.models: se l'ID del modello è cambiato, aggiorna ADVISOR_MODEL in questo file`);
 
 // --- Strumenti di sola lettura senza rete ---
 client.getAccount = async () => ({ equity: 1000, accountValue: 1000, totalMarginUsed: 100, spotUsdc: 0, totalNtlPos: 300, positions: [] });
@@ -117,7 +137,7 @@ beforeEach(() => {
 test('il consulente è disponibile via fornitore alternativo, senza chiave Anthropic', () => {
   const st = advisor.status();
   assert.equal(st.provider, 'deepseek');
-  assert.equal(st.model, 'deepseek-chat');
+  assert.equal(st.model, ADVISOR_MODEL);
   assert.equal(st.hasApiKey, false, 'nessuna ANTHROPIC_API_KEY in questo scenario');
   assert.equal(st.available, true, 'e nonostante questo il consulente funziona: è il punto di LLM-01');
 });
@@ -130,7 +150,7 @@ test('la richiesta parte davvero verso il baseURL del fornitore, con soli strume
   assert.equal(requests.length, 1);
   assert.match(requests[0].url, /api\.deepseek\.com/, 'endpoint del fornitore configurato');
   assert.match(requests[0].opts.headers.Authorization, /^Bearer /);
-  assert.equal(requests[0].body.model, 'deepseek-chat');
+  assert.equal(requests[0].body.model, ADVISOR_MODEL);
   // Gli strumenti offerti al modello, nel dialetto OpenAI: solo l'allowlist.
   const offerti = requests[0].body.tools.map(t => t.function.name).sort();
   assert.deepEqual(offerti, [...ADVISOR_TOOL_NAMES].sort(),
@@ -224,8 +244,11 @@ test('il costo del turno è calcolato sul listino del MODELLO, non su quello Ant
   script = [textReply('ok')];
   const out = await advisor.chat(s.id, 'quanto costa questo turno?');
 
-  // prompt 800 di cui 200 da cache, output 120, su deepseek-chat ($0,27/$1,10).
-  const atteso = (600 / 1e6) * 0.27 + (200 / 1e6) * 0.27 * 0.1 + (120 / 1e6) * 1.10;
+  // prompt 800 di cui 200 da cache, output 120, alla tariffa del modello letta dal
+  // listino (non ricopiata: vedi ADVISOR_RATE in testa al file).
+  const atteso = (600 / 1e6) * ADVISOR_RATE.in
+    + (200 / 1e6) * ADVISOR_RATE.in * 0.1
+    + (120 / 1e6) * ADVISOR_RATE.out;
   assert.ok(Math.abs(out.costUsd - atteso) < 1e-9,
     `costo atteso ${atteso}, ottenuto ${out.costUsd}: con il listino Sonnet sarebbe ~11x e il budget di ADV-03 frenerebbe nel momento sbagliato`);
   assert.ok(out.costUsd > 0, 'e non zero, altrimenti il budget non frenerebbe mai');

@@ -215,6 +215,20 @@ AGENT_ANALYST_PROVIDER=anthropic   # fornitore LLM dell'Analyst: anthropic (defa
                                    # Sui fornitori senza countTokens il preventivo
                                    # dell'analisi diventa una STIMA, ed è dichiarata tale
 
+# ATTENZIONE cambiando fornitore: va cambiato ANCHE il modello. Un fornitore viene
+# costruito solo se il modello ha una tariffa in `agents.pricing.models` (senza tariffa
+# il costo risulta 0 e il budget mensile non frenerebbe mai), quindi lasciare
+# AGENT_ANALYST_PROVIDER=deepseek con il modello Claude di default fa fallire l'avvio
+# dell'agente con un errore esplicito `missing_pricing` — non un degrado silenzioso.
+# ID con listino (riverificati il 2026-08-12, LLM-PRICE-01):
+#   deepseek        → deepseek-v4-pro, deepseek-v4-flash
+#   openrouter      → deepseek/deepseek-v4-pro, deepseek/deepseek-v4-flash
+#   anthropic       → qualunque claude-* (tariffa per tier opus/sonnet/haiku)
+# Gli alias `deepseek-chat`/`deepseek-reasoner` sono RITIRATI dal 2026-07-24: se li
+# trovi in un vecchio .env vanno sostituiti, non funzionano più nemmeno lato fornitore.
+# Ogni tariffa è sovrascrivibile da ambiente senza toccare il codice (PRICE_* in
+# src/config/config.js), utile se il tuo contratto ha prezzi diversi dal listino.
+
 AGENT_ADVISOR_MAX_ITERATIONS=5     # giri di andata/ritorno col modello in un turno di chat
 AGENT_ADVISOR_MAX_TOOL_CALLS=12    # tetto sul NUMERO TOTALE di consultazioni di dati in un
                                    # turno di chat. Distinto dal precedente: dentro UN solo

@@ -245,12 +245,37 @@ export const HYPERLIQUID_CONFIG = {
     advisorMonthlyBudgetUsd: parseFloat(process.env.AGENT_ADVISOR_MONTHLY_BUDGET_USD) || 10,
     // Retention dei transcript di chat, in giorni (spike §5 punto 1).
     advisorRetentionDays: parseInt(process.env.AGENT_ADVISOR_RETENTION_DAYS) || 90,
-    // Prezzi STIMATI dei modelli Claude in USD per 1M di token (input/output).
+    // Prezzi dei modelli Claude in USD per 1M di token (input/output).
     // Configurabili: aggiorna se i listini cambiano. La scelta del tier avviene
     // per sottostringa del nome modello (opus/sonnet/haiku).
+    //
+    // LLM-PRICE-01 — RIVERIFICATI il 2026-08-12 sul listino ufficiale Anthropic
+    // (platform.claude.com/docs/en/about-claude/pricing), stesso pattern del SHA
+    // pinnato di harden-runner in .github/workflows/ci.yml: la data serve a sapere
+    // quanto è vecchio il numero, non a promettere che sia eterno.
+    //
+    // COME SI DIVIDONO IL LAVORO I DUE LIVELLI (`resolvePricing` in agents/usage.js):
+    // il tier per sottostringa qui sotto è la RETE DI SICUREZZA per un nome di modello
+    // Claude che non conosciamo ancora; `models` più sotto porta gli ID ESATTI quando
+    // il prezzo si discosta dal tier. Regola che ho seguito per il tier: vale il prezzo
+    // PIÙ ALTO ancora acquistabile nella famiglia. Il tier è una congettura per
+    // costruzione (fa match su qualunque nome contenga "sonnet"), e una congettura che
+    // alimenta il budget a soglia dura di ADV-03 è meglio che sbagli per eccesso: se
+    // sovrastima, il budget frena presto e si vede; se sottostima, non frena mai.
     pricing: {
-      opus: { in: parseFloat(process.env.PRICE_OPUS_IN) || 15, out: parseFloat(process.env.PRICE_OPUS_OUT) || 75 },
+      // Opus: era 15/75, cioè il prezzo di Opus 4.1 e 4 — entrambi RITIRATI. La
+      // famiglia corrente (Opus 4.5 → 5) sta a 5/25, e su un modello ritirato non si
+      // può più spendere, quindi il default vecchio sovrastimava di 3x l'unico Opus
+      // che si possa davvero chiamare oggi.
+      opus: { in: parseFloat(process.env.PRICE_OPUS_IN) || 5, out: parseFloat(process.env.PRICE_OPUS_OUT) || 25 },
+      // Sonnet: 3/15 CONFERMATO e lasciato invariato. È il prezzo di Sonnet 4.6/4.5/4,
+      // e `analystModel` è pinnato su claude-sonnet-4-6: qui il tier segue il MODELLO
+      // PINNATO, non la famiglia più recente. Sonnet 5 costa meno (2/10) ma è una voce
+      // esatta in `models` più sotto — sarebbe sbagliato il contrario, perché portare il
+      // tier a 2/10 sottostimerebbe del 50% il modello che gira per davvero di default.
       sonnet: { in: parseFloat(process.env.PRICE_SONNET_IN) || 3, out: parseFloat(process.env.PRICE_SONNET_OUT) || 15 },
+      // Haiku: 1/5 CONFERMATO su Haiku 4.5, che è il default di `advisorModel`.
+      // Nessuna modifica necessaria — verificato, non semplicemente non toccato.
       haiku: { in: parseFloat(process.env.PRICE_HAIKU_IN) || 1, out: parseFloat(process.env.PRICE_HAIKU_OUT) || 5 },
 
       // LLM-01 — listino PER MODELLO, necessario appena si esce da Anthropic.
@@ -264,31 +289,64 @@ export const HYPERLIQUID_CONFIG = {
       // più cauta di tutte, quindi il listino per modello è un prerequisito
       // dell'attivazione, non un raffinamento.
       //
-      // ⚠️ I valori sotto sono i listini pubblici NOTI al momento della scrittura
-      // e non è stato possibile riverificarli (nessun accesso di rete, stessa
-      // riserva dello spike §8.1). Vanno ricontrollati quando le chiavi verranno
-      // provisionate: sono tutti sovrascrivibili da ENV senza toccare il codice.
+      // LLM-PRICE-01 — RIVERIFICATO il 2026-08-12. La riserva qui sopra ("valori NOTI
+      // al momento della scrittura, mai riverificati") è chiusa: le chiavi non erano
+      // solo vecchie di prezzo, erano MODELLI RITIRATI.
+      //
+      // ⚠️ PERCHÉ QUESTA RIGA ERA UN GUASTO, NON UN ARROTONDAMENTO. `deepseek-chat` e
+      // `deepseek-reasoner` sono stati ritirati il 2026-07-24. Le chiavi di questo
+      // listino erano quelle, quindi per un ID DeepSeek attuale `resolvePricing()` non
+      // trovava nulla (né match esatto né per prefisso), `hasPricing()` era false e
+      // `getProvider()` RIFIUTAVA di costruire il fornitore con ProviderError
+      // `missing_pricing`. Cioè: l'intero percorso multi-provider DeepSeek era
+      // inutilizzabile, non "prezzato male". Il gate di LLM-01 ha funzionato — ha
+      // fallito in modo esplicito invece che silenzioso — ma nessuno lo avrebbe scoperto
+      // prima di puntarci un agente per davvero. Trovato da Bruno lavorando LLM-02.
+      // Il test test/pricingModels.test.js ora tiene chiusa proprio questa porta.
+      //
+      // Restano tutti sovrascrivibili da ENV senza toccare il codice: chi ha già le
+      // proprie variabili impostate non cambia comportamento.
       models: {
-        // DeepSeek diretto (api.deepseek.com)
-        'deepseek-chat': {
-          in: parseFloat(process.env.PRICE_DEEPSEEK_CHAT_IN) || 0.27,
-          out: parseFloat(process.env.PRICE_DEEPSEEK_CHAT_OUT) || 1.10
+        // DeepSeek diretto (api.deepseek.com) — deepseek.ai/pricing, agosto 2026.
+        'deepseek-v4-pro': {
+          in: parseFloat(process.env.PRICE_DEEPSEEK_V4_PRO_IN) || 0.435,
+          out: parseFloat(process.env.PRICE_DEEPSEEK_V4_PRO_OUT) || 0.87
         },
-        'deepseek-reasoner': {
-          in: parseFloat(process.env.PRICE_DEEPSEEK_REASONER_IN) || 0.55,
-          out: parseFloat(process.env.PRICE_DEEPSEEK_REASONER_OUT) || 2.19
+        'deepseek-v4-flash': {
+          in: parseFloat(process.env.PRICE_DEEPSEEK_V4_FLASH_IN) || 0.14,
+          out: parseFloat(process.env.PRICE_DEEPSEEK_V4_FLASH_OUT) || 0.28
         },
         // Gli stessi modelli via OpenRouter, che li nomina col prefisso del
         // fornitore. Voci separate di proposito: il gateway può applicare un
         // margine, e assumere che il prezzo coincida sarebbe di nuovo un numero
-        // dato per buono senza verifica.
-        'deepseek/deepseek-chat': {
-          in: parseFloat(process.env.PRICE_OR_DEEPSEEK_CHAT_IN) || 0.27,
-          out: parseFloat(process.env.PRICE_OR_DEEPSEEK_CHAT_OUT) || 1.10
+        // dato per buono senza verifica. Verificato: su v4-pro il margine è zero
+        // (stesso prezzo del diretto), su v4-flash NO — costa meno del diretto.
+        'deepseek/deepseek-v4-pro': {
+          in: parseFloat(process.env.PRICE_OR_DEEPSEEK_V4_PRO_IN) || 0.435,
+          out: parseFloat(process.env.PRICE_OR_DEEPSEEK_V4_PRO_OUT) || 0.87
         },
-        'deepseek/deepseek-r1': {
-          in: parseFloat(process.env.PRICE_OR_DEEPSEEK_R1_IN) || 0.55,
-          out: parseFloat(process.env.PRICE_OR_DEEPSEEK_R1_OUT) || 2.19
+        // ⚠️ UNICA VOCE NON INCHIODATA A UN NUMERO SINGOLO. Le fonti consultate
+        // danno un INTERVALLO (in 0.08–0.10, out 0.20–0.25) e non un valore unico,
+        // e non ho potuto stringerlo oltre. Qui sta l'estremo ALTO dell'intervallo,
+        // per la stessa ragione del tier Anthropic: su un numero incerto che alimenta
+        // il budget a soglia dura, sovrastimare fa frenare presto (e si nota),
+        // sottostimare fa non frenare mai. Va sostituito con il valore puntuale alla
+        // prima sessione reale su OpenRouter (LLM-VAL-01), che lo mostrerà in fattura.
+        'deepseek/deepseek-v4-flash': {
+          in: parseFloat(process.env.PRICE_OR_DEEPSEEK_V4_FLASH_IN) || 0.10,
+          out: parseFloat(process.env.PRICE_OR_DEEPSEEK_V4_FLASH_OUT) || 0.25
+        },
+        // Anthropic per ID ESATTO, solo dove il prezzo si discosta dal tier.
+        // Sonnet 5 costa 2/10 contro i 3/15 del tier `sonnet`: senza questa voce,
+        // chi passa a Sonnet 5 si vedrebbe addebitare il 50% in più del reale. Il
+        // prezzo introduttivo è diventato permanente — l'aumento che era annunciato
+        // per il 2026-09-01 NON avverrà, quindi non c'è una data da presidiare.
+        // Opus e Haiku non compaiono qui di proposito: dopo la riverifica i loro tier
+        // coincidono già con la famiglia corrente, e una voce in più sarebbe un
+        // secondo posto da aggiornare per nulla.
+        'claude-sonnet-5': {
+          in: parseFloat(process.env.PRICE_SONNET_5_IN) || 2,
+          out: parseFloat(process.env.PRICE_SONNET_5_OUT) || 10
         }
       }
     },

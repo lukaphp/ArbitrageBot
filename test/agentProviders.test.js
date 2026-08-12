@@ -32,9 +32,23 @@ import {
 } from '../src/agents/providers/openaiCompatible.js';
 import { getProvider, listProviders, PROVIDER_NAMES, ProviderError } from '../src/agents/providers/index.js';
 import { summarizeUsage, accumulateUsage, emptyUsage, hasPricing, resolvePricing, priceOf } from '../src/agents/usage.js';
+import { HYPERLIQUID_CONFIG } from '../src/config/config.js';
 
 const DEEPSEEK_URL = 'https://api.deepseek.com/v1';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1';
+
+/**
+ * Modelli DeepSeek presi dalle CHIAVI di `pricing.models` invece che scritti a mano
+ * (LLM-PRICE-01). Questo file inchiodava `deepseek-chat`, che è stato ritirato il
+ * 2026-07-24: alla riverifica del listino quattro test sono diventati rossi per un
+ * motivo che non c'entrava nulla con ciò che verificano. Derivandoli, la prossima
+ * rinomina di un ID di modello resta un cambio in config.js e nient'altro.
+ */
+const PRICED = Object.keys(HYPERLIQUID_CONFIG.agents?.pricing?.models || {});
+const DS_DIRECT = PRICED.find(k => k.startsWith('deepseek-'));
+const DS_OPENROUTER = PRICED.find(k => k.startsWith('deepseek/'));
+assert.ok(DS_DIRECT, 'il listino deve avere almeno un modello DeepSeek diretto');
+assert.ok(DS_OPENROUTER, 'il listino deve avere almeno un modello DeepSeek via OpenRouter');
 
 /** Client HTTP finto: registra le richieste e restituisce una risposta a copione. */
 function fakeHttp(response) {
@@ -140,7 +154,7 @@ test('fromOpenAiResponse: tool_calls → blocchi tool_use nel formato interno', 
       }
     }],
     usage: { prompt_tokens: 10, completion_tokens: 2 }
-  }, { model: 'deepseek-chat' });
+  }, { model: DS_DIRECT });
 
   assert.equal(res.stopReason, 'tool_use', 'finish_reason tool_calls si traduce nel canone interno');
   const toolBlock = res.content.find(b => b.type === 'tool_use');
@@ -155,7 +169,7 @@ test('fromOpenAiResponse: argomenti JSON malformati → input vuoto e marcatura,
   const res = fromOpenAiResponse({
     choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ id: 'c1', function: { name: 'get_account', arguments: '{non json' } }] } }],
     usage: {}
-  }, { model: 'deepseek-chat' });
+  }, { model: DS_DIRECT });
 
   const block = res.content.find(b => b.type === 'tool_use');
   assert.deepEqual(block.input, {}, 'non si tira a indovinare cosa intendeva il modello');
@@ -181,7 +195,7 @@ test('normalizeUsage: i token da cache NON vengono contati due volte', () => {
   assert.equal(u.output_tokens, 50);
 
   // La prova che conta: il totale di prompt fatturato deve restare 1000, non 1700.
-  const summary = summarizeUsage('deepseek-chat', accumulateUsage(emptyUsage(), u));
+  const summary = summarizeUsage(DS_DIRECT, accumulateUsage(emptyUsage(), u));
   assert.equal(summary.tokensIn, 1000,
     'senza la sottrazione il prompt risulterebbe 1700 e il budget di ADV-03 frenerebbe prima del dovuto');
 });
@@ -201,13 +215,13 @@ test('normalizeUsage: forma OpenAI/OpenRouter dei cachati e valori assenti', () 
 });
 
 test('listino per modello: DeepSeek non viene fatturato a tariffa Sonnet', () => {
-  assert.ok(hasPricing('deepseek-chat'));
-  assert.equal(resolvePricing('deepseek-chat').source, 'model');
-  assert.equal(resolvePricing('deepseek/deepseek-chat').source, 'model', 'anche la forma con prefisso di OpenRouter');
-  assert.equal(resolvePricing('deepseek-chat-2024-08').source, 'model-prefix', 'le varianti datate ricadono sul prefisso');
+  assert.ok(hasPricing(DS_DIRECT));
+  assert.equal(resolvePricing(DS_DIRECT).source, 'model');
+  assert.equal(resolvePricing(DS_OPENROUTER).source, 'model', 'anche la forma con prefisso di OpenRouter');
+  assert.equal(resolvePricing(`${DS_DIRECT}-2024-08`).source, 'model-prefix', 'le varianti datate ricadono sul prefisso');
 
   const usage = { tokensIn: 1_000_000, tokensOut: 1_000_000 };
-  const deepseek = priceOf('deepseek-chat', usage);
+  const deepseek = priceOf(DS_DIRECT, usage);
   const sonnet = priceOf('claude-sonnet-4-6', usage);
   assert.ok(deepseek < sonnet / 5,
     `DeepSeek deve costare molto meno di Sonnet: ${deepseek} vs ${sonnet} (prima ricadeva sul tier Sonnet)`);
@@ -234,7 +248,7 @@ test('registry: un modello senza listino NON produce un fornitore', () => {
 });
 
 test('registry: fornitore sconosciuto e modello mancante falliscono con un motivo', () => {
-  assert.throws(() => getProvider({ provider: 'pippo', model: 'deepseek-chat' }),
+  assert.throws(() => getProvider({ provider: 'pippo', model: DS_DIRECT }),
     (e) => e.code === 'unknown_provider' && /Valori ammessi/.test(e.message));
   assert.throws(() => getProvider({ provider: 'deepseek' }),
     (e) => e.code === 'missing_model');
@@ -246,7 +260,7 @@ test('registry: senza chiavi i fornitori alternativi non sono disponibili, e lo 
   delete process.env.DEEPSEEK_API_KEY;
   delete process.env.OPENROUTER_API_KEY;
   try {
-    const p = getProvider({ provider: 'deepseek', model: 'deepseek-chat' });
+    const p = getProvider({ provider: 'deepseek', model: DS_DIRECT });
     assert.equal(p.isAvailable(), false, 'nessuna chiave nuova è obbligatoria: senza, il fornitore è solo non disponibile');
     assert.match(p.unavailableReason(), /Chiave API mancante/);
     assert.match(p.unavailableReason(), /solo Anthropic/, 'dice cosa resta funzionante');
@@ -267,7 +281,7 @@ for (const [nome, baseURL] of [['deepseek', DEEPSEEK_URL], ['openrouter', OPENRO
   test(`adattatore compatibile OpenAI su ${nome}: stessa richiesta, solo baseURL e chiave diversi`, async () => {
     const http = fakeHttp(okResponse('tutto bene'));
     const provider = createOpenAiCompatibleProvider({
-      name: nome, model: 'deepseek-chat', baseURL, apiKey: `chiave-finta-${nome}`, httpPost: http.post
+      name: nome, model: DS_DIRECT, baseURL, apiKey: `chiave-finta-${nome}`, httpPost: http.post
     });
 
     assert.equal(provider.isAvailable(), true);
@@ -281,7 +295,7 @@ for (const [nome, baseURL] of [['deepseek', DEEPSEEK_URL], ['openrouter', OPENRO
     assert.equal(http.calls.length, 1);
     assert.equal(http.calls[0].url, `${baseURL}/chat/completions`, 'l\'endpoint segue il baseURL configurato');
     assert.equal(http.calls[0].opts.headers.Authorization, `Bearer chiave-finta-${nome}`);
-    assert.equal(http.calls[0].body.model, 'deepseek-chat');
+    assert.equal(http.calls[0].body.model, DS_DIRECT);
     assert.equal(http.calls[0].body.max_tokens, 500);
     assert.equal(http.calls[0].body.tools[0].function.name, 'get_account');
     assert.equal(http.calls[0].body.tool_choice, 'auto');
@@ -297,7 +311,7 @@ test('i due fornitori producono una richiesta IDENTICA a meno di URL e chiave', 
   const bodies = [];
   for (const [nome, baseURL] of [['deepseek', DEEPSEEK_URL], ['openrouter', OPENROUTER_URL]]) {
     const http = fakeHttp(okResponse());
-    const p = createOpenAiCompatibleProvider({ name: nome, model: 'deepseek-chat', baseURL, apiKey: 'k', httpPost: http.post });
+    const p = createOpenAiCompatibleProvider({ name: nome, model: DS_DIRECT, baseURL, apiKey: 'k', httpPost: http.post });
     p.createChatCompletion({ system: [{ type: 'text', text: 's' }], messages: [{ role: 'user', content: [{ type: 'text', text: 'm' }] }], tools: [], maxTokens: 10 });
     bodies.push(http.calls);
   }
@@ -308,7 +322,7 @@ test('i due fornitori producono una richiesta IDENTICA a meno di URL e chiave', 
 
 test('errore dichiarato dal fornitore: si propaga, non passa per una risposta valida', async () => {
   const http = fakeHttp({ error: { message: 'quota esaurita' } });
-  const p = createOpenAiCompatibleProvider({ name: 'deepseek', model: 'deepseek-chat', baseURL: DEEPSEEK_URL, apiKey: 'k', httpPost: http.post });
+  const p = createOpenAiCompatibleProvider({ name: 'deepseek', model: DS_DIRECT, baseURL: DEEPSEEK_URL, apiKey: 'k', httpPost: http.post });
   await assert.rejects(
     () => p.createChatCompletion({ system: [], messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }], tools: [], maxTokens: 10 }),
     /quota esaurita/
@@ -317,7 +331,7 @@ test('errore dichiarato dal fornitore: si propaga, non passa per una risposta va
 
 test('senza chiave l\'adattatore rifiuta prima di fare qualunque richiesta', async () => {
   const http = fakeHttp(okResponse());
-  const p = createOpenAiCompatibleProvider({ name: 'deepseek', model: 'deepseek-chat', baseURL: DEEPSEEK_URL, apiKey: null, httpPost: http.post });
+  const p = createOpenAiCompatibleProvider({ name: 'deepseek', model: DS_DIRECT, baseURL: DEEPSEEK_URL, apiKey: null, httpPost: http.post });
   await assert.rejects(() => p.createChatCompletion({ system: [], messages: [], tools: [], maxTokens: 10 }), /Chiave API mancante/);
   assert.equal(http.calls.length, 0, 'nessuna richiesta parte senza chiave');
 });

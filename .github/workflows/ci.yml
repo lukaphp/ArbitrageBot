@@ -67,7 +67,14 @@ jobs:
       #   chiamati dal processo `provjobd` (il demone di provisioning della VM, non il
       #   job). Il suffisso di regione ruota — ne ho visti 4 diversi su 31 run — quindi
       #   elencarli sarebbe inseguire un bersaglio mobile per traffico che non è nostro.
-      #   Verificato sul run in block: non compaiono tra i `domain not allowed`.
+      #   ONESTÀ SUL RUN DI VERIFICA: uno di questi (watchdog-prod-iad-01) compare
+      #   DAVVERO come `domain not allowed` nel run in block, e va saputo invece di
+      #   scoprirlo la prossima volta. Non è un falso positivo sul job: è l'heartbeat che
+      #   la VM manda a GitHub, tutti e 15 gli step del run sono verdi (592/592 test,
+      #   incluso il salvataggio cache nel Post step), e in audit compariva a
+      #   intermittenza (7 run su 31 per quel solo host). Resta un punto da guardare: se
+      #   un domani quell'heartbeat diventasse necessario al completamento del job, il
+      #   sintomo sarebbe un job instabile senza errori negli step.
       # - productionresultssaNN.blob.core.windows.net (cache di Actions): NON va scritto
       #   a mano. Il numero ruota davvero — misurato sa12 in tutti e 31 i run di audit e
       #   sa10 al primo run in block — e harden-runner risolve da sé l'host corrente e lo

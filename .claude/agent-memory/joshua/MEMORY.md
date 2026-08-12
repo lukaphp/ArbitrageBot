@@ -1,7 +1,5 @@
-# Memoria di Joshua — Infrastruttura, build, deploy
-
-- [Prove reali, non "nessun errore"](feedback_prove-reali.md) — falsi positivi di `npm rebuild`/binding lazy, ricetta della sandbox "runner pulito", segreti inline bloccati.
-- [Hardening mirato, mai rollback in blocco](feedback_hardening-mirato.md) — sbloccare un pacchetto per volta, commentato; ispezionare gli script prima di assumere che servano.
-- [Binding nativo in CI: chiuso, con un residuo](project_ci-binding-nativo.md) — fix fatto l'8/8/2026; resta l'impatto sull'allowlist egress di CI-01.
-- [Infisical non è il default di `npm start`](project_infisical-non-default.md) — richiesta del backlog respinta motivatamente nello Sprint 1.
-- [Working tree condiviso tra agenti](project_working-tree-condiviso.md) — una suite rossa può essere lavoro in corso di un altro: isola prima di correggere.
+- [CI: harden-runner in egress block](project_ci-harden-runner-egress.md) — come leggere gli endpoint reali dal log, i due fail-open, e perché l'audit a cache calda inganna
+- [Listino LLM: direzione dell'errore](project_listino-llm-direzione-errore.md) — pricing.models è un gate di attivazione: su un prezzo incerto si sovrastima, mai il contrario
+- [Un test non può essere oracolo di sé](feedback_test-non-puo-essere-oracolo-di-se.md) — se il difetto è la config, iterare sulle sue chiavi non intercetta nulla: la specifica va duplicata a mano
+- [Prove reali, non "comando verde"](feedback_verifica-prove-reali-non-comando-verde.md) — verifica l'effetto nello stato in cui il difetto si manifesta; dichiara i criteri non verificabili
+- [Worktree isolato: allineare, mai stashare](project_worktree-isolato-allineamento.md) — i dispatch partono spesso da un worktree molto indietro; fast-forward prima di scrivere

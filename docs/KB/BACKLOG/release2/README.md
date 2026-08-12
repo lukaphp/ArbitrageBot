@@ -206,8 +206,8 @@ di default in qualunque ambiente.
 | Epica | SP | Stato | Blocca/dipende da |
 |:--|:--:|:---|:---|
 | A — Hardening mainnet | 21 | ✅ **Chiusa** (Sprint 1, review 11 agosto) | Nessuna — parte per prima |
-| B — Completamento Release 1 | 19 | Da pianificare | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E; CRIT-05 (P0) trovato in demo 11-12 agosto |
-| C — Multi-provider Analyst | 5 | Da pianificare | Nessuna |
+| B — Completamento Release 1 | 19 | 🔄 **Sprint 2 in corso** (avviato 12 agosto) | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E; CRIT-05 (P0) trovato in demo 11-12 agosto |
+| C — Multi-provider Analyst | 5 | 🔄 **Sprint 2 in corso** (avviato 12 agosto) | Nessuna |
 | D — Consulente proattivo | 6 | Da pianificare | ADV-OPS-01 (Epic B) |
 | E — Advisor fase 2 | 3 | Da pianificare | ADV-OPS-01 (Epic B), idealmente dopo D |
 | **Totale release** | **54** | **21/54 fatti** | |
@@ -231,3 +231,14 @@ per decisione esplicita del PO l'11 agosto: questa release riparte da Sprint 1):
 e i due item riportati da Sprint 2 di Release 1 (CI-01, CHORE-01). Il refinement dettagliato (storie
 con criteri di accettazione) si fa sprint per sprint, all'avvio di ciascuno — stesso processo di
 Release 1.*
+
+---
+
+## 8. Candidati futuri, non ancora pianificati
+
+Registrati per non perderne traccia, non ancora assegnati a una release/epica specifica — richiedono
+un refinement dedicato prima di poter stimare SP.
+
+| Candidato | Tipo | Origine | Documento |
+|:--|:--|:--|:--|
+| Sistema Neofita-Maestro — memoria esperienziale interna, riduzione dipendenza da LLM esterni | Architecture Spike & R&D | Richiesta diretta del PO, 12 agosto 2026 | [`spike-neofita-maestro.md`](spike-neofita-maestro.md) |

@@ -13,3 +13,5 @@
 - [Un runbook documentato non è un runbook eseguito](project_runbook-documentato-non-e-eseguito.md) — la rotazione chiavi era descritta bene e non partiva affatto
 - [Sandbox e nomi dei segreti](project_sandbox-blocca-comandi-sui-segreti.md) — comandi bash bloccati: metti lo snippet in uno script e lancia quello
 - [Jordan, analista di rischio](project_jordan-analista-di-rischio.md) — revisore aggiuntivo da Sprint 1 di Release 2: guarda la domanda a monte del bug tecnico
+- [Account unificato Hyperliquid](reference_hyperliquid-unified-account-model.md) — `hold`/`accountValue`/`totalRawUsd`: cosa significano, e gli endpoint info pubblici per provarlo
+- [Equity: doppio conteggio dello Spot](project_equity-doppio-conteggio-spot.md) — finding aperto: invisibile a conto piatto, e tocca drawdown/alert oltre al sizing

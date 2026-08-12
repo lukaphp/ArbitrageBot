@@ -110,10 +110,11 @@ board in Release 1 (archiviata) / Release 2 (in corso), l'11 agosto.
 | DEBT-05 | Riallineare l'ordine delle sezioni tra `MANUAL.md` e `manual.html` | Maya | 1 | Contenuti già allineati, solo l'ordine differisce |
 | DEBT-06 | Focus trap nel drawer del consulente | Maya | 1 | Piccolo, isolato |
 | LLM-PRICE-01 | Riverificare i prezzi in `pricing.models` (LLM-01) contro i listini pubblici reali | Joshua | 1 | Scritti senza accesso rete al momento di LLM-01 |
+| CRIT-05 | `equity` conta due volte il margine impegnato in posizioni perp aperte (`accountValue + spot.total` invece di `accountValue + (spot.total - spot.hold)`) — sovrastima esatta pari al margine impegnato, confermata su prova diretta contro l'API Hyperliquid | Bruno | 3 | **P0.** Trovato l'11-12 agosto durante la demo operativa isolata di Jordan (ordini testnet reali), diagnosticato da Bruno in indagine di sola lettura — non un fix al buio. Alimenta `sizePosition` (sovradimensionamento composto tra bot concorrenti), `risk_equity_history`/drawdown (picchi fittizi) e `marginPct` (sottostimato — la direzione pericolosa: l'alert di sovra-leva scatta più tardi del dovuto). Root cause: commit `9e3a236`, corretto nella premessa (fix di un equity-nullo reale) ma con l'addendo sbagliato — bug invisibile a conto piatto, mai esercitato prima con una posizione realmente aperta. Latente su mainnet oggi (accountValue 0, nessuna posizione) ma stesso codice condiviso. Prima di implementare: secondo campione con posizioni multiple/PnL non banale (vedi `.claude/agent-memory/bruno/project_equity-doppio-conteggio-spot.md`), poi funzione pura in `riskManager.js` + nuovo campo (non toccare `spotUsdc`, consumato altrove) + test sulla proprietà "aprire una posizione non cambia l'equity", non su un valore atteso fisso. |
 
-**Totale Epic B: 16 SP.** Cinque item (CHORE-01, OPS-02, OPS-03r, ADV-OPS-01, OBS-OPS-01) restano in
-carico diretto al PO — non delegabili ad agenti per la stessa ragione di sempre (accesso
-SSH/`.npmrc`/spesa reale).
+**Totale Epic B: 19 SP.** Sei item (CHORE-01, OPS-02, OPS-03r, ADV-OPS-01, OBS-OPS-01, e la verifica
+mainnet di CRIT-05) restano in carico diretto al PO o richiedono la sua decisione — non delegabili ad
+agenti per la stessa ragione di sempre (accesso SSH/`.npmrc`/spesa reale/capitale condiviso).
 
 ---
 
@@ -205,11 +206,11 @@ di default in qualunque ambiente.
 | Epica | SP | Stato | Blocca/dipende da |
 |:--|:--:|:---|:---|
 | A — Hardening mainnet | 21 | ✅ **Chiusa** (Sprint 1, review 11 agosto) | Nessuna — parte per prima |
-| B — Completamento Release 1 | 16 | Da pianificare | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E |
+| B — Completamento Release 1 | 19 | Da pianificare | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E; CRIT-05 (P0) trovato in demo 11-12 agosto |
 | C — Multi-provider Analyst | 5 | Da pianificare | Nessuna |
 | D — Consulente proattivo | 6 | Da pianificare | ADV-OPS-01 (Epic B) |
 | E — Advisor fase 2 | 3 | Da pianificare | ADV-OPS-01 (Epic B), idealmente dopo D |
-| **Totale release** | **51** | **21/51 fatti** | |
+| **Totale release** | **54** | **21/54 fatti** | |
 
 **Distribuzione su sprint** (numerazione propria di Release 2 — non prosegue quella di Release 1,
 per decisione esplicita del PO l'11 agosto: questa release riparte da Sprint 1):

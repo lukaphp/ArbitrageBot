@@ -344,12 +344,44 @@ e la CLI installata; `USE_INFISICAL=0` lo disattiva.
 
 ## 5. Backup e restore verificato
 
-Backup notturno via cron (sull'host):
+**Verificato realmente sul VPS il 12 agosto 2026** (OPS-02, Sprint 2 Release 2 — mai eseguito prima
+d'ora): backup creato, restore verificato su copia separata, `integrity_check = ok`, tutte le tabelle
+attese presenti (`bots positions trades settings agent_wallets proposals audit`), 4 bot/9 posizioni
+lette senza errori.
+
+**Nota:** questo VPS non ha `cron`/`crontab` installato (immagine Debian minimale) — il timer
+notturno usa **systemd**, non cron. Se il tuo host ne è dotato, l'equivalente cron resta valido (vedi
+sotto), ma sul VPS reale di questo progetto è un timer systemd:
 
 ```bash
-# crontab -e  (utente deploy)
-0 3 * * *  DB_PATH=/var/lib/docker/volumes/arbitragebot_perps-data/_data/perps.db \
-           BACKUP_DIR=/home/deploy/backups /home/deploy/arbitragebot/scripts/backup.sh
+# /etc/systemd/system/arbitragebot-backup.service
+[Service]
+Type=oneshot
+User=debian
+WorkingDirectory=/opt/arbitragebot/app
+Environment=DB_PATH=/var/lib/docker/volumes/app_perps-data/_data/perps.db
+Environment=BACKUP_DIR=/opt/arbitragebot/backups
+ExecStart=/opt/arbitragebot/app/scripts/backup.sh
+
+# /etc/systemd/system/arbitragebot-backup.timer
+[Timer]
+OnCalendar=*-*-* 03:17:00
+Persistent=true
+RandomizedDelaySec=300
+[Install]
+WantedBy=timers.target
+```
+
+Attivato con `systemctl daemon-reload && systemctl enable --now arbitragebot-backup.timer` — verifica
+lo stato con `systemctl list-timers arbitragebot-backup.timer`. Il nome reale del volume Docker su
+questo VPS è `app_perps-data` (dal progetto compose `app`), non `arbitragebot_perps-data` — verificalo
+sempre con `docker volume inspect` invece di assumerlo, i nomi cambiano col nome del progetto compose.
+
+Equivalente cron, se il tuo host ce l'ha (`crontab -e`, utente deploy):
+
+```bash
+17 3 * * *  DB_PATH=/var/lib/docker/volumes/<progetto>_perps-data/_data/perps.db \
+            BACKUP_DIR=/opt/arbitragebot/backups /opt/arbitragebot/app/scripts/backup.sh
 ```
 
 `backup.sh` usa l'API `.backup` di sqlite3 (consistente anche col WAL attivo),
@@ -358,15 +390,16 @@ comprime e ruota i file (`RETENTION=14` di default).
 **Verifica il restore — un backup non verificato è un backup che non esiste:**
 
 ```bash
-BACKUP_DIR=/home/deploy/backups ./scripts/restore-verify.sh
+BACKUP_DIR=/opt/arbitragebot/backups ./scripts/restore-verify.sh
 ```
 
 Ripristina l'ultimo backup su un DB temporaneo, ne controlla l'integrità e la
 presenza delle tabelle attese. **Non tocca il DB di produzione** ed esce con codice
-≠ 0 in caso di problemi, quindi puoi metterlo in cron subito dopo il backup.
+≠ 0 in caso di problemi.
 
-Poi sincronizza `/home/deploy/backups` **fuori dal VPS** (es. `rclone` verso object
-storage, o `restic`).
+Poi sincronizza `/opt/arbitragebot/backups` **fuori dal VPS** (es. `rclone` verso object
+storage, o `restic`) — **non ancora fatto**: il backup oggi vive solo sullo stesso host del DB che
+protegge, un singolo guasto disco perderebbe entrambi. Candidato di refinement per il prossimo sprint.
 
 > 🔐 **Il punto di sicurezza che conta.** Le chiavi agent nel backup sono cifrate:
 > un backup rubato **senza** `AGENT_ENCRYPTION_KEY` è inservibile. Questa proprietà
@@ -427,6 +460,19 @@ storage, o `restic`).
 - Log: `docker compose logs` (Docker) o `logs/app.log` (script di riavvio).
 
 ### 6.1 Cruscotto Prometheus + Grafana (profilo `monitoring`)
+
+**Verificato realmente sul VPS il 12 agosto 2026** (OBS-OPS-01, Sprint 2 Release 2 — prima solo
+provato in locale): profilo attivato con il `METRICS_TOKEN` reale già configurato in produzione (letto
+dall'ambiente del processo, mai passato in chiaro su una riga di comando visibile), target Prometheus
+`up`, dashboard e datasource confermati provisionati via API, password admin cambiata dal default.
+Esposto in tailnet su `https://vps-ec91eb11.tail3a3dde.ts.net:8444` — **non 8443**: quella porta è
+già occupata dall'istanza demo isolata (vedi nota sotto). Su un VPS senza altre istanze parallele,
+8443 resta la scelta naturale come nell'esempio sotto.
+
+> **Nota se altre istanze condividono l'host**: `tailscale serve` assegna le porte HTTPS per
+> hostname:porta, non per servizio — se hai già altro in ascolto su 8443 (es. una demo isolata come
+> quella di Sprint 1-2), scegli una porta libera (`8444`, `8445`, …) invece di riusare l'esempio sotto
+> alla lettera. Verifica sempre con `tailscale serve status` prima di assegnarne una nuova.
 
 `/metrics` espone 18 famiglie di metriche, ma da sole sono solo testo: il profilo
 `monitoring` aggiunge chi le raccoglie (Prometheus) e chi le disegna (Grafana),

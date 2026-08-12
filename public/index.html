@@ -183,8 +183,20 @@
                             <table class="cockpit-table"><thead><tr><th scope="col">Symbol</th><th scope="col">Side</th><th scope="col">Size</th><th scope="col">Entry</th><th scope="col">uPnL</th></tr></thead><tbody id="cockpitPositionsSummary"><tr><td class="cockpit-empty" colspan="5">In attesa dei dati del conto…</td></tr></tbody></table>
                         </section>
                         <section class="cockpit-surface" aria-labelledby="execution-status-title">
-                            <div class="cockpit-surface-head"><h3 class="cockpit-surface-title" id="execution-status-title">EXECUTION STATUS</h3><span class="cockpit-surface-note cockpit-positive">LIVE</span></div>
-                            <div class="cockpit-metric-list"><div class="cockpit-metric-row"><span>Fills / 5m</span><strong id="cockpitFills">—</strong></div><div class="cockpit-metric-row"><span>Pending review</span><strong class="cockpit-warning" id="cockpitPending">—</strong></div><div class="cockpit-metric-row"><span>Reject rate</span><strong id="cockpitRejectRate">—</strong></div><div class="cockpit-metric-row"><span>Queue health</span><strong class="cockpit-positive">Stable</strong></div></div>
+                            <!-- DEBT-03. Prima questa card non aveva un solo valore misurato:
+                                 #cockpitFills, #cockpitPending e #cockpitRejectRate erano tre
+                                 '—' che nessuno scriveva mai, e il badge "LIVE" (verde) più
+                                 "Queue health: Stable" erano affermazioni fisse nel markup —
+                                 la stessa classe di dato finto rimossa da DEBT-UI-01 nelle
+                                 card accanto. Ora le tre righe le scrive
+                                 perps._renderExecutionStatus() da `execution` dello snapshot
+                                 di rischio, e il badge dice se l'esecuzione è davvero attiva
+                                 (kill-switch inserito ⇒ BLOCCATA, nessun bot in marcia ⇒
+                                 FERMA). La riga "Reject rate" è stata RIMOSSA e non
+                                 alimentata: nessuna fonte in questo sistema conta gli ordini
+                                 rifiutati dall'exchange — vedi la nota in perps.js. -->
+                            <div class="cockpit-surface-head"><h3 class="cockpit-surface-title" id="execution-status-title">EXECUTION STATUS</h3><span class="cockpit-surface-note" id="cockpitExecMode">—</span></div>
+                            <div class="cockpit-metric-list"><div class="cockpit-metric-row"><span id="cockpitFillsLabel">Fills / 5m</span><strong id="cockpitFills">—</strong></div><div class="cockpit-metric-row"><span>Proposte da decidere</span><strong id="cockpitPending">—</strong></div><div class="cockpit-metric-row"><span>Coda di esecuzione</span><strong id="cockpitQueueDepth">—</strong></div><div class="cockpit-metric-row"><span>Queue health</span><strong id="cockpitQueueHealth">—</strong></div></div>
                         </section>
                         <section class="cockpit-surface" aria-labelledby="system-health-title">
                             <!-- La card elencava CME, ICE e COMEX con latenze fisse (28ms, 31ms),

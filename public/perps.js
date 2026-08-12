@@ -166,9 +166,20 @@ class PerpsApp {
     return data.data ?? data;
   }
 
+  /**
+   * Importo in USD. Il segno sta PRIMA del simbolo di valuta — `-$12.34`, non
+   * `$-12.34` — e questo è responsabilità della funzione, non di chi la chiama
+   * (DEBT-04): prima due chiamanti rimediavano con `.replace('$-', '-$')` copiato
+   * a mano, quindi ogni altro punto della cockpit che stampa un valore
+   * potenzialmente negativo lo mostrava nella forma sbagliata senza che nessuno
+   * lo notasse. Stessa forma di `fmtEur()`, che il segno lo metteva già al posto
+   * giusto: le due funzioni sorelle non devono formattare in modo diverso.
+   */
   fmtUsd(n) {
     if (n == null || isNaN(n)) return '—';
-    return '$' + Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 });
+    const value = Number(n);
+    const abs = Math.abs(value).toLocaleString('en-US', { maximumFractionDigits: 2 });
+    return (value < 0 ? '-$' : '$') + abs;
   }
   fmtNum(n, d = 4) {
     if (n == null || isNaN(n)) return '—';
@@ -488,6 +499,10 @@ class PerpsApp {
       if (target) target.innerHTML = html;
     }
     this._renderSystemHealth(null);
+    // Stessa ragione della riga sopra: senza snapshot la card EXECUTION STATUS
+    // non sa nulla, e lasciarla sull'ultimo valore letto la farebbe affermare
+    // qualcosa che nessuno ha più verificato.
+    this._renderExecutionStatus(null);
   }
 
   _escapeHtml(value) {
@@ -507,15 +522,14 @@ class PerpsApp {
     const exposure = Number(account.totalNtlPos ?? (account.positions || []).reduce((sum, p) => sum + Number(p.positionValue || 0), 0));
     const marginPct = Number.isFinite(equity) && equity > 0 ? (margin / equity) * 100 : null;
     const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
-    const usd = (value) => this.fmtUsd(value).replace('$-', '-$');
     const statusText = summary.status === 'blocked' ? 'BLOCKED' : summary.status === 'review' ? `${summary.actionable || summary.warning} DA VERIFICARE` : 'OK';
     const statusClass = summary.status === 'blocked' ? 'blocked' : summary.status === 'review' ? 'review' : 'ok';
     const statusEl = document.getElementById('cockpitRiskStatus');
     if (statusEl) { statusEl.textContent = statusText; statusEl.className = `cockpit-risk-status ${statusClass}`; }
     setText('cockpitRiskUpdated', `Ultimo controllo ${new Date(snapshot.generatedAt).toLocaleTimeString('it-IT', { hour12: false })}`);
-    setText('cockpitRiskEquity', Number.isFinite(equity) ? usd(equity) : '—');
+    setText('cockpitRiskEquity', Number.isFinite(equity) ? this.fmtUsd(equity) : '—');
     setText('cockpitRiskMargin', marginPct == null ? '—' : `${marginPct.toFixed(1)}%`);
-    setText('cockpitRiskExposure', Number.isFinite(exposure) ? `${usd(exposure)} / ${usd(limits.maxTotalExposureUsd)}` : '—');
+    setText('cockpitRiskExposure', Number.isFinite(exposure) ? `${this.fmtUsd(exposure)} / ${this.fmtUsd(limits.maxTotalExposureUsd)}` : '—');
     setText('cockpitMarginLimit', `Limit ${limits.marginWarningPct ?? 60}%`);
     setText('cockpitRiskOpenPositions', `${(account.positions || []).length} / ${limits.maxConcurrentPositions ?? '—'}`);
     const drawdownPct = Number(snapshot.drawdown?.maxPct);
@@ -559,6 +573,7 @@ class PerpsApp {
     if (checksEl) checksEl.innerHTML = checks.map((check) => `
       <div class="cockpit-risk-check"><span><i class="cockpit-risk-check-dot ${check.state}"></i>${this._escapeHtml(check.label)}</span><strong class="cockpit-${check.state === 'critical' ? 'negative' : check.state === 'warning' ? 'warning' : 'positive'}">${this._escapeHtml(check.value)}</strong></div>`).join('');
     this._renderSystemHealth(snapshot);
+    this._renderExecutionStatus(snapshot);
     // Lo snapshot di rischio è la fonte che si aggiorna più spesso: allinea anche il
     // bottone di riattivazione, così non dipende dal solo refresh del pannello agenti.
     this._setKillSwitchUi(snapshot.killSwitch);
@@ -617,6 +632,96 @@ class PerpsApp {
     }
   }
 
+  /**
+   * Card EXECUTION STATUS della dashboard (DEBT-03).
+   *
+   * Prima non conteneva un solo valore misurato: tre id che nessuno scriveva mai
+   * (`#cockpitFills`, `#cockpitPending`, `#cockpitRejectRate`, fissi a '—'), un
+   * badge "LIVE" verde e "Queue health: Stable" scritti nel markup. Su un
+   * pannello di trading "Stable" è un'affermazione: diceva che la coda di
+   * esecuzione era in salute anche a server spento.
+   *
+   * Ora tutto viene da `execution` dello snapshot di rischio, che è già la fonte
+   * unica di Risk & Alerts e SYSTEM HEALTH — nessuna seconda verità.
+   *
+   * TRE STATI, NON DUE. `null` = "non lo so" (fonte non interrogata o in
+   * errore) e si stampa '—' in colore neutro; un numero = "l'ho misurato", zero
+   * compreso. Distinguerli è tutto il punto della storia: `Fills / 5m: 0`
+   * significa "ho letto lo storico e in cinque minuti non è stato eseguito
+   * niente", che è un'informazione utile e diversa da "non ho potuto leggere lo
+   * storico".
+   *
+   * PERCHÉ "REJECT RATE" NON C'È PIÙ, invece di essere alimentato. Nessuna fonte
+   * di questo sistema conta gli ordini rifiutati: `metrics.js` ha
+   * `orders_placed_total` ma nessun contatore dei rifiuti, la tabella `trades`
+   * registra solo le esecuzioni riuscite e `tickErrors` conta gli errori di
+   * ciclo, che non sono rifiuti dell'exchange. Un tasso ha bisogno di numeratore
+   * *e* denominatore: senza il numeratore, qualunque percentuale mostrata lì
+   * sarebbe inventata — e "0%" sarebbe la peggiore, perché afferma che nessun
+   * ordine è stato rifiutato. La riga è rimossa e l'aggiunta del contatore è
+   * segnalata come candidato di refinement (sta sul percorso di invio ordini,
+   * non in questo file).
+   */
+  _renderExecutionStatus(snapshot) {
+    const setText = (id, value, state = '') => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = value;
+      el.className = state;
+    };
+    const mode = document.getElementById('cockpitExecMode');
+    const exec = snapshot?.execution;
+    if (!exec) {
+      setText('cockpitFills', '—');
+      setText('cockpitPending', '—');
+      setText('cockpitQueueDepth', '—');
+      setText('cockpitQueueHealth', '—');
+      if (mode) { mode.textContent = '—'; mode.className = 'cockpit-surface-note'; }
+      return;
+    }
+
+    // L'etichetta segue la finestra che il server dichiara (`windowMin`) invece
+    // di restare "5m" scritto a mano: due posti che dicono la stessa cosa
+    // divergono al primo cambio di costante, e il numero accanto sarebbe
+    // riferito a una finestra diversa da quella annunciata.
+    const windowMin = Number(exec.windowMin) || 5;
+    setText('cockpitFillsLabel', `Fills / ${windowMin}m`);
+    setText('cockpitFills', exec.fills === null || exec.fills === undefined ? '—' : String(exec.fills));
+
+    // Le proposte da decidere sono giallo solo se ce n'è almeno una: prima la
+    // riga era `class="cockpit-warning"` fissa nel markup, quindi anche uno zero
+    // — o un '—' — veniva mostrato come una cosa da guardare.
+    const pending = exec.pendingProposals;
+    setText('cockpitPending', pending === null || pending === undefined ? '—' : String(pending),
+      Number(pending) > 0 ? 'cockpit-warning' : '');
+
+    const depth = exec.queueDepth;
+    const threshold = exec.queueThreshold;
+    setText('cockpitQueueDepth', depth === null || depth === undefined ? '—'
+      : `${depth} azioni${threshold === null || threshold === undefined ? '' : ` / soglia ${threshold}`}`);
+
+    const QUEUE_HEALTH = {
+      idle: ['nessuna coda', 'cockpit-positive'],
+      busy: ['in smaltimento', 'cockpit-info'],
+      warning: ['oltre soglia', 'cockpit-warning'],
+      unknown: ['—', '']
+    };
+    const [healthText, healthClass] = QUEUE_HEALTH[exec.queueState] || QUEUE_HEALTH.unknown;
+    setText('cockpitQueueHealth', healthText, healthClass);
+
+    const MODES = {
+      live: ['LIVE', 'cockpit-positive'],
+      idle: ['FERMA · nessun bot in marcia', 'cockpit-warning'],
+      blocked: ['BLOCCATA · kill-switch', 'cockpit-negative'],
+      unknown: ['—', '']
+    };
+    const [modeText, modeClass] = MODES[exec.mode] || MODES.unknown;
+    if (mode) {
+      mode.textContent = modeText;
+      mode.className = `cockpit-surface-note ${modeClass}`.trim();
+    }
+  }
+
   _dashboardEquityData() {
     const liveHistory = this.riskSnapshot?.equityHistory || [];
     if (liveHistory.length) return liveHistory.map((point) => ({ time: point.time, value: Number(point.value) }));
@@ -650,12 +755,11 @@ class PerpsApp {
       ? Math.min(100, Math.max(0, (margin / equity) * 100))
       : null;
     const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
-    const usd = (value) => this.fmtUsd(value).replace('$-', '-$');
     const now = new Date();
     const timestamp = now.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) + ' EST';
 
-    setText('cockpitEquity', equityValue === null ? '—' : usd(equityValue));
-    setText('cockpitHeaderEquity', equityValue === null ? '—' : usd(equityValue));
+    setText('cockpitEquity', equityValue === null ? '—' : this.fmtUsd(equityValue));
+    setText('cockpitHeaderEquity', equityValue === null ? '—' : this.fmtUsd(equityValue));
     // Secondo valore in EUR (CUR-01): compare solo se il tasso è fresco, sparisce
     // da sé quando non lo è — `_setEurText` svuota e nasconde l'elemento.
     this._setEurText('cockpitEquityEur', equityValue);
@@ -671,13 +775,13 @@ class PerpsApp {
       const realized = Number(risk.pnl.realized);
       const unrealized = Number(risk.pnl.unrealized);
       if (Number.isFinite(net)) {
-        setText('cockpitNetPnl', `${net >= 0 ? '+' : '-'}${usd(Math.abs(net))}`);
+        setText('cockpitNetPnl', `${net >= 0 ? '+' : '-'}${this.fmtUsd(Math.abs(net))}`);
         const netEl = document.getElementById('cockpitNetPnl');
         if (netEl) netEl.className = `cockpit-kpi-value ${net >= 0 ? 'cockpit-positive' : 'cockpit-negative'}`;
         this._setEurText('cockpitNetPnlEur', net);
       }
-      if (Number.isFinite(realized)) setText('cockpitRealized', `Realized ${realized >= 0 ? '+' : '-'}${usd(Math.abs(realized))}`);
-      if (Number.isFinite(unrealized)) setText('cockpitUnrealized', `Unrealized ${unrealized >= 0 ? '+' : '-'}${usd(Math.abs(unrealized))}`);
+      if (Number.isFinite(realized)) setText('cockpitRealized', `Realized ${realized >= 0 ? '+' : '-'}${this.fmtUsd(Math.abs(realized))}`);
+      if (Number.isFinite(unrealized)) setText('cockpitUnrealized', `Unrealized ${unrealized >= 0 ? '+' : '-'}${this.fmtUsd(Math.abs(unrealized))}`);
     }
     if (risk.drawdown && Number.isFinite(Number(risk.drawdown.maxPct))) {
       setText('cockpitDrawdown', `-${Number(risk.drawdown.maxPct).toFixed(2)}%`);
@@ -691,6 +795,7 @@ class PerpsApp {
     // card viene affermato dal codice al primo render, e non dipende dal fatto
     // che qualcuno non rimetta valori fissi nel markup.
     this._renderSystemHealth(this.riskSnapshot || null);
+    this._renderExecutionStatus(this.riskSnapshot || null);
     // `hasAccountData` distingue "il conto non ha ancora risposto" da "il conto
     // ha risposto e non ci sono posizioni": senza questa distinzione la tabella
     // affermava "Nessuna posizione aperta" già al primo render, prima di sapere.

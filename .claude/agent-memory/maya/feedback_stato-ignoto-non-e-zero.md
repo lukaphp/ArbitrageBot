@@ -36,6 +36,24 @@ schermo l'ultima cosa che c'era, e al primo caricamento quella cosa è il placeh
 4. Nei test sul markup, oltre alle stringhe specifiche usa un **invariante**: es. "nel pannello
    Dashboard non esiste nessun importo in dollari scritto a mano"
    (`/[+-]?\$\s?[\d.,]+/`). Regge anche contro placeholder nuovi che oggi non conosco.
+5. **`Number(null)` vale 0 e `Number.isFinite(0)` è `true`.** Quindi il controllo che viene naturale
+   scrivere — `Number.isFinite(Number(x)) ? Number(x) : null` — trasforma proprio l'assenza di dato
+   nello zero che stai cercando di evitare. Escludi `null`/`undefined`/`''` **prima** di convertire.
+   Non è teoria: in DEBT-03 (Sprint 2 R2) il mio primo `deriveExecutionStatus` aveva esattamente
+   quella riga, e il caso "le proposte non leggibili non diventano zero" è andato rosso e l'ha preso.
+   Corollario di metodo: quando implemento i tre stati, il caso da scrivere **per primo** è "null non
+   deve diventare 0" — è quello che intercetta la coercizione, mentre i casi sul valore misurato
+   passerebbero comunque.
+6. Un `[]` che arriva da un `catch` è la stessa trappola in forma di array: `fills = []` non
+   distingue "nessuna operazione" da "non ho potuto leggere lo storico". Se il ramo di errore produce
+   un contenitore vuoto, serve un **flag separato** (`fillsAvailable`) accanto al dato, e va inizializzato
+   a `false` — non a `true` con l'idea di abbassarlo nel catch, perché il percorso in cui non si legge
+   affatto (nessun indirizzo, chiamata mai fatta) non passa da nessun catch.
+7. Attenzione ai valori fissi **senza `id`**: sono i peggiori perché nessun renderer potrà mai
+   correggerli e nessun test che cerchi id orfani li trova. In Sprint 2 R2 ho trovato un
+   `<span class="cockpit-positive">OK</span>` nella card Max drawdown che resta verde anche mentre la
+   riga sotto, quella scritta dal codice, dice "Review now": la stessa card afferma due cose opposte.
+   Cerca i badge di stato **senza id** oltre a quelli con id mai scritto.
 
 Collegati: [[feedback-doc-riflette-codice]] (stessa disciplina, applicata alla documentazione),
 [[feedback-verifica-dod-frontend]].

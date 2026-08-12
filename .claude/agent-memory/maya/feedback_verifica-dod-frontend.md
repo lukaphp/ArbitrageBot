@@ -51,4 +51,23 @@ prima di fidarti: è una riga che qualcuno può cambiare.
    alla GitHub: minuscole, via la punteggiatura, **ogni** spazio diventa un trattino — `—` e `&`
    spariscono e lasciano un doppio trattino) e ogni `§N` deve corrispondere a una sezione esistente.
    Per `manual.html` il check equivalente è: ogni voce di nav ha la sua `<section class="doc-section">`
-   e viceversa.
+   e viceversa. **Aggiungi un terzo check, che è quello che vale davvero** (imparato in DEBT-05):
+   confronta i **corpi** delle sezioni prima/dopo, normalizzando solo numerazione e riferimenti `§`.
+   È l'unico modo di dimostrare "nessun contenuto perso o duplicato" invece di affermarlo — e produce
+   una riga di evidenza da mettere nel report. Non ricordarti a mano le sottosezioni: `### 15.1`
+   diventa `### 16.1` e nessun anchor lo segnala se sbagli.
+8. **La ricchezza dell'harness `node:vm` va scelta in base a cosa il test deve provare, e a volte
+   serve un file nuovo invece di aggiornare quello condiviso.** Gli stub minimali degli altri test non
+   bastano per il focus da tastiera: un focus trap si può verificare solo se il finto DOM sa dire
+   *chi ha il focus* (`document.activeElement`, aggiornato da `focus()`), *cosa c'è dentro un nodo in
+   ordine di documento* (`querySelectorAll`) e *se un nodo è dentro un altro* (`contains`, per il
+   click fuori). Con gli stub di `advisorDrawerUi.test.js` i casi sul trap passerebbero senza provare
+   niente. In DEBT-06 ho scritto `test/advisorFocusTrapUi.test.js` con il suo harness più ricco invece
+   di gonfiare quello esistente: file separato, nessun rischio di rompere 16 casi altrui.
+   Nell'harness metti anche un **controllo finto "dietro" il pannello** e asserisci che il focus non
+   ci finisca mai: senza quello stai verificando dove il focus va, non da cosa lo stai proteggendo.
+9. **Fai dichiarare al test le precondizioni sullo stato dei controlli, non presumerle.** Due miei
+   casi in DEBT-06 partivano da elementi che il render aveva già `disabled` (il menu delle sessioni
+   senza conversazioni, tutto il composer a consulente spento): passavano/fallivano per il motivo
+   sbagliato. Un `assert.equal(el.disabled, true, 'precondizione: …')` in testa al caso costa una riga
+   e trasforma un test fragile in uno che spiega perché.

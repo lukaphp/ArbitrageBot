@@ -1,0 +1,43 @@
+{
+  "producedBy": "claude",
+  "updatedAt": "2026-08-12T23:45:00Z",
+  "sprint": "Sprint 2",
+  "release": "Release 2",
+  "epic": "Epic B — Completamento Release 1 + Epic C — Multi-provider Analyst",
+  "reviewedAt": "2026-08-12",
+  "disclaimer": "Aggregato prodotto direttamente da Claude in sessione di review col PO, come Sprint 1 — sintesi di bruno.json/joshua.json/maya.json (implementazione) più le review indipendenti di annie.json (correttezza/test) e jordan.json (rischio), due lenti distinte non coordinate tra loro.",
+  "statusCounts": { "readyForReview": 10, "done": 2, "blocked": 4 },
+  "sprintSpPlanned": 24,
+  "sprintSpCompleted": 19,
+  "sprintSpBlocked": 5,
+  "note": "5 SP restano bloccati su azioni dirette del PO (accesso sandbox-protetto, decisione di spesa reale, account su servizio esterno) — non delegabili ad agenti, non un'omissione dello sprint.",
+  "tasks": [
+    { "id": "CI-01", "title": "harden-runner da audit a block in CI", "owner": "joshua", "reviewers": ["annie", "jordan"], "sp": 2, "status": "ready_for_review", "verdict": "pass" },
+    { "id": "CHORE-01", "title": "Verifica igiene .npmrc", "owner": "po", "sp": 1, "status": "blocked", "note": "Sandbox-protetto anche per Claude" },
+    { "id": "OPS-02", "title": "Verifica reale backup/restore sul VPS", "owner": "claude", "sp": 1, "status": "done", "note": "Eseguito e documentato direttamente, docs/DEPLOY.md §5" },
+    { "id": "OPS-03r", "title": "Uptime esterno su /health", "owner": "claude", "sp": 1, "status": "blocked", "note": "Richiede un account reale su un servizio esterno" },
+    { "id": "ADV-OPS-01", "title": "Costo reale sessione advisor", "owner": "po", "sp": 1, "status": "blocked", "note": "Richiede decisione di spesa reale del PO" },
+    { "id": "OBS-OPS-01", "title": "Grafana (OBS-01) sul VPS reale", "owner": "claude", "sp": 1, "status": "done", "note": "Eseguito e documentato direttamente, docs/DEPLOY.md §6.1" },
+    { "id": "LLM-VAL-01", "title": "Suite avversaria vs modello DeepSeek/OpenRouter vero", "owner": "bruno", "sp": 2, "status": "blocked", "note": "Richiede chiave reale via Infisical" },
+    { "id": "DEBT-02", "title": "Cap tool-call per turno advisor", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 1, "status": "ready_for_review", "verdict": "pass" },
+    { "id": "DEBT-03", "title": "Card EXECUTION STATUS onesta", "owner": "maya", "reviewers": ["annie"], "sp": 2, "status": "ready_for_review", "verdict": "pass" },
+    { "id": "DEBT-04", "title": "Formattazione importi negativi in fmtUsd", "owner": "maya", "reviewers": ["annie"], "sp": 1, "status": "ready_for_review", "verdict": "pass" },
+    { "id": "DEBT-05", "title": "Ordine sezioni MANUAL.md vs manual.html", "owner": "maya", "reviewers": ["annie"], "sp": 1, "status": "ready_for_review", "verdict": "pass" },
+    { "id": "DEBT-06", "title": "Focus trap nel drawer del consulente", "owner": "maya", "reviewers": ["annie"], "sp": 1, "status": "ready_for_review", "verdict": "pass" },
+    { "id": "LLM-PRICE-01", "title": "Riverifica prezzi pricing.models", "owner": "joshua", "reviewers": ["annie"], "sp": 1, "status": "ready_for_review", "verdict": "pass_con_rilievo_minore", "note": "Un prezzo OpenRouter resta un intervallo stimato, dichiarato come tale" },
+    { "id": "CRIT-05", "title": "Doppio conteggio equity (Spot hold vs margine perp)", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 3, "status": "ready_for_review", "verdict": "pass", "note": "Il finding più importante dello sprint — vedi sprint2.md §5. Decisione PO ancora aperta su risk_drawdown_state prima del deploy." },
+    { "id": "LLM-02", "title": "Migrare analyst.js a providers/ (include LLM-03)", "owner": "bruno", "reviewers": ["annie", "jordan"], "sp": 3, "status": "ready_for_review", "verdict": "pass" },
+    { "id": "LLM-04", "title": "Stima costo senza countTokens (per-provider)", "owner": "bruno", "reviewers": ["annie"], "sp": 2, "status": "ready_for_review", "verdict": "pass_con_rilievo_minore", "note": "Criterio 2 (calibrazione contro un caso reale) resta aperto senza spesa reale su countTokens — meccanismo di autocalibrazione gratuito già presente nel codice" }
+  ],
+  "refinementCandidates": [
+    "CRIT-05 — decisione PO necessaria PRIMA del deploy su qualunque istanza con storico gonfiato: risk_equity_history E risk_drawdown_state (quest'ultimo monotono, Math.max) vanno trattati insieme, non solo il primo. (Annie + Jordan, priorità 1)",
+    "src/agents/analyst/analyst.js ha lo stesso pattern di tool-call non protetto che DEBT-02 ha corretto solo lato advisor — l'Analyst gira senza supervisione umana su cadenza automatica. (Jordan)",
+    "DEBT-02 vive solo dentro advisor.chat(), non condiviso — nulla forza ADV-05 (Sprint 3, commento su alert di rischio) a riusarlo invece di scrivere un nuovo loop scoperto. (Jordan)",
+    "harden-runner (CI-01) può degradare da block ad audit in silenzio se la risoluzione dell'host di cache fallisce — nessun segnale nell'esito, solo una riga di log. Non ancora presidiato da uno step dedicato. (Joshua, confermato da Jordan)",
+    "public/index.html — badge 'OK' fisso sulla card Max Drawdown, mai scritto da codice, può contraddire la riga sotto (vera) in caso di drawdown critico. (Maya, fuori perimetro DEBT-03)",
+    "Contatore ordini rifiutati (orders_rejected_total) mancante — prerequisito per far tornare 'Reject rate' rimossa correttamente da DEBT-03. (Maya)",
+    "src/server.js — pnl.realized diventa 0 in silenzio se la lettura dei fill fallisce, senza propagare l'errore a sourceErrors. (Maya, fuori perimetro DEBT-03)",
+    "get_risk_snapshot (tool Analyst) non include il blocco execution introdotto da DEBT-03 — il consulente non vede la profondità della coda che la cockpit ora mostra. (Maya)",
+    "config.js — il pattern parseFloat(env) || default rende impossibile impostare un valore a zero via env (es. varianti :free di OpenRouter). Direzione d'errore prudente, non urgente. (Joshua)"
+  ]
+}

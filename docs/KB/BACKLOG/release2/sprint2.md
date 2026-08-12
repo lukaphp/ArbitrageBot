@@ -1,10 +1,12 @@
 # Release 2 · Sprint 2 — Completamento Release 1 + Multi-provider Analyst (Epic B + Epic C)
 
-**Team:** Nautilus · **Stato:** planning, 12 agosto 2026 — subito dopo la chiusura review di Sprint 1
-(21/21 SP, `sprint1.md`) e durante la demo operativa isolata di Jordan sul VPS (ordini testnet reali,
-in corso). Questo sprint copre **Epic B** (completamento operativo/debito residuo di Release 1, ora 19
-SP dopo l'aggiunta di CRIT-05) ed **Epic C** (multi-provider anche per l'Analyst, 5 SP) — nessuna
-dipendenza dura tra le due epiche, per questo pianificate insieme (`release2/README.md` §7).
+**Team:** Nautilus · **Stato:** review chiusa, 19/24 SP fatti e verificati, 5 SP bloccati su azioni
+dirette del PO (12 agosto 2026) — planning tenuto lo stesso giorno, subito dopo la chiusura review di
+Sprint 1 (21/21 SP, `sprint1.md`) e durante la demo operativa isolata di Jordan sul VPS (ordini
+testnet reali, ancora in corso). Questo sprint copre **Epic B** (completamento operativo/debito
+residuo di Release 1, 19 SP dopo l'aggiunta di CRIT-05) ed **Epic C** (multi-provider anche per
+l'Analyst, 5 SP) — nessuna dipendenza dura tra le due epiche, per questo pianificate insieme
+(`release2/README.md` §7).
 
 **Nota di sequenziamento, decisa esplicitamente in planning:** la demo di Jordan sta girando in
 parallelo a questo sprint, sullo stesso VPS ma su un'istanza Docker isolata (nessun conflitto di
@@ -427,3 +429,68 @@ Demo Jordan (in corso) ──► CRIT-05 (secondo campione necessario prima di i
 Nessuna storia di questo sprint tocca l'istanza demo (porta 8091) né richiede di fermarla. Prossimo
 passo: avvio dell'esecuzione, con lo stesso meccanismo di autonomia (`docs/KB/BACKLOG/release2/sprint2-status/`)
 già usato per Sprint 1 — su richiesta separata del PO.*
+
+---
+
+## 5. Esito review (12 agosto 2026)
+
+**19/24 SP fatti e verificati, 5 SP bloccati su azioni dirette del PO** (non delegabili ad agenti,
+non un'omissione dello sprint). `npm test`: 648/648 verdi (era 592 a inizio sprint). Lint pulito su
+133 file. Tutto il lavoro implementato in worktree isolati e integrato in `feat/perps-hardening` dopo
+verifica indipendente ad ogni passaggio — nessun commit fatto alla cieca sul branch condiviso.
+
+**Le 10 storie di sviluppo, tutte verificate `pass` o `pass con rilievo minore` da Annie**
+(correttezza/test) e riviste da Jordan (rischio): CI-01, DEBT-02, DEBT-03, DEBT-04, DEBT-05, DEBT-06,
+LLM-PRICE-01, **CRIT-05**, LLM-02 (con LLM-03), LLM-04. Le 3 storie operative dirette (OPS-02,
+OBS-OPS-01) eseguite e verificate personalmente sul VPS reale — non delegabili a un subagent, che non
+ha accesso SSH.
+
+**Il finding più importante dello sprint: CRIT-05, sbloccata e chiusa lo stesso giorno.** La demo
+operativa di Jordan ha prodotto il secondo campione richiesto (due posizioni concorrenti) nel
+pomeriggio del 12 agosto; Bruno ha implementato il fix la sera stessa, verificandolo con
+un'identità algebrica (`spotAvailable = spot.total - spot.hold` rende l'equity invariante
+all'apertura di una posizione **per costruzione**, non solo sul campione osservato) e riproducendo la
+formula vecchia per confermare rosso esattamente sui test attesi. Annie ha ripetuto la stessa
+verifica in modo indipendente, incluso il grep sui tre consumatori di `spotUsdc` per confermare che
+nessuno si è rotto sotto un campo ridefinito. Jordan ha aggiunto la lettura di rischio che né Bruno né
+Annie avevano scritto: **il fix da solo non basta** — `mergeDrawdownState()` in `riskSnapshot.js` è
+monotono (`Math.max`), quindi il calo istantaneo di equity al primo tick post-deploy diventerebbe un
+nuovo massimo di drawdown persistito per sempre in `risk_drawdown_state`, anche dopo aver corretto la
+serie visibile in `risk_equity_history`. **Decisione ancora da prendere dal PO prima di deployare il
+fix su qualunque istanza con storico gonfiato** (oggi solo la demo demo `:8091`; su mainnet il difetto
+è latente, `accountValue: 0`).
+
+**Altre scoperte emerse durante l'implementazione, non nel piano originale:**
+- **Alias DeepSeek ritirati**: Bruno ha trovato durante LLM-02 che `deepseek-chat`/`deepseek-reasoner`
+  — gli alias su cui era keyato `pricing.models` — sono stati ritirati il 24 luglio 2026, rendendo il
+  percorso multi-provider DeepSeek **inutilizzabile** (`missing_pricing`), non solo con prezzi vecchi.
+  Joshua l'ha corretto in LLM-PRICE-01 con un test end-to-end che riproduce il guasto originale prima
+  del fix.
+- **CI-01, il run di verifica reale ha trovato ciò che l'audit non poteva vedere**: 31 run in `audit`
+  con cache npm calda avevano osservato un solo cammino di rete; il primo run reale in `block` (cache
+  fredda) è andato rosso su due endpoint mai visti prima (`prebuild-install`/`node-gyp` per
+  `better-sqlite3`). Motivo esatto del criterio "verifica un run reale, non solo la configurazione" —
+  confermato a posteriori come non ridondante.
+- **DEBT-02 rivela lo stesso gap in `analyst.js`**: Jordan ha trovato, fuori dal perimetro dichiarato
+  della storia, che l'Analyst ha lo stesso pattern di tool-call non protetto che DEBT-02 ha corretto
+  solo lato advisor — ma l'Analyst gira senza supervisione umana, su cadenza automatica. Non risolto
+  in questo sprint, candidato di refinement con priorità.
+- **Un residuo di onestà sui dati trovato da Maya fuori dal proprio perimetro**: `public/index.html`,
+  badge "OK" fisso (mai scritto da codice) sulla card Max Drawdown, che può mostrare un via libera
+  mentre la riga sotto — quella vera — dice "Review now" per drawdown critico. Stessa classe di difetto
+  di DEBT-UI-01/DEBT-03, qui su una card di rischio.
+
+**4 storie restano bloccate, non forzate:**
+- **CHORE-01** — verifica `.npmrc`, sandbox-protetto anche per Claude, richiede ispezione diretta del PO.
+- **OPS-03r** — uptime esterno, richiede la creazione di un account reale su un servizio esterno.
+- **ADV-OPS-01** — costo reale di una sessione advisor, richiede una decisione di spesa reale del PO.
+- **LLM-VAL-01** — suite avversaria vs modello DeepSeek/OpenRouter vero, richiede una chiave reale
+  provisionata via Infisical.
+
+9 candidati di refinement raccolti da Annie in
+`docs/KB/BACKLOG/release2/sprint2-status/annie.json`, più il piano d'azione per priorità di Jordan in
+`sprint2-status/jordan.json` — tra questi, la decisione bloccante su CRIT-05/drawdown resta la
+priorità 1 per il prossimo passo, prima di qualunque deploy.
+
+*Refinement chiuso il 12 agosto 2026. Review chiusa il 12 agosto 2026 — 19/24 SP verificati, 5 SP in
+attesa del PO.*

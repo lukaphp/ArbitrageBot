@@ -39,6 +39,63 @@ storia verrà presa in carico.
 
 ---
 
+## Nota di contesto (Claude, 12 agosto 2026) — valutazione Hermes-Agent
+
+Aggiunta su richiesta del PO. Non lo conoscevo da fonti pregresse — ricercato oggi su fonti reali
+(NVIDIA, repository GitHub, documentazione ufficiale), non a memoria.
+
+**Cos'è.** [Hermes Agent](https://github.com/nousresearch/hermes-agent) è un framework open-source
+per agenti AI di Nous Research, licenza **MIT**, rilasciato il 25 febbraio 2026. Ha superato 140.000
+stelle GitHub in meno di tre mesi ed è descritto come l'agente più usato al mondo su OpenRouter.
+NVIDIA lo ha scelto come runtime di riferimento per Nemotron 3 Ultra 550B (Computex 2026) — fonti:
+[blog NVIDIA](https://blogs.nvidia.com/blog/rtx-ai-garage-hermes-agent-dgx-spark/), pagina GitHub del
+progetto.
+
+**Perché è direttamente rilevante per questo spike — sembra implementare già una parte dell'idea
+"Neofita-Maestro":**
+- **Memoria persistente delle skill**: dopo un compito complesso o un feedback, l'agente scrive
+  quanto imparato in un file `SKILL.md`, con ricerca full-text (FTS5) sulle conversazioni passate e
+  compatibilità con lo standard aperto `agentskills.io` — è esattamente il meccanismo di "esperienza
+  accumulata" descritto nel Task 1 del ticket originale, già implementato e non da progettare da zero.
+- **Model-agnostic per design**: oltre 300 modelli via Nous Portal (OpenAI, Anthropic, OpenRouter,
+  endpoint custom), switch tra modelli senza modifiche di codice (`/model`), funziona sia con modelli
+  cloud sia locali (Ollama, llama.cpp, LM Studio). Mappa direttamente sul principio "maestro esterno
+  per l'ideazione, motore interno per la routine" del ticket — qui il motore interno può essere
+  letteralmente un modello locale più economico, non necessariamente codice deterministico scritto a
+  mano.
+- **Footprint leggero**: gira su un VPS da $5/mese o in locale, nessun requisito di infrastruttura
+  pesante — riduce il costo del Task 2 (prototipazione) rispetto a costruire una pipeline RAG/vector
+  DB da zero.
+
+**Limite pratico concreto, non nella lista SWOT originale: compatibilità di stack.** Hermes Agent è
+un framework **Python** (`run_agent.py` come orchestration engine, plugin scoperti anche via pip
+entry points) — questo progetto è interamente **Node.js/JavaScript**
+(`src/agents/analyst/analyst.js`, `src/agents/advisor/`, `src/agents/providers/`). Un'adozione
+richiederebbe o un processo Python separato con un bridge verso l'app Node (stessa classe di
+frizione già segnalata nello spike MetaTrader per il ponte Python↔MetaTrader — vedi
+`spike-metatrader-integration.md`), o l'uso di Hermes solo come riferimento architetturale da
+reimplementare in JS. Non è un motivo per scartarlo, ma va reso esplicito nel Task 1: "adottare
+Hermes Agent" e "costruire un motore interno da zero" sono due opzioni concrete da confrontare, non
+solo la seconda.
+
+**Cosa non sono riuscito a verificare, dichiarato esplicitamente invece di darlo per buono:** la
+documentazione ufficiale raggiungibile oggi (pagina architettura inclusa) **non descrive
+esplicitamente** come le skill apprese vengono validate prima di essere persistite, né guardrail
+specifici contro l'apprendimento di comportamenti allucinati o pattern errati. È esattamente il
+rischio che il ticket originale individua come Weakness principale ("falso apprendimento/overfitting")
+e che il Task 2 del ticket (guardrail di validazione) dovrebbe comunque costruire — l'adozione di
+Hermes Agent **non solleva** dalla necessità di quel task, nella migliore delle ipotesi lo accelera
+sul lato memoria/persistenza, non sul lato validazione.
+
+**Raccomandazione per il refinement:** quando lo spike verrà pianificato, il Task 1 (design
+architetturale) dovrebbe includere esplicitamente una valutazione "adopt vs. build" con Hermes Agent
+come opzione concreta, non solo un'architettura custom — con un prototipo minimo (Task 2 del ticket
+originale) che verifichi in pratica sia la fattibilità del bridge Python↔Node, sia se e come i
+guardrail di validazione (Task 2) si innestano sul suo meccanismo di skill, prima di decidere se
+costruire da zero.
+
+---
+
 ## 1. Obiettivo dello Spike
 
 Analizzare la fattibilità e definire l'architettura per evolvere l'attuale sistema (basato su

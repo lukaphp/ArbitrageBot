@@ -70,7 +70,10 @@ import advisor from './agents/advisor/advisor.js';
 import proposals from './agents/proposals.js';
 import riskAgent from './agents/riskAgent.js';
 import mlTrainer from './agents/mlTrainer.js';
-import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk, RISK_ALERT_THRESHOLDS, toRiskBotView } from './perps/riskSnapshot.js';
+import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk, deriveExecutionStatus, RISK_ALERT_THRESHOLDS, toRiskBotView } from './perps/riskSnapshot.js';
+// DEBT-03: la profondità della coda di esecuzione (WARN-02) è la sola fonte reale
+// per "Queue health" nella card EXECUTION STATUS della cockpit.
+import execQueue from './perps/execQueue.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -439,6 +442,13 @@ class ArbitrageBotServer {
       let orders = [];
       let fills = [];
       let agent = null;
+      // DEBT-03: `fills = []` non distingue "nessuna operazione" da "non ho
+      // potuto leggere lo storico". La card EXECUTION STATUS deve poter dire
+      // "non lo so" invece di mostrare uno zero che afferma il contrario, e
+      // senza questo flag lo zero del catch sarebbe indistinguibile da una
+      // misura. Parte da `false` proprio perché senza indirizzo non si è letto
+      // nulla.
+      let fillsAvailable = false;
 
       if (address) {
         try {
@@ -455,6 +465,7 @@ class ArbitrageBotServer {
         }
         try {
           fills = await hyperliquid.getUserFills(address, network);
+          fillsAvailable = true;
         } catch (error) {
           logger.warn('Risk snapshot: fills non disponibili', error.message);
         }
@@ -502,6 +513,31 @@ class ArbitrageBotServer {
         defaultMaxDailyLossUsd: config.HYPERLIQUID_CONFIG.risk.maxDailyLossUsd
       });
 
+      // DEBT-03 — dati veri per la card EXECUTION STATUS. Le proposte pendenti
+      // ancora valide sono le sole che l'utente deve davvero decidere: quelle
+      // già scadute vengono marcate `expired` dal runtime al giro successivo, e
+      // contarle qui gonfierebbe una coda di lavoro che non esiste più.
+      let pendingProposals = null;
+      let proposalsAvailable = true;
+      try {
+        pendingProposals = db.listProposals({ status: 'pending', limit: 500 })
+          .filter(row => !row.expires_at || Number(row.expires_at) > now).length;
+      } catch (error) {
+        proposalsAvailable = false;
+        logger.warn('Risk snapshot: proposte pendenti non leggibili', error.message);
+      }
+      // `depthSnapshot()` include anche `byKey`, che è indicizzato per MASTER
+      // ADDRESS: `deriveExecutionStatus` ne estrae solo `max` e `threshold` e non
+      // lo ripropaga, quindi nella risposta non finisce nessun indirizzo. È la
+      // stessa scelta già fatta per `perps_execqueue_depth` in metrics.js — chi
+      // deve sapere QUALE wallet è in coda lo legge dal warning nei log.
+      const execution = deriveExecutionStatus({
+        now, fills, fillsAvailable, pendingProposals, proposalsAvailable,
+        queue: execQueue.depthSnapshot(),
+        killSwitch,
+        botsRunning: bots.filter(bot => bot.status === 'running').length
+      });
+
       res.json({
         success: true,
         data: {
@@ -539,6 +575,7 @@ class ArbitrageBotServer {
           },
           alerts,
           summary: summarizeRisk(alerts, { killSwitch }),
+          execution,
           sourceErrors
         }
       });

@@ -632,6 +632,54 @@
             </div>
 
             <div class="card">
+                <h3>Card EXECUTION STATUS</h3>
+                <p>Dice cosa sta facendo il motore di esecuzione <em>adesso</em>. Il badge accanto al titolo ha tre valori possibili e nessuno di essi è un default: <code>LIVE</code> (almeno un bot in marcia e aperture non bloccate), <code>FERMA · nessun bot in marcia</code> (niente partirà da solo) e <code>BLOCCATA · kill-switch</code> (nessuna apertura passa, vedi Tab Risk).</p>
+
+                <div class="table-wrap">
+                <table class="feature-table">
+                    <thead>
+                        <tr>
+                            <th>Riga</th>
+                            <th>Da dove viene</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="ui-element">Fills / 5m</span></td>
+                            <td>Operazioni eseguite negli ultimi 5 minuti, contate sullo storico fill di Hyperliquid.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Proposte da decidere</span></td>
+                            <td>Proposte dell'Analyst ancora in attesa e non scadute. Diventa gialla solo se ce n'è almeno una.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Coda di esecuzione</span></td>
+                            <td>Azioni firmate in coda o in esecuzione sul wallet più carico, con la soglia di allerta configurata (<code>PERPS_EXECQUEUE_DEPTH_WARN</code>).</td>
+                        </tr>
+                        <tr>
+                            <td><span class="ui-element">Queue health</span></td>
+                            <td><code>nessuna coda</code>, <code>in smaltimento</code> oppure <code>oltre soglia</code>, derivato dalla riga sopra.</td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+
+                <div class="alert alert-info">
+                    <span class="alert-icon">ℹ️</span>
+                    <div>
+                        <strong><code>—</code> significa "non lo so", <code>0</code> significa "ho guardato".</strong> Finché il primo controllo di rischio non è arrivato — o se la lettura di una fonte è fallita — la riga mostra <code>—</code> in grigio, non uno zero. È la stessa regola del grafico equity e dei tile: su un pannello di trading uno zero è un'affermazione, e affermare "nessuna operazione negli ultimi 5 minuti" senza aver potuto leggere lo storico sarebbe falso.
+                    </div>
+                </div>
+
+                <div class="alert alert-warning">
+                    <span class="alert-icon">⚠️</span>
+                    <div>
+                        <strong>Non c'è una voce "reject rate", e non è una dimenticanza.</strong> Nessun componente del sistema conta oggi gli ordini rifiutati dall'exchange: le metriche contano quelli <em>inviati</em>, e la tabella <code>trades</code> registra solo le esecuzioni riuscite. Un tasso di rifiuto richiede il numeratore, quindi la riga è stata rimossa invece di mostrare uno <code>0%</code> che affermerebbe una cosa non verificata. Tornerà quando il contatore dei rifiuti esisterà.
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
                 <h3>Secondo valore in euro</h3>
                 <p>Accanto a <strong>equity</strong>, <strong>PnL giornaliero</strong> e <strong>PnL di ogni posizione</strong> compare un secondo importo in euro, più piccolo e in grigio, preceduto da <code>≈</code>. Sotto l'intestazione della dashboard una riga dichiara il tasso usato e la sua età: <code>EUR indicativo · EURUSD 1.0925 · aggiornato 12 min fa</code>.</p>
 
@@ -1220,8 +1268,10 @@
 
             <div class="card">
                 <h3>Una conversazione accanto ai dati, non al loro posto</h3>
-                <p>Il pulsante <span class="ui-element">💬 CONSULENTE</span> nell'intestazione, accanto al pill MetaMask, apre un pannello laterale da destra: una conversazione sul tuo portafoglio, che resta visibile insieme a posizioni, PnL e rischio. Su schermo stretto occupa tutta la pagina. Si chiude con la <strong>×</strong>, con un secondo click sul pulsante o con <code>Esc</code>.</p>
+                <p>Il pulsante <span class="ui-element">💬 CONSULENTE</span> nell'intestazione, accanto al pill MetaMask, apre un pannello laterale da destra: una conversazione sul tuo portafoglio, che resta visibile insieme a posizioni, PnL e rischio. Su schermo stretto occupa tutta la pagina. Si chiude con la <strong>×</strong>, con un secondo click sul pulsante, con <code>Esc</code> oppure <strong>cliccando fuori dal pannello</strong>.</p>
                 <p>È una cosa diversa dall'Analyst della sezione precedente: l'Analyst gira da solo e produce proposte, il consulente risponde a te e <strong>non propone niente</strong>.</p>
+
+                <p><strong>Da tastiera il pannello si comporta come un pannello.</strong> Con il drawer aperto <code>Tab</code> e <code>Shift+Tab</code> girano solo tra i suoi controlli (menu delle conversazioni, <span class="ui-element">+ Nuova</span>, <span class="ui-element">🗑</span>, campo di invio, <span class="ui-element">Invia</span>, <strong>×</strong>) e non finiscono sui pulsanti della cockpit che stanno <em>sotto</em> di esso: quelli sono coperti e invisibili, e su questa pagina includono i comandi d'ordine. Alla chiusura il focus torna dove era prima dell'apertura, di norma sul pulsante <span class="ui-element">💬 CONSULENTE</span>.</p>
 
                 <div class="table-wrap">
                 <table class="feature-table">
@@ -1496,7 +1546,11 @@
 
         <footer class="doc-footer">
             <div>🤖 <strong>ArbitrageBot Platform</strong> — Manuale Utente · versione testuale in <code>docs/MANUAL.md</code></div>
-            <div>Aggiornato: 10 agosto 2026 · Versione 2.7</div>
+            <!-- DEBT-05: questo piè di pagina diceva "Versione 2.7" mentre MANUAL.md
+                 dichiarava la 2.8, e i due file affermano di avere lo stesso
+                 contenuto. Due numeri di versione diversi sulla stessa cosa sono
+                 una mezza verità: da qui in poi si aggiornano insieme. -->
+            <div>Aggiornato: 12 agosto 2026 · Versione 2.9</div>
         </footer>
 
     </main>

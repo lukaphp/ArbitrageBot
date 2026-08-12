@@ -306,3 +306,94 @@ export function summarizeRisk(alerts = [], { killSwitch = false } = {}) {
     total: alerts.length
   };
 }
+
+/** Finestra su cui si contano i fill recenti nella card EXECUTION STATUS. */
+export const EXECUTION_FILL_WINDOW_MIN = 5;
+
+/**
+ * DERIVAZIONE DELLA CARD "EXECUTION STATUS" (DEBT-03)
+ * ---------------------------------------------------
+ * La card mostrava quattro valori scritti a mano nel markup: tre `—` che nessuno
+ * ha mai scritto e un "Queue health: Stable" fisso. Questa funzione produce
+ * l'unica versione derivata da dati veri, e — punto centrale della storia —
+ * distingue **tre** stati per ogni campo, non due: `null` significa "non lo so"
+ * (la fonte non ha risposto), un numero significa "l'ho misurato". Zero è una
+ * misura, non un ripiego: `fills: 0` afferma "ho letto lo storico e in questi
+ * cinque minuti non è stato eseguito nulla", cosa che non si può dire se la
+ * lettura dei fill è fallita.
+ *
+ * `fillsAvailable`/`proposalsAvailable` sono passati dal chiamante perché
+ * `[]` non distingue "nessun fill" da "non ho potuto leggere i fill": nella
+ * rotta le due letture stanno in `try/catch` separati e il catch produce un
+ * array vuoto.
+ *
+ * NON c'è nessun campo per il "reject rate": vedi il commento in
+ * `_renderExecutionStatus()` in `public/perps.js`. Nessuna fonte in questo
+ * sistema conta gli ordini rifiutati, e inventare un denominatore per farne una
+ * percentuale sarebbe esattamente il difetto che DEBT-03 chiude.
+ *
+ * Pura per lo stesso motivo delle altre funzioni di questo file: la coda e il DB
+ * sono singleton, e volerli in un test costringerebbe a toccare `data/perps.db`.
+ */
+export function deriveExecutionStatus({
+  now = Date.now(),
+  fills = [],
+  fillsAvailable = true,
+  pendingProposals = null,
+  proposalsAvailable = true,
+  queue = null,
+  killSwitch = false,
+  botsRunning = null,
+  windowMin = EXECUTION_FILL_WINDOW_MIN
+} = {}) {
+  /**
+   * Numero misurato, oppure `null` per "non lo so".
+   *
+   * ATTENZIONE, ed è il punto per cui questa funzione esiste: `Number(null)` vale
+   * **0** e `Number.isFinite(0)` è **true**, quindi il controllo ovvio
+   * (`isFinite(Number(x)) ? Number(x) : null`) trasforma proprio l'assenza di dato
+   * nello zero che tutta la storia serve a evitare. Il caso nullo va escluso
+   * prima, esplicitamente.
+   */
+  const measured = (value) => {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const since = now - windowMin * 60 * 1000;
+  const recentFills = fillsAvailable
+    ? fills.filter(fill => Number(fill?.time) >= since).length
+    : null;
+
+  // Profondità della coda di esecuzione: `execQueue.depthSnapshot()` (WARN-02).
+  // `max` è la coda del wallet PIÙ CARICO, non necessariamente quello richiesto:
+  // è la stessa semantica di `perps_execqueue_depth`, e con più master address
+  // configurati il numero mostrato può venire da un altro wallet. Si accetta
+  // perché la coda è un vincolo di macchina (le firme sono serializzate per
+  // wallet e condividono lo stesso processo), non un dato per-conto. `byKey` —
+  // che conterrebbe gli indirizzi — non viene ripropagato di proposito.
+  const depth = measured(queue?.max);
+  const threshold = measured(queue?.threshold);
+  const queueState = depth === null ? 'unknown'
+    : (threshold !== null && depth > threshold) ? 'warning'
+      : depth > 0 ? 'busy' : 'idle';
+
+  // Lo stato della card è "com'è l'esecuzione adesso", non "il server è vivo":
+  // con il kill-switch inserito nessuna apertura parte, e dirlo LIVE sarebbe
+  // falso. Senza informazione sui bot non si afferma niente.
+  const running = measured(botsRunning);
+  const mode = killSwitch ? 'blocked'
+    : running === null ? 'unknown'
+      : running > 0 ? 'live' : 'idle';
+
+  return {
+    windowMin,
+    fills: recentFills,
+    pendingProposals: proposalsAvailable ? measured(pendingProposals) : null,
+    queueDepth: depth,
+    queueThreshold: threshold,
+    queueState,
+    mode
+  };
+}

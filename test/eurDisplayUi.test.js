@@ -235,16 +235,20 @@ test('PnL per posizione: EUR presente a tasso fresco, assente altrimenti', async
   const fresh = loadFxUi({ fx: { rate: 1.10, asOf: Date.now(), stale: false } });
   await fresh.perps.loadFxRate();
   fresh.perps._renderPositions(positions);
-  // NB: questa tabella stampa `$-55`, mentre il cockpit normalizza in `-$55`.
-  // È un'incoerenza che precede CUR-01 e resta fuori dal suo perimetro: qui si
-  // verifica solo che l'USD non venga toccato e che l'EUR gli stia accanto.
-  assert.match(fresh.elements.positionsList.innerHTML, /\$-55/, 'USD primario');
+  // Qui c'era `$-55`: questa tabella non passava dalla normalizzazione del segno
+  // che il cockpit si faceva a mano, e l'incoerenza era annotata come fuori dal
+  // perimetro di CUR-01. **DEBT-04 l'ha chiusa alla radice** portando il segno
+  // dentro `fmtUsd()`, quindi ora anche la tabella Positions stampa `-$55` senza
+  // che nessuno qui abbia dovuto ricordarsene — che era il punto della storia.
+  // Il resto dell'assert è invariato: l'USD resta primario, l'EUR gli sta accanto.
+  assert.match(fresh.elements.positionsList.innerHTML, /-\$55/, 'USD primario, segno prima del simbolo');
+  assert.equal(fresh.elements.positionsList.innerHTML.includes('$-55'), false, 'la vecchia forma non deve tornare');
   assert.match(fresh.elements.positionsList.innerHTML, /≈ -€50/, 'EUR indicativo sotto');
 
   const stale = loadFxUi({ fx: { rate: 1.10, asOf: Date.now(), stale: true } });
   await stale.perps.loadFxRate();
   stale.perps._renderPositions(positions);
-  assert.match(stale.elements.positionsList.innerHTML, /\$-55/);
+  assert.match(stale.elements.positionsList.innerHTML, /-\$55/);
   assert.equal(/€/.test(stale.elements.positionsList.innerHTML), false, 'nessun euro con tasso stantio');
 });
 

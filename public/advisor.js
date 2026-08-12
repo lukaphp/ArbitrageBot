@@ -34,6 +34,20 @@
 /** Etichette dei ruoli nel transcript. */
 const ADVISOR_ROLES = { user: 'Tu', assistant: 'Consulente' };
 
+/**
+ * Selettore degli elementi che possono ricevere il focus da tastiera dentro il
+ * drawer (DEBT-06). Scritto una volta qui e non dentro la funzione: il drawer
+ * cambia contenuto a ogni render (le opzioni delle sessioni, le bolle del
+ * transcript), quindi l'elenco va ricalcolato a ogni Tab e non memorizzato.
+ *
+ * `[tabindex="-1"]` è escluso di proposito: un elemento con tabindex negativo è
+ * raggiungibile via script ma non dalla tastiera, e includerlo nel giro
+ * significherebbe fermarci su qualcosa che l'utente non si aspetta.
+ */
+const FOCUSABLE_IN_DRAWER = [
+  'a[href]', 'button', 'textarea', 'input', 'select', '[tabindex]:not([tabindex="-1"])'
+].join(',');
+
 class AdvisorDrawer {
   constructor() {
     this.isOpen = false;
@@ -59,6 +73,14 @@ class AdvisorDrawer {
     this.retentionDays = null;
     /** Avviso corrente dentro il drawer: {text, kind}. */
     this.notice = null;
+    /**
+     * Elemento a cui restituire il focus alla chiusura (DEBT-06). È quello che
+     * lo aveva quando il drawer si è aperto — normalmente il toggle in header,
+     * ma non necessariamente: il drawer può essere aperto da `window.advisor`
+     * mentre il focus è altrove, e in quel caso rimandarlo comunque al toggle
+     * sposterebbe l'utente in un punto della pagina in cui non era.
+     */
+    this._returnFocusTo = null;
   }
 
   // ---- Infrastruttura ----
@@ -91,10 +113,93 @@ class AdvisorDrawer {
         this.send();
       }
     });
+    // Un solo listener di tastiera a livello di documento, e ogni ramo è
+    // condizionato a `isOpen`: a drawer chiuso questo codice non deve toccare
+    // nulla, altrimenti si porterebbe via il Tab del resto della cockpit
+    // (le tab del pannello, i campi degli ordini) che non c'entra niente.
     document.addEventListener?.('keydown', (event) => {
-      if (event?.key === 'Escape' && this.isOpen) this.close();
+      if (!this.isOpen) return;
+      if (event?.key === 'Escape') { this.close(); return; }
+      if (event?.key === 'Tab') this._trapFocus(event);
+    });
+    // Click fuori dal drawer: lo chiude, come la × e come Escape (DEBT-06).
+    // Non c'era: con il drawer aperto si poteva cliccare sulla cockpit dietro e
+    // il pannello restava lì, sopra i dati di cui si stava parlando. Il toggle è
+    // escluso perché ha già il suo handler, e senza l'esclusione i due si
+    // annullerebbero (chiude questo, riapre quello).
+    document.addEventListener?.('click', (event) => {
+      if (!this.isOpen) return;
+      const drawer = document.getElementById('advisorDrawer');
+      const toggle = document.getElementById('advisorToggle');
+      const target = event?.target;
+      if (!drawer || !target) return;
+      if (drawer === target || drawer.contains?.(target)) return;
+      if (toggle && (toggle === target || toggle.contains?.(target))) return;
+      this.close();
     });
     this._render();
+  }
+
+  /**
+   * Elementi del drawer che possono ricevere il focus, nell'ordine del DOM.
+   * Esclude i disabilitati e i nascosti: a consulente non disponibile il campo
+   * di invio e il pulsante Invia sono `disabled`, e un trap che ci si fermasse
+   * sopra sembrerebbe rotto. La × non è mai disabilitata, quindi la lista non è
+   * mai vuota in pratica — ma il caso vuoto è gestito comunque.
+   */
+  _focusable() {
+    const drawer = document.getElementById('advisorDrawer');
+    const nodes = drawer?.querySelectorAll?.(FOCUSABLE_IN_DRAWER) || [];
+    return Array.from(nodes).filter(el => !el.disabled && !el.hidden);
+  }
+
+  /**
+   * FOCUS TRAP (DEBT-06). Con il drawer aperto, Tab e Shift+Tab restano dentro.
+   *
+   * Perché serve: il drawer è un pannello `position: fixed` sopra la cockpit, ma
+   * il resto della pagina non è `inert` — quindi il focus da tastiera lo
+   * attraversava e finiva sui controlli *sotto* il drawer, invisibili e
+   * cliccabili con Invio. Su una cockpit di trading quei controlli includono i
+   * pulsanti degli ordini: uscire dal drawer senza vedere dove si è finiti non è
+   * solo un fastidio di accessibilità.
+   *
+   * Il giro si ricalcola a ogni Tab e non si memorizza: il contenuto del drawer
+   * cambia a ogni `_render()` (opzioni delle sessioni, stato dei pulsanti).
+   *
+   * SCELTA DELIBERATA: il drawer resta `role="complementary"` e NON diventa
+   * `role="dialog" aria-modal="true"`, che sarebbe la semantica canonica di una
+   * regione con focus trap. `aria-modal` nasconde il resto della pagina agli
+   * screen reader, e la ragione d'essere di questo pannello (spike §2, opzione B)
+   * è che la risposta si legga *accanto* alle posizioni di cui parla, non al loro
+   * posto: renderlo modale toglierebbe proprio a chi usa uno screen reader la
+   * cosa per cui il drawer è stato scelto. Il trap qui difende dal focus che
+   * finisce su controlli coperti e invisibili, non dichiara una modale.
+   */
+  _trapFocus(event) {
+    const items = this._focusable();
+    if (!items.length) { event?.preventDefault?.(); return; }
+    const active = document.activeElement;
+    const index = items.indexOf(active);
+    const first = items[0];
+    const last = items[items.length - 1];
+
+    // Focus fuori dal drawer (index === -1): è il caso che rendeva il trap
+    // necessario, e va riportato dentro invece di essere lasciato passare.
+    if (index === -1) {
+      event?.preventDefault?.();
+      (event?.shiftKey ? last : first).focus?.();
+      return;
+    }
+    if (event?.shiftKey && active === first) {
+      event?.preventDefault?.();
+      last.focus?.();
+      return;
+    }
+    if (!event?.shiftKey && active === last) {
+      event?.preventDefault?.();
+      first.focus?.();
+    }
+    // Negli altri casi il Tab nativo fa già la cosa giusta: non lo si intercetta.
   }
 
   /**
@@ -180,6 +285,14 @@ class AdvisorDrawer {
   }
 
   async open() {
+    // DEBT-06: si memorizza chi aveva il focus PRIMA di spostarlo nel drawer,
+    // così alla chiusura si torna esattamente lì. Normalmente è il toggle in
+    // header (l'utente ci ha appena cliccato o premuto Invio sopra); il fallback
+    // sul toggle copre l'apertura da script, dove `activeElement` è il body.
+    const previous = document.activeElement;
+    this._returnFocusTo = (previous && typeof previous.focus === 'function' && previous !== document.body)
+      ? previous
+      : document.getElementById('advisorToggle');
     this.isOpen = true;
     this._applyOpenState();
     this._render();
@@ -193,7 +306,12 @@ class AdvisorDrawer {
   close() {
     this.isOpen = false;
     this._applyOpenState();
-    document.getElementById('advisorToggle')?.focus?.();
+    // Il focus non va lasciato dentro un pannello ora `hidden`: chi naviga da
+    // tastiera si ritroverebbe su un elemento che non esiste più a schermo, e il
+    // Tab successivo ripartirebbe dall'inizio della pagina.
+    const target = this._returnFocusTo || document.getElementById('advisorToggle');
+    this._returnFocusTo = null;
+    target?.focus?.();
   }
 
   _applyOpenState() {

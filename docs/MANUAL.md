@@ -3,11 +3,20 @@
 Guida completa all'uso della piattaforma di trading su **Hyperliquid DEX**: interfaccia,
 bot automatici, motore di rischio, agenti AI e integrazioni.
 
-**Versione 2.8** · Aggiornato: 10 agosto 2026
+**Versione 2.9** · Aggiornato: 12 agosto 2026
 
 > 📄 Esiste anche una **versione HTML navigabile** con ricerca integrata, servita
 > dall'app su `/manual.html`. Questo file ne è la versione testuale: stesso contenuto,
 > leggibile da editor, diff e ricerca a riga di comando.
+>
+> **Sull'ordine delle sezioni la fonte di verità è `public/manual.html`** (DEBT-05):
+> lì la barra di navigazione raggruppa le sezioni sotto intestazioni visibili
+> all'utente — *Panoramica*, *Interfaccia Cockpit*, *Bot & Strategie*,
+> *Intelligenza Artificiale*, *Integrazioni & Sicurezza* — e spostare una sezione
+> la sposta anche di gruppo, cambiando quello che il lettore vede. Qui l'ordine è
+> una numerazione e non porta significato, quindi è questo file che si allinea.
+> Chi aggiunge una sezione la collochi prima nell'HTML e poi qui, con lo stesso
+> numero d'ordine.
 >
 > Per l'installazione, i segreti e il deploy in produzione vedi invece [DEPLOY.md](DEPLOY.md).
 
@@ -27,10 +36,10 @@ bot automatici, motore di rischio, agenti AI e integrazioni.
 10. [Paper trading (forward-test)](#10-paper-trading-forward-test)
 11. [Backtest e ottimizzazione walk-forward](#11-backtest-e-ottimizzazione-walk-forward)
 12. [Modello ML (predictor) e gate probabilistico](#12-modello-ml-predictor-e-gate-probabilistico)
-13. [Analyst AI e coda delle proposte](#13-analyst-ai-e-coda-delle-proposte)
-14. [Consulente AI (drawer di chat)](#14-consulente-ai-drawer-di-chat)
-15. [Storico strategie](#15-storico-strategie)
-16. [Indicatori tecnici](#16-indicatori-tecnici)
+13. [Indicatori tecnici](#13-indicatori-tecnici)
+14. [Analyst AI e coda delle proposte](#14-analyst-ai-e-coda-delle-proposte)
+15. [Consulente AI (drawer di chat)](#15-consulente-ai-drawer-di-chat)
+16. [Storico strategie](#16-storico-strategie)
 17. [Segnali esterni via webhook](#17-segnali-esterni-via-webhook)
 18. [Controllo via Telegram](#18-controllo-via-telegram)
 19. [Sicurezza e gestione dei segreti](#19-sicurezza-e-gestione-dei-segreti)
@@ -97,7 +106,39 @@ Quadro sintetico di capitale, posizioni e stato del sistema.
 database** (`risk_equity_history`), quindi la curva e il calcolo del drawdown
 **sopravvivono ai riavvii** dell'applicazione — non ripartono da zero a ogni restart.
 
-### 3.1 Secondo valore in euro
+### 3.1 Card EXECUTION STATUS
+
+Dice cosa sta facendo il motore di esecuzione *adesso*. Il badge accanto al titolo ha
+tre valori possibili e nessuno di essi è un default:
+
+| Badge | Significato |
+|:---|:---|
+| `LIVE` | Almeno un bot è in marcia e le aperture non sono bloccate. |
+| `FERMA · nessun bot in marcia` | Nessun bot sta girando: niente partirà da solo. |
+| `BLOCCATA · kill-switch` | Il kill-switch è inserito, nessuna apertura passa (§7.4). |
+
+| Riga | Da dove viene |
+|:---|:---|
+| **Fills / 5m** | Operazioni eseguite negli ultimi 5 minuti, contate sullo storico fill di Hyperliquid. |
+| **Proposte da decidere** | Proposte dell'Analyst ancora in attesa e non scadute (§14). Diventa gialla solo se ce n'è almeno una. |
+| **Coda di esecuzione** | Azioni firmate in coda o in esecuzione sul wallet più carico, con la soglia di allerta configurata (`PERPS_EXECQUEUE_DEPTH_WARN`). |
+| **Queue health** | `nessuna coda`, `in smaltimento` oppure `oltre soglia`, derivato dalla riga sopra. |
+
+> ℹ️ **`—` significa "non lo so", `0` significa "ho guardato".** Finché il primo
+> controllo di rischio non è arrivato — o se la lettura di una fonte è fallita — la
+> riga mostra `—` in grigio, non uno zero. È la stessa regola del grafico equity e
+> dei tile: su un pannello di trading uno zero è un'affermazione, e affermare
+> "nessuna operazione negli ultimi 5 minuti" senza aver potuto leggere lo storico
+> sarebbe falso.
+
+> ⚠️ **Non c'è una voce "reject rate", e non è una dimenticanza.** Nessun
+> componente del sistema conta oggi gli ordini rifiutati dall'exchange: le
+> metriche contano quelli *inviati*, e la tabella `trades` registra solo le
+> esecuzioni riuscite. Un tasso di rifiuto richiede il numeratore, quindi la riga
+> è stata rimossa invece di mostrare un `0%` che affermerebbe una cosa non
+> verificata. Tornerà quando il contatore dei rifiuti esisterà.
+
+### 3.2 Secondo valore in euro
 
 Accanto a **equity**, **PnL giornaliero** e **PnL di ogni posizione** compare un
 secondo importo in euro, più piccolo e in grigio, preceduto da `≈`. Sotto
@@ -440,7 +481,20 @@ gate smette di filtrare e ricevi un avviso Telegram.
 
 ---
 
-## 13. Analyst AI e coda delle proposte
+## 13. Indicatori tecnici
+
+| Indicatore | Cosa misura | Uso tipico |
+|:---|:---|:---|
+| **RSI** (Relative Strength Index) | Momentum, scala 0-100. | Sotto 30 = ipervenduto (spunto long); sopra 70 = ipercomprato (spunto short). |
+| **EMA / SMA** (medie mobili) | Media ponderata o semplice su N periodi. | Il crossover di una media veloce (EMA 9) sopra una lenta (EMA 21) segnala trend rialzista. |
+| **MACD** | Differenza tra due EMA + istogramma. | Istogramma > 0 = fase rialzista, < 0 = ribassista. |
+| **Bollinger Bands** | Banda di volatilità attorno a una media. | Prezzo oltre la banda superiore/inferiore = estensione o breakout. |
+| **ADX** (Average Directional Index) | **Forza** del trend, a prescindere dalla direzione. | Sopra 25 = trend solido. Sotto = fase laterale: filtra i falsi segnali. |
+| **ATR** (Average True Range) | Volatilità assoluta. | Adatta l'ampiezza di stop e trailing ai movimenti reali dell'asset. |
+
+---
+
+## 14. Analyst AI e coda delle proposte
 
 L'agente Analyst (basato su Claude) gira periodicamente, raccoglie evidenze con
 strumenti **read-only** e produce **proposte**.
@@ -495,12 +549,20 @@ e vanno aggiornati se i listini cambiano.
 
 ---
 
-## 14. Consulente AI (drawer di chat)
+## 15. Consulente AI (drawer di chat)
 
 Il pulsante **💬 CONSULENTE** nell'intestazione, accanto al pill MetaMask, apre un
 pannello laterale da destra: una conversazione sul tuo portafoglio, che resta
 visibile insieme a posizioni, PnL e rischio. Su schermo stretto occupa tutta la
-pagina. Si chiude con la **×**, con un secondo click sul pulsante o con `Esc`.
+pagina. Si chiude con la **×**, con un secondo click sul pulsante, con `Esc`
+oppure **cliccando fuori dal pannello**.
+
+**Da tastiera il pannello si comporta come un pannello.** Con il drawer aperto
+`Tab` e `Shift+Tab` girano solo tra i suoi controlli (menu delle conversazioni,
+`+ Nuova`, `🗑`, campo di invio, `Invia`, `×`) e non finiscono sui pulsanti della
+cockpit che stanno *sotto* di esso: quelli sono coperti e invisibili, e su questa
+pagina includono i comandi d'ordine. Alla chiusura il focus torna dove era prima
+dell'apertura, di norma sul pulsante **💬 CONSULENTE**.
 
 È una cosa diversa dall'Analyst della sezione precedente: l'Analyst gira da solo e
 produce proposte, il consulente risponde a te e **non propone niente**.
@@ -580,7 +642,7 @@ modello — `AGENT_ANALYST_MODEL` resta la manopola del modello.
 
 ---
 
-## 15. Storico strategie
+## 16. Storico strategie
 
 Ogni strategia proposta o testata viene archiviata, con:
 
@@ -593,7 +655,7 @@ Ogni strategia proposta o testata viene archiviata, con:
 È la memoria di lungo periodo del sistema: serve a non ri-testare per la terza volta
 una strategia che era già stata scartata.
 
-### 15.1 Esportare e importare strategie
+### 16.1 Esportare e importare strategie
 
 | Comando | Dove | Cosa fa |
 |:---|:---|:---|
@@ -614,7 +676,7 @@ l'importazione a metà. È deliberato — una strategia senza regole d'ingresso 
 sintatticamente valida ma darebbe un bot che non aprirebbe mai una posizione.
 
 **Dove finisce ciò che importi.** Una strategia importata **non diventa un bot da
-sola**: entra nella coda come **candidatura in attesa di approvazione** (§13), con
+sola**: entra nella coda come **candidatura in attesa di approvazione** (§14), con
 validità 24 ore invece dei 30 minuti delle proposte dell'AI — una strategia scritta a
 mano non decade col mercato come un "chiudi adesso", e coi 30 minuti scadrebbe mentre
 leggi la conferma. Per renderla operativa la approvi, e in quel momento passa dal
@@ -646,19 +708,6 @@ l'account di chi l'ha esportato.
 > ⚠️ **L'esportazione non è un backup.** Copre le strategie dello storico, non
 > posizioni, trade, impostazioni o chiavi agent cifrate. Per quelli vedi
 > `scripts/backup.sh` in [DEPLOY.md](DEPLOY.md) §5.
-
----
-
-## 16. Indicatori tecnici
-
-| Indicatore | Cosa misura | Uso tipico |
-|:---|:---|:---|
-| **RSI** (Relative Strength Index) | Momentum, scala 0-100. | Sotto 30 = ipervenduto (spunto long); sopra 70 = ipercomprato (spunto short). |
-| **EMA / SMA** (medie mobili) | Media ponderata o semplice su N periodi. | Il crossover di una media veloce (EMA 9) sopra una lenta (EMA 21) segnala trend rialzista. |
-| **MACD** | Differenza tra due EMA + istogramma. | Istogramma > 0 = fase rialzista, < 0 = ribassista. |
-| **Bollinger Bands** | Banda di volatilità attorno a una media. | Prezzo oltre la banda superiore/inferiore = estensione o breakout. |
-| **ADX** (Average Directional Index) | **Forza** del trend, a prescindere dalla direzione. | Sopra 25 = trend solido. Sotto = fase laterale: filtra i falsi segnali. |
-| **ATR** (Average True Range) | Volatilità assoluta. | Adatta l'ampiezza di stop e trailing ai movimenti reali dell'asset. |
 
 ---
 
@@ -734,7 +783,7 @@ silenzio.
 | `/proposte` | Elenca le proposte dell'Analyst AI in attesa. |
 | `/approva <id>` | Approva una proposta. |
 | `/rifiuta <id>` | Rifiuta una proposta. |
-| `/advisorbudget` | Mostra il budget mensile del consulente AI (§14), quanto hai speso nel mese e quando si azzera. Non cambia nulla. |
+| `/advisorbudget` | Mostra il budget mensile del consulente AI (§15), quanto hai speso nel mese e quando si azzera. Non cambia nulla. |
 | `/advisorbudget <importo>` | **Propone** un nuovo budget e ti chiede conferma con il riepilogo (da quanto a quanto). Non applica niente finché non confermi. Accetta `25`, `25.5`, `$25`, `12,50`; massimo `$1000`. |
 | `/advisorbudget confirm` | Applica il budget proposto (entro 5 minuti dalla proposta, altrimenti scade). La modifica finisce nell'audit con valore precedente e nuovo, e viene notificata sul canale. |
 | `/advisorbudget cancel` | Annulla la proposta in sospeso. |

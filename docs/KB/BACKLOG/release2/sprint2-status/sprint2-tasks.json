@@ -1,0 +1,27 @@
+{
+  "sprint": "Sprint 2",
+  "release": "Release 2",
+  "epic": "Epic B — Completamento Release 1 + Epic C — Multi-provider Analyst",
+  "planningAt": "2026-08-12",
+  "source": "docs/KB/BACKLOG/release2/sprint2.md",
+  "totalSp": 24,
+  "sequencingNote": "CRIT-05 va per ultima — dipende dal secondo campione prodotto dalla demo operativa isolata di Jordan, in corso in parallelo a questo sprint (vedi sprint2.md §0.14).",
+  "tasks": [
+    { "id": "CI-01", "title": "harden-runner da audit a block in CI", "owner": "joshua", "sp": 2, "priority": "P1" },
+    { "id": "CHORE-01", "title": "Verifica igiene .npmrc", "owner": "po", "sp": 1, "priority": "P2", "note": "Sandbox-protetto, ispezione diretta del PO" },
+    { "id": "OPS-02", "title": "Verifica reale backup/restore sul VPS", "owner": "claude", "sp": 1, "priority": "P1", "note": "Eseguito direttamente da Claude (accesso SSH), non delegabile a un subagent" },
+    { "id": "OPS-03r", "title": "Uptime esterno su /health", "owner": "claude", "sp": 1, "priority": "P1" },
+    { "id": "ADV-OPS-01", "title": "Costo reale sessione advisor (AGENTS_ENABLED=true)", "owner": "po", "sp": 1, "priority": "P1", "note": "Richiede decisione di spesa reale del PO prima di partire" },
+    { "id": "OBS-OPS-01", "title": "Grafana (OBS-01) sul VPS reale", "owner": "claude", "sp": 1, "priority": "P2" },
+    { "id": "LLM-VAL-01", "title": "Suite avversaria ADV-02 vs modello vero DeepSeek/OpenRouter", "owner": "bruno", "sp": 2, "priority": "P1", "note": "Richiede chiave reale via Infisical, decisione PO" },
+    { "id": "DEBT-02", "title": "Cap tool-call per turno advisor", "owner": "bruno", "sp": 1, "priority": "P2" },
+    { "id": "DEBT-03", "title": "Card EXECUTION STATUS onesta", "owner": "maya", "sp": 2, "priority": "P2" },
+    { "id": "DEBT-04", "title": "Formattazione importi negativi in fmtUsd", "owner": "maya", "sp": 1, "priority": "P3" },
+    { "id": "DEBT-05", "title": "Ordine sezioni MANUAL.md vs manual.html", "owner": "maya", "sp": 1, "priority": "P3" },
+    { "id": "DEBT-06", "title": "Focus trap nel drawer del consulente", "owner": "maya", "sp": 1, "priority": "P3" },
+    { "id": "LLM-PRICE-01", "title": "Riverifica prezzi pricing.models", "owner": "joshua", "sp": 1, "priority": "P2" },
+    { "id": "CRIT-05", "title": "Doppio conteggio equity (Spot hold vs margine perp)", "owner": "bruno", "sp": 3, "priority": "P0", "note": "SEQUENZIATA PER ULTIMA — vedi sequencingNote. Trovata l'11-12 agosto durante la demo operativa di Jordan." },
+    { "id": "LLM-02", "title": "Migrare analyst.js a providers/ (include LLM-03)", "owner": "bruno", "sp": 3, "priority": "P1" },
+    { "id": "LLM-04", "title": "Stima costo senza countTokens (per-provider)", "owner": "bruno", "sp": 2, "priority": "P2" }
+  ]
+}

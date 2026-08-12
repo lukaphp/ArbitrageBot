@@ -218,8 +218,10 @@ per decisione esplicita del PO l'11 agosto: questa release riparte da Sprint 1):
 - **Sprint 1 — Epic A per intero** (21 SP) ✅ **chiuso**: coerente con la decisione "prima epica,
   blocca le altre". Dettaglio e esito review in `sprint1.md`. Due extra nati in review (warning
   multi-bot stesso mercato, guard su `getLimits()`) consegnati nella stessa seduta.
-- **Sprint 2 (proposto) — Epic B + Epic C** (16 + 5 = 21 SP): completamento operativo/debito residuo
-  e multi-provider Analyst, nessuna dipendenza tra loro, parallelizzabili.
+- **Sprint 2 — Epic B + Epic C** (19 + 5 = 24 SP), pianificato il 12 agosto 2026: completamento
+  operativo/debito residuo e multi-provider Analyst, nessuna dipendenza tra loro, parallelizzabili.
+  Dettaglio storia per storia in `sprint2.md`, incluso il vincolo di sequenza esplicito su CRIT-05
+  (va per ultima, dopo il secondo campione dalla demo operativa di Jordan in corso in parallelo).
 - **Sprint 3 (proposto) — Epic D + Epic E** (6 + 3 = 9 SP, sprint più leggero, spazio per eventuale
   scivolamento da Sprint 1/2): il consulente proattivo e la sua prima capacità di scrittura, in
   questo ordine perché E dipende concettualmente da D (avere il consulente già integrato nel

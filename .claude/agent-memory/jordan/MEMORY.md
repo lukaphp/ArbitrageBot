@@ -1,0 +1,1 @@
+- [Demo operativa VPS :8091 — bot JORDAN-BTC-RSI-demo/JORDAN-AAVE-MACD-demo](project_demo-operativa-vps-2026-08-11.md) — stato bot, storico trade, CRIT-05 (equity doppio conteggio, non ancora fixato su questa demo), sorprese operative sessione per sessione

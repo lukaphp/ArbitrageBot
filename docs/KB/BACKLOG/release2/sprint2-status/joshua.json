@@ -1,0 +1,19 @@
+{
+  "agent": "joshua",
+  "updatedAt": "2026-08-12T18:00:00Z",
+  "tasks": {
+    "CI-01": {
+      "status": "in_progress",
+      "criteriaChecked": [false, false, false],
+      "notes": "Allowlist estratta dai log REALI di harden-runner su 31 run in audit (9→12 agosto, tutti success). Non ho usato la pagina insights di app.stepsecurity.io: il passo `Post Harden Runner` riversa nel log del job il registro dell'agente riga per riga (`domain resolved:` / `endpoint called ... process:`), che è la stessa fonte da cui la pagina insights è derivata ma con il PROCESSO chiamante — cioè quello che serve a distinguere il traffico del job da quello dell'infrastruttura del runner. In corso: verifica di un run reale in block."
+    },
+    "LLM-PRICE-01": {
+      "status": "not_started",
+      "criteriaChecked": [false, false, false],
+      "notes": ""
+    }
+  },
+  "notes": [
+    "AMBIENTE: worktree isolato 59 commit indietro rispetto a feat/perps-hardening, senza commit propri e antenato stretto — allineato con `git merge --ff-only` prima di scrivere qualunque riga. Nessuno stash, nessun lavoro di colleghi toccato."
+  ]
+}

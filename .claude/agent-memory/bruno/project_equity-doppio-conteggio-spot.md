@@ -1,35 +1,43 @@
 ---
 name: equity-doppio-conteggio-spot
-description: Finding APERTO (2026-08-12) — equity = accountValue + spotUsdc conta due volte il margine impegnato; diagnosi confermata, fix non applicato, decisione al PO
+description: CRIT-05 — equity = accountValue + spotUsdc contava due volte il margine; RISOLTO in Release 2 · Sprint 2 con composeEquity(); resta aperto solo lo storico gonfiato in risk_equity_history
 metadata:
   type: project
 ---
 
-`getAccount()` espone `equity = accountValue + spotUsdc` dove `spotUsdc` è il
-`total` Spot: su account unificato il margine impegnato è dentro **entrambi** gli
-addendi, quindi viene contato due volte. Sovrastima **esattamente** pari al margine
-impegnato (`spot.hold`, == `totalMarginUsed`). Diagnosi chiusa con prove dagli
-endpoint pubblici; **fix non applicato**, decisione su come/dove correggere al PO.
+`getAccount()` esponeva `equity = accountValue + spotUsdc` usando il `total` del
+pool Spot: su account unificato il margine impegnato è dentro **entrambi** gli
+addendi, quindi contato due volte, con sovrastima pari esattamente a `spot.hold`.
+**Corretto in Release 2 · Sprint 2 (CRIT-05)**: `riskManager.composeEquity()`
+calcola `accountValue + (spot.total − spot.hold)`, e `getAccount()` espone i campi
+nuovi `spotAvailable`/`spotHold` lasciando `spotUsdc` invariato (pool intero).
 Semantica dei campi in [[hyperliquid-unified-account-model]].
 
-**Why:** segnalato da Jordan dalla demo testnet :8091 (2026-08-11): apertura AAVE-PERP
-con `spotUsdc` fermo e `equity` salita di ~$48. Il `+ spotUsdc` è deliberato (commit
-`9e3a236`, "supporto account unificati") e risolveva un vero falso "Equity nullo":
-la **premessa è giusta**, sbagliato solo l'addendo — serviva lo Spot *libero*, non il
-`total`. Per questo è sopravvissuto a una review.
+**Why:** trovato da Jordan sulla demo testnet :8091 (2026-08-11). Il `+ spotUsdc`
+era deliberato (commit `9e3a236`, "supporto account unificati") e risolveva un
+vero falso "Equity nullo": la **premessa era giusta**, sbagliato solo l'addendo —
+serviva lo Spot *libero*, non il `total`. Per questo è sopravvissuto a una review.
 
 **How to apply:**
 
-- Il bug è **invisibile a conto piatto** (`accountValue = 0` → somma corretta) e si
-  manifesta solo con posizione aperta. Qualunque verifica futura di formule di equity
-  va fatta *con posizione aperta*, altrimenti passa per il motivo sbagliato.
+- Il bug era **invisibile a conto piatto** (`accountValue = 0` → somma corretta) e
+  si manifestava solo con posizione aperta. Vale come regola generale: qualunque
+  verifica di formule di equity va fatta *con posizione aperta*, altrimenti passa
+  per il motivo sbagliato. Confermato sperimentalmente durante il fix — rimettendo
+  il bug, i test a conto piatto restano **verdi**.
 - L'invariante da testare non è un numero atteso ma una **proprietà**: aprire una
-  posizione non deve cambiare l'equity (a meno delle fee). Un test che confronta
-  soltanto un valore atteso non coglie questa classe di bug.
-- Impatto oltre il sizing: `account.equity` è persistito in `risk_equity_history`
-  (`server.js`) e alimenta drawdown e alert. Un'equity gonfiata dal margine produce
-  un **drawdown fittizio** alla chiusura delle posizioni e **sottostima il `marginPct`**,
-  cioè ritarda proprio l'allarme di sovra-leva. Toccando l'equity, considerare sempre
-  questi consumatori a valle, non solo `sizePosition`.
-- Il sovradimensionamento **compone** tra bot concorrenti (fattore `(1+f)^(n-1)`
-  con `f` = frazione di sizing): è tanto peggiore quanto più bot aprono insieme.
+  posizione non cambia l'equity (a meno di fee e PnL). Tre fixture nei test: conto
+  piatto, posizione già aperta, e i dati reali misurati sulla demo.
+- La formula è robusta **perché non dipende** dall'identità `spot.hold ==
+  totalMarginUsed`: calcola lo Spot davvero libero, quindi qualunque cosa `hold`
+  includa (es. ordini di *apertura* pendenti, che bloccano collaterale senza essere
+  ancora margine di posizione) la somma non conta niente due volte. L'identità
+  serviva a misurare la magnitudine del difetto, non a fondare il fix.
+- Impatto a valle, tutto coperto da test: `marginPct` **sottostimato** (allarme di
+  sovra-leva in ritardo — trovato un caso in cui il warning al 60% non scattava
+  affatto), sizing che **compone** tra bot concorrenti, e **drawdown fittizio**
+  alla chiusura, perché `account.equity` è persistito in `risk_equity_history`.
+- **Resta aperto**: le righe storiche già scritte su :8091 sono gonfiate, quindi al
+  deploy la serie scende di ~$102 di colpo senza che sia una perdita. Non
+  riscritte (stessa disciplina di [[close-reason-non-distingue-tp-da-sl]]):
+  decisione al PO. Su mainnet non si pone, lì il difetto è latente.

@@ -13,5 +13,7 @@
 - [Un runbook documentato non è un runbook eseguito](project_runbook-documentato-non-e-eseguito.md) — la rotazione chiavi era descritta bene e non partiva affatto
 - [Sandbox e nomi dei segreti](project_sandbox-blocca-comandi-sui-segreti.md) — comandi bash bloccati: metti lo snippet in uno script e lancia quello
 - [Jordan, analista di rischio](project_jordan-analista-di-rischio.md) — revisore aggiuntivo da Sprint 1 di Release 2: guarda la domanda a monte del bug tecnico
-- [Account unificato Hyperliquid](reference_hyperliquid-unified-account-model.md) — `hold`/`accountValue`/`totalRawUsd`: cosa significano, e gli endpoint info pubblici per provarlo
-- [Equity: doppio conteggio dello Spot](project_equity-doppio-conteggio-spot.md) — finding aperto: invisibile a conto piatto, e tocca drawdown/alert oltre al sizing
+- [Misurare grandezze legate al mark price](feedback_misura-grandezze-mark-dipendenti.md) — richieste in parallelo e più campioni prima di dichiarare violata un'invariante
+- [Worktree isolato: allinealo prima di tutto](feedback_worktree-isolato-va-allineato-prima.md) — può essere decine di commit indietro e non avere il codice da modificare
+- [Account unificato Hyperliquid](reference_hyperliquid-unified-account-model.md) — `hold`/`accountValue`/`totalRawUsd`, gli endpoint info pubblici, e perché `webData2` ha semantica diversa
+- [Equity: doppio conteggio dello Spot](project_equity-doppio-conteggio-spot.md) — risolto in CRIT-05; invisibile a conto piatto, resta aperto lo storico gonfiato

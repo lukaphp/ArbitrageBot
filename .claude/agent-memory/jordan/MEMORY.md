@@ -1,3 +1,3 @@
-- [Demo operativa VPS :8091 — bot JORDAN-BTC-RSI-demo/JORDAN-AAVE-MACD-demo](project_demo-operativa-vps-2026-08-11.md) — stato bot, storico trade, CRIT-05 (equity doppio conteggio, non ancora fixato su questa demo), sorprese operative sessione per sessione
+- [Demo operativa VPS :8091 — bot JORDAN-BTC-RSI-demo/JORDAN-AAVE-MACD-demo](project_demo-operativa-vps-2026-08-11.md) — stato bot, storico trade, CRIT-05 (equity doppio conteggio) FIXATO e verificato sulla demo dal 13/08, letture equity/drawdown ora attendibili
 - [Sprint 2 R2 risk review (2026-08-12)](project_sprint2-r2-risk-review.md) — CRIT-05 corretto ma demo deploy richiede reset anche di risk_drawdown_state; gap di wiring DEBT-02→ADV-05; CI-01 fail-open aperto
 - [Worktree isolato indietro rispetto al branch condiviso](environment_worktree-behind-shared-branch.md) — come rilevarlo (git log non combacia) e risolverlo (merge --ff-only) prima di leggere/scrivere

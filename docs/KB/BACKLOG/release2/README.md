@@ -115,8 +115,10 @@ board in Release 1 (archiviata) / Release 2 (in corso), l'11 agosto.
 | DEBT-07 | Badge `OK` fisso (classe `cockpit-positive`) sulla card Max Drawdown, senza `id`, mai scritto da codice — può contraddire lo stato vero mostrato subito sotto | Maya | 1 | Trovato da Maya durante DEBT-03, fuori dal suo perimetro dichiarato allora. **Nato dalla retrospective del 13 agosto** — "riconosciuto in review, il deploy è stato eseguito, il badge è ancora lì": fix da un token secondo lei stessa. |
 | DEBT-08 | Cap sul numero di tool-call per iterazione anche nell'Analyst — stesso pattern non protetto che DEBT-02 ha chiuso solo lato advisor, ma qui gira senza supervisione umana, su cadenza automatica | Bruno | 1 | Trovato da Jordan in review Sprint 2, fuori dal perimetro dichiarato di DEBT-02 — Bruno stesso lo riconosce come mancato nella sua retrospettiva ("avevo la regola, ero nel file giusto, l'ho applicata al perimetro invece che alla classe"). |
 | DEBT-09 | Test di contratto tra la forma dei dati che l'Analyst produce (es. `closeReasons`) e quella attesa dal renderer di Maya — oggi protetto solo dalla diligenza di rilettura incrociata, mai da un test | Bruno + Maya | 2 | **Nato dalla retrospective del 13 agosto**: stesso episodio (ANA-01, poi ripetuto in LLM-04) letto da entrambi come rischio strutturale (Bruno) e come rete che ha funzionato (Maya) — non un disaccordo tra loro, un punto cieco condiviso da chiudere con un test, non con più diligenza. |
+| DEBT-10 | Campionamento equity continuo e persistente, non legato al polling del frontend | Bruno | 3 | Richiesta diretta del PO (13 agosto): grafici Dashboard/Performance con orizzonti Day/Week/Month/Year. **Verificato sul codice, non presunto**: `risk_equity_history` scrive un campione solo quando qualcuno chiama `GET /api/perps/risk` (`server.js:497-499`, quindi dipende da chi ha la cockpit aperta, non da un job schedulato) ed è potato a un massimo di 5000 righe *totali* a ogni scrittura (`database.js` `insertRiskEquitySample`/`listRiskEquityHistory`). Con quella cadenza, 5000 righe coprono ore, non un anno. **Prerequisito per DEBT-11 sul grafico equity**: senza un campionamento schedulato (indipendente da chi guarda la pagina) e una strategia di ritenzione/aggregazione per gli orizzonti lunghi (es. bucket giornalieri oltre una certa età, non righe grezze all'infinito), i pulsanti Day/Week/Month/Year mostrerebbero la stessa finestra corta in quattro travestimenti diversi. |
+| DEBT-11 | Selettore di orizzonte temporale (Day/Week/Month/Year) sui grafici di Dashboard e Performance | Maya | 2 | Richiesta diretta del PO (13 agosto). Riusa il pattern UI già esistente per i pulsanti di intervallo sul grafico di strategia (`public/perps.js` ~riga 2322, "ogni pulsante porta intervallo + lookback in giorni"). **Distinzione importante trovata verificando il codice**: il grafico PnL per bot in Performance (`getBotPnlSeries()`, da `positions` chiuse) **non** è soggetto alla potatura di DEBT-10 — le posizioni chiuse restano nel DB senza un tetto di righe — quindi quella vista può avere orizzonti estesi reali da subito. Il grafico equity di Dashboard/Performance resta invece bloccato da DEBT-10: sequenziare DEBT-10 prima, o limitare la prima consegna di questa storia alle sole viste basate su PnL/trade, dichiarandolo esplicitamente in UI invece di un selettore che sembra funzionare ovunque e in realtà non estende nulla sull'equity. |
 
-**Totale Epic B: 24 SP.** Sei item (CHORE-01, OPS-02, OPS-03r, ADV-OPS-01, OBS-OPS-01, e la verifica
+**Totale Epic B: 29 SP.** Sei item (CHORE-01, OPS-02, OPS-03r, ADV-OPS-01, OBS-OPS-01, e la verifica
 mainnet di CRIT-05) restano in carico diretto al PO o richiedono la sua decisione — non delegabili ad
 agenti per la stessa ragione di sempre (accesso SSH/`.npmrc`/spesa reale/capitale condiviso).
 
@@ -210,11 +212,11 @@ di default in qualunque ambiente.
 | Epica | SP | Stato | Blocca/dipende da |
 |:--|:--:|:---|:---|
 | A — Hardening mainnet | 21 | ✅ **Chiusa** (Sprint 1, review 11 agosto) | Nessuna — parte per prima |
-| B — Completamento Release 1 | 24 | 🔄 **Sprint 2 chiuso, 4 storie nuove non pianificate** (review 12 agosto + retrospective 13 agosto) | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E |
+| B — Completamento Release 1 | 29 | 🔄 **Sprint 2 chiuso, 6 storie nuove non pianificate** (review 12 agosto + retrospective/richieste PO 13 agosto) | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E; DEBT-11 dipende da DEBT-10 sul grafico equity |
 | C — Multi-provider Analyst | 5 | ✅ **Chiusa** (Sprint 2, review 12 agosto) | Nessuna |
 | D — Consulente proattivo | 6 | Da pianificare | ADV-OPS-01 (Epic B) |
 | E — Advisor fase 2 | 3 | Da pianificare | ADV-OPS-01 (Epic B), idealmente dopo D |
-| **Totale release** | **59** | **45/59 fatti** | |
+| **Totale release** | **64** | **45/64 fatti** | |
 
 **Distribuzione su sprint** (numerazione propria di Release 2 — non prosegue quella di Release 1,
 per decisione esplicita del PO l'11 agosto: questa release riparte da Sprint 1):

@@ -110,9 +110,13 @@ board in Release 1 (archiviata) / Release 2 (in corso), l'11 agosto.
 | DEBT-05 | Riallineare l'ordine delle sezioni tra `MANUAL.md` e `manual.html` | Maya | 1 | Contenuti già allineati, solo l'ordine differisce |
 | DEBT-06 | Focus trap nel drawer del consulente | Maya | 1 | Piccolo, isolato |
 | LLM-PRICE-01 | Riverificare i prezzi in `pricing.models` (LLM-01) contro i listini pubblici reali | Joshua | 1 | Scritti senza accesso rete al momento di LLM-01 |
-| CRIT-05 | `equity` conta due volte il margine impegnato in posizioni perp aperte (`accountValue + spot.total` invece di `accountValue + (spot.total - spot.hold)`) — sovrastima esatta pari al margine impegnato, confermata su prova diretta contro l'API Hyperliquid | Bruno | 3 | **P0.** Trovato l'11-12 agosto durante la demo operativa isolata di Jordan (ordini testnet reali), diagnosticato da Bruno in indagine di sola lettura — non un fix al buio. Alimenta `sizePosition` (sovradimensionamento composto tra bot concorrenti), `risk_equity_history`/drawdown (picchi fittizi) e `marginPct` (sottostimato — la direzione pericolosa: l'alert di sovra-leva scatta più tardi del dovuto). Root cause: commit `9e3a236`, corretto nella premessa (fix di un equity-nullo reale) ma con l'addendo sbagliato — bug invisibile a conto piatto, mai esercitato prima con una posizione realmente aperta. Latente su mainnet oggi (accountValue 0, nessuna posizione) ma stesso codice condiviso. Prima di implementare: secondo campione con posizioni multiple/PnL non banale (vedi `.claude/agent-memory/bruno/project_equity-doppio-conteggio-spot.md`), poi funzione pura in `riskManager.js` + nuovo campo (non toccare `spotUsdc`, consumato altrove) + test sulla proprietà "aprire una posizione non cambia l'equity", non su un valore atteso fisso. |
+| CRIT-05 | `equity` conta due volte il margine impegnato in posizioni perp aperte (`accountValue + spot.total` invece di `accountValue + (spot.total - spot.hold)`) — sovrastima esatta pari al margine impegnato, confermata su prova diretta contro l'API Hyperliquid | Bruno | 3 | **P0. ✅ Chiusa e deployata (Sprint 2, 12 agosto)** — vedi `sprint2.md` §5. |
+| CI-02 | Guardia esplicita contro il fail-open silenzioso di `harden-runner` — se degrada da `block` ad `audit` (host di cache non risolto), oggi il job resta verde senza segnalarlo | Joshua | 1 | Trovato da Joshua durante CI-01, confermato indipendentemente da Annie, priorità alta secondo Jordan. **Nato dalla retrospective del 13 agosto**: riconosciuto da tre persone in Sprint 2, mai diventato una storia con un proprietario fino ad ora. |
+| DEBT-07 | Badge `OK` fisso (classe `cockpit-positive`) sulla card Max Drawdown, senza `id`, mai scritto da codice — può contraddire lo stato vero mostrato subito sotto | Maya | 1 | Trovato da Maya durante DEBT-03, fuori dal suo perimetro dichiarato allora. **Nato dalla retrospective del 13 agosto** — "riconosciuto in review, il deploy è stato eseguito, il badge è ancora lì": fix da un token secondo lei stessa. |
+| DEBT-08 | Cap sul numero di tool-call per iterazione anche nell'Analyst — stesso pattern non protetto che DEBT-02 ha chiuso solo lato advisor, ma qui gira senza supervisione umana, su cadenza automatica | Bruno | 1 | Trovato da Jordan in review Sprint 2, fuori dal perimetro dichiarato di DEBT-02 — Bruno stesso lo riconosce come mancato nella sua retrospettiva ("avevo la regola, ero nel file giusto, l'ho applicata al perimetro invece che alla classe"). |
+| DEBT-09 | Test di contratto tra la forma dei dati che l'Analyst produce (es. `closeReasons`) e quella attesa dal renderer di Maya — oggi protetto solo dalla diligenza di rilettura incrociata, mai da un test | Bruno + Maya | 2 | **Nato dalla retrospective del 13 agosto**: stesso episodio (ANA-01, poi ripetuto in LLM-04) letto da entrambi come rischio strutturale (Bruno) e come rete che ha funzionato (Maya) — non un disaccordo tra loro, un punto cieco condiviso da chiudere con un test, non con più diligenza. |
 
-**Totale Epic B: 19 SP.** Sei item (CHORE-01, OPS-02, OPS-03r, ADV-OPS-01, OBS-OPS-01, e la verifica
+**Totale Epic B: 24 SP.** Sei item (CHORE-01, OPS-02, OPS-03r, ADV-OPS-01, OBS-OPS-01, e la verifica
 mainnet di CRIT-05) restano in carico diretto al PO o richiedono la sua decisione — non delegabili ad
 agenti per la stessa ragione di sempre (accesso SSH/`.npmrc`/spesa reale/capitale condiviso).
 
@@ -206,11 +210,11 @@ di default in qualunque ambiente.
 | Epica | SP | Stato | Blocca/dipende da |
 |:--|:--:|:---|:---|
 | A — Hardening mainnet | 21 | ✅ **Chiusa** (Sprint 1, review 11 agosto) | Nessuna — parte per prima |
-| B — Completamento Release 1 | 19 | 🔄 **Sprint 2 in corso** (avviato 12 agosto) | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E; CRIT-05 (P0) trovato in demo 11-12 agosto |
-| C — Multi-provider Analyst | 5 | 🔄 **Sprint 2 in corso** (avviato 12 agosto) | Nessuna |
+| B — Completamento Release 1 | 24 | 🔄 **Sprint 2 chiuso, 4 storie nuove non pianificate** (review 12 agosto + retrospective 13 agosto) | Nessuna diretta, ma ADV-OPS-01 va fatta prima di D/E |
+| C — Multi-provider Analyst | 5 | ✅ **Chiusa** (Sprint 2, review 12 agosto) | Nessuna |
 | D — Consulente proattivo | 6 | Da pianificare | ADV-OPS-01 (Epic B) |
 | E — Advisor fase 2 | 3 | Da pianificare | ADV-OPS-01 (Epic B), idealmente dopo D |
-| **Totale release** | **54** | **21/54 fatti** | |
+| **Totale release** | **59** | **45/59 fatti** | |
 
 **Distribuzione su sprint** (numerazione propria di Release 2 — non prosegue quella di Release 1,
 per decisione esplicita del PO l'11 agosto: questa release riparte da Sprint 1):

@@ -520,3 +520,106 @@
   box-shadow: 0 4px 12px rgba(255, 65, 108, 0.4);
 }
 .btn-kill-switch:active { transform: none; }
+
+/* ============================================================
+   WATCHDOG / CRASH STATE — Feature 3
+   ============================================================ */
+
+/* Dot stato: crashed = rosso pulsante */
+.bot-status-dot.crashed {
+  background: #e53e3e;
+  box-shadow: 0 0 0 3px rgba(229, 62, 62, 0.25);
+  animation: dot-crash-pulse 1.2s ease-in-out infinite;
+}
+@keyframes dot-crash-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(229, 62, 62, 0.25); }
+  50%       { box-shadow: 0 0 0 7px rgba(229, 62, 62, 0.05); }
+}
+
+/* Badge ⚠️ CRASH sulla card */
+.bot-status-crashed-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  background: #e53e3e;
+  color: #fff;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  animation: crash-badge-blink 1.4s step-start infinite;
+  cursor: help;
+}
+@keyframes crash-badge-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+/* Card con bordo rosso quando crashed */
+.bot-card.bot-crashed {
+  border: 1.5px solid rgba(229, 62, 62, 0.6) !important;
+  background: linear-gradient(135deg,
+    rgba(254, 235, 235, 0.7) 0%,
+    rgba(255, 255, 255, 0.85) 100%) !important;
+}
+
+/* Testo motivo crash */
+.bot-crash-reason {
+  color: #c53030;
+  font-size: 0.82rem;
+  margin-top: 4px;
+}
+
+/* ============================================================
+   CRASH ALERT BANNER — sticky sopra la lista bot
+   ============================================================ */
+#perps-crash-banners {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.crash-alert-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #fff5f5 0%, #fed7d7 100%);
+  border: 1.5px solid #fc8181;
+  border-left: 5px solid #e53e3e;
+  border-radius: 10px;
+  box-shadow: 0 3px 10px rgba(229, 62, 62, 0.18);
+  animation: banner-slide-in 0.3s ease;
+}
+@keyframes banner-slide-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.crash-alert-icon {
+  font-size: 1.4rem;
+  flex-shrink: 0;
+}
+
+.crash-alert-body {
+  flex: 1;
+  font-size: 0.88rem;
+  color: #742a2a;
+  line-height: 1.4;
+}
+
+.crash-alert-dismiss {
+  background: none;
+  border: none;
+  color: #c53030;
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+.crash-alert-dismiss:hover { opacity: 1; background: rgba(229,62,62,0.1); }

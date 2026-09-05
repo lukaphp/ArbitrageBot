@@ -209,7 +209,13 @@ class BotManager {
   /**
    * WATCHDOG: controlla periodicamente che i bot in esecuzione stiano "ticcando".
    * Se un bot running non aggiorna lastTickAt da oltre la soglia (3× il suo loop,
-   * minimo 60s) invia un alert Telegram (throttle 10 min/bot).
+   * minimo 60s):
+   *  1. Notifica Telegram (throttle 10 min/bot)
+   *  2. Emette `perps:botCrash` via Socket.IO → banner rosso UI
+   *  3. Emette `perps:botUpdate` con status 'crashed' → aggiorna card bot
+   *  4. Emette `perps:dashboardRefresh` → UI ricarica bots/posizioni
+   *
+   * Il flag `bot._crashed` è in-memory: resettato automaticamente al riavvio server.
    */
   startWatchdog() {
     if (this.watchdogTimer) return;
@@ -221,13 +227,58 @@ class BotManager {
         if (bot.status !== 'running' || !bot.lastTickAt) continue;
         const loop = bot.config.loopInterval || HYPERLIQUID_CONFIG.botLoopInterval;
         const staleMs = Math.max(3 * loop, 60000);
-        if (now - bot.lastTickAt > staleMs) {
+        const isStale = now - bot.lastTickAt > staleMs;
+
+        if (isStale) {
           const last = this.lastWatchdogAlert.get(bot.id) || 0;
           if (now - last > ALERT_THROTTLE_MS) {
             this.lastWatchdogAlert.set(bot.id, now);
             const secs = Math.round((now - bot.lastTickAt) / 1000);
             logger.warn(`🐕 Watchdog: bot ${bot.name} fermo da ${secs}s`);
-            notifier.notify(`🐕 <b>Watchdog</b>: il bot <b>${bot.name}</b> (${bot.coin}) non aggiorna da ${secs}s. Controlla connettività/API.`);
+
+            // Telegram
+            notifier.notify(
+              `🐕 <b>Watchdog</b>: il bot <b>${bot.name}</b> (${bot.coin}) ` +
+              `non aggiorna da ${secs}s. Controlla connettività/API.`
+            );
+
+            // Segna il bot come crashed in-memory (status rimane 'running' nel DB
+            // per permettere il resume automatico al prossimo riavvio)
+            bot._crashed = true;
+
+            // Socket.IO — alert UI immediato
+            if (this.io) {
+              const crashState = {
+                ...bot.getState(),
+                status: 'crashed',
+                _crashedSinceMs: secs * 1000,
+                crashReason: `Nessun tick da ${secs}s (soglia: ${Math.round(staleMs / 1000)}s)`
+              };
+
+              // 1. Alert dedicato per il banner rosso
+              this.io.emit('perps:botCrash', {
+                botId: bot.id,
+                botName: bot.name,
+                coin: bot.coin,
+                linked_agent_id: bot.linked_agent_id || 'user_manual',
+                silentSinceMs: secs * 1000,
+                threshold: staleMs
+              });
+
+              // 2. Aggiorna la card del bot
+              this.io.emit('perps:botUpdate', crashState);
+
+              // 3. Refresh generale dashboard
+              this.io.emit('perps:dashboardRefresh', { reason: 'watchdog_crash', botId: bot.id });
+            }
+          }
+        } else if (bot._crashed) {
+          // Il bot ha ripreso a ticcolare → rimuovi il flag crashed e notifica recovery
+          bot._crashed = false;
+          logger.info(`🐕 Watchdog: bot ${bot.name} ha ripreso l'attività`);
+          if (this.io) {
+            this.io.emit('perps:botUpdate', bot.getState());
+            this.io.emit('perps:dashboardRefresh', { reason: 'watchdog_recovery', botId: bot.id });
           }
         }
       }
@@ -235,6 +286,7 @@ class BotManager {
     this.watchdogTimer.unref?.();
     logger.info('🐕 Watchdog bot avviato');
   }
+
 
   /** Shutdown del server: ferma i timer senza cambiare lo stato persistito. */
   stopAll() {

@@ -752,11 +752,33 @@ class ArbitrageBotServer {
     });
 
     // --- Bot ---
-    // AGENT-AWARE: filtro opzionale ?agent_id=hermes|user_manual per isolare la vista
+    // AGENT-AWARE: Admin View — mostra TUTTI i bot con campo `actor` per distinguere
+    // chi ha operato (icona + label per la UI). Filtro opzionale ?agent_id= per isolare.
     app.get('/api/perps/bots', (req, res) => {
       const agentId = req.query.agent_id || null;
-      res.json({ success: true, data: botManager.listStates(agentId) });
+      const states = botManager.listStates(agentId);
+
+      // Arricchisce ogni stato con metadati actor per la UI admin
+      const ACTOR_META = {
+        'hermes':      { label: 'Hermes',  icon: '🤖', color: 'agent-badge-hermes' },
+        'user_manual': { label: 'Manuale', icon: '👤', color: 'agent-badge-manual' },
+      };
+      const enriched = states.map(s => {
+        const aid = s.linked_agent_id || 'user_manual';
+        const meta = ACTOR_META[aid] || { label: aid, icon: '🔹', color: 'agent-badge-manual' };
+        return {
+          ...s,
+          // Sovrascrive status con 'crashed' se il watchdog ha rilevato un crash in-memory
+          status: botManager.bots.get(s.id)?._crashed ? 'crashed' : s.status,
+          actor: aid,
+          actorLabel: meta.label,
+          actorIcon: meta.icon,
+          actorColor: meta.color,
+        };
+      });
+      res.json({ success: true, data: enriched });
     });
+
 
     // Monitor live: cosa sta valutando il bot (indicatori vs soglie, distanza al segnale)
     app.get('/api/perps/bots/:id/monitor', async (req, res) => {
@@ -1183,6 +1205,8 @@ class ArbitrageBotServer {
 
         db.insertTrade({ coin, side, px: entryPx, sz: orderSize, hlOid: order.oid });
         this.io.emit('perps:fill', { coin, side, size: orderSize, px: entryPx });
+        // Notifica dashboard: ricarica bots + posizioni immediatamente
+        this.io.emit('perps:dashboardRefresh', { reason: 'fill', coin, side });
         res.json({ success: true, data: { order, entryPx, size: orderSize, ...tpsl } });
       } catch (error) {
         logger.error('Errore ordine Perps:', error.message);
@@ -1197,6 +1221,8 @@ class ArbitrageBotServer {
         const coin = decodeURIComponent(req.params.coin);
         const result = await hyperliquid.closePosition({ masterAddress, coin }, hyperliquid.getNetwork());
         this.io.emit('perps:position', { coin, closed: true });
+        // Notifica dashboard: ricarica bots + posizioni immediatamente
+        this.io.emit('perps:dashboardRefresh', { reason: 'position_closed', coin });
         res.json({ success: true, data: result });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });

@@ -353,7 +353,73 @@ class PerpsApp {
     this.socket.on('perps:agentStatus', () => { this.refreshAccount(); this.refreshRiskSnapshot(); });
     this.socket.on('perps:position', () => { this.refreshAccount(); this.refreshRiskSnapshot(); if (this.posTab === 'history') this.loadFills(); });
     this.socket.on('perps:fill', () => { this.refreshAccount(); this.refreshRiskSnapshot(); if (this.posTab === 'history') this.loadFills(); });
+
+    // --- Feature 1: Live Dashboard Refresh ---
+    // Il server emette questo evento dopo ogni operazione che cambia lo stato
+    // (fill, chiusura posizione, kill switch, watchdog crash/recovery).
+    // Throttle 800ms per evitare reload multipli in burst.
+    let _refreshPending = false;
+    this.socket.on('perps:dashboardRefresh', (d) => {
+      if (_refreshPending) return;
+      _refreshPending = true;
+      setTimeout(async () => {
+        _refreshPending = false;
+        await this.loadBots();
+        this.refreshAccount();
+        this.refreshRiskSnapshot();
+      }, 800);
+    });
+
+    // --- Feature 3: Watchdog Crash Alert ---
+    // Il Watchdog server emette questo quando un bot non trocka da troppo tempo.
+    // Mostra un banner rosso sticky sopra la lista bot con possibilità di dismiss.
+    this.socket.on('perps:botCrash', (data) => {
+      this._showCrashBanner(data);
+    });
   }
+
+  /**
+   * WATCHDOG UI: mostra un banner rosso nella sezione bot quando il server
+   * rileva che un bot in 'running' non ha aggiornato lastTickAt da oltre soglia.
+   * Auto-dismiss dopo 5 minuti. Max 1 banner per botId (sostituisce il precedente).
+   */
+  _showCrashBanner(data) {
+    const containerId = 'perps-crash-banners';
+    let container = document.getElementById(containerId);
+    if (!container) {
+      // Inserisce il container banner prima della lista bot
+      const botsSection = document.getElementById('bots-list') || document.querySelector('.bots-section');
+      if (!botsSection) return;
+      container = document.createElement('div');
+      container.id = containerId;
+      botsSection.parentNode.insertBefore(container, botsSection);
+    }
+
+    // Rimuove il banner precedente per questo bot (se esiste)
+    const existing = document.getElementById(`crash-banner-${data.botId}`);
+    if (existing) existing.remove();
+
+    const secs = Math.round((data.silentSinceMs || 0) / 1000);
+    const agentLabel = data.linked_agent_id === 'hermes' ? '🤖 Hermes' : '👤 Manuale';
+    const banner = document.createElement('div');
+    banner.id = `crash-banner-${data.botId}`;
+    banner.className = 'crash-alert-banner';
+    banner.innerHTML = `
+      <span class="crash-alert-icon">⚠️</span>
+      <span class="crash-alert-body">
+        <strong>Bot in crash rilevato:</strong> <b>${data.botName}</b> (${data.coin}) 
+        [${agentLabel}] — nessun tick da <b>${secs}s</b>. 
+        Verifica connettività o riavvia il bot.
+      </span>
+      <button class="crash-alert-dismiss" onclick="this.parentElement.remove()" title="Chiudi">✕</button>
+    `;
+    container.appendChild(banner);
+
+    // Auto-dismiss dopo 5 minuti
+    setTimeout(() => banner.remove(), 5 * 60 * 1000);
+  }
+
+
 
   // ---- Cockpit dashboard ----
   _initCockpitDashboard() {
@@ -2720,6 +2786,7 @@ class PerpsApp {
 
   _botCardHtml(b) {
     const running = b.status === 'running';
+    const crashed = b.status === 'crashed';
     const pos = b.position
       ? `<span class="side-badge ${b.position.side}">${b.position.side.toUpperCase()} ${this.fmtNum(b.position.size)}</span>`
       : '<span class="muted">flat</span>';
@@ -2737,26 +2804,38 @@ class PerpsApp {
       ? `<div class="bot-strategy-badge" title="${(strat.rationale || '').replace(/"/g, '&quot;')}">🧠 da strategia AI${strat.decidedAt ? ' · ' + new Date(strat.decidedAt).toLocaleDateString('it-IT') : ''}</div>`
       : '';
 
-    // AGENT-AWARE: badge che mostra chi controlla il bot
+    // AGENT-AWARE: badge actor — usa i campi arricchiti dall'API admin view se disponibili
     const agentId = b.linked_agent_id || 'user_manual';
-    const agentLabel = agentId === 'user_manual' ? '👤 Manuale'
-      : agentId === 'hermes' ? '🤖 Hermes'
-      : `🤖 ${agentId}`;
-    const agentBadgeClass = agentId === 'user_manual' ? 'agent-badge-manual' : 'agent-badge-hermes';
-    const agentBadge = `<span class="agent-badge ${agentBadgeClass}" title="Controllato da: ${agentId}">${agentLabel}</span>`;
+    const actorIcon = b.actorIcon || (agentId === 'user_manual' ? '👤' : '🤖');
+    const actorLabel = b.actorLabel || (agentId === 'user_manual' ? 'Manuale' : agentId);
+    const agentBadgeClass = b.actorColor || (agentId === 'user_manual' ? 'agent-badge-manual' : 'agent-badge-hermes');
+    const agentBadge = `<span class="agent-badge ${agentBadgeClass}" title="Controllato da: ${agentId}">${actorIcon} ${actorLabel}</span>`;
 
     // Budget Ceiling info
     const budgetInfo = b.max_allocation_usd != null
       ? `<span class="muted" title="Budget Ceiling"> · max ${this.fmtUsd(b.max_allocation_usd)}</span>`
       : '';
 
-    return `<div class="bot-card ${running ? 'running' : ''}" id="bot-${b.id}">
+    // Watchdog Crash badge
+    const crashBadge = crashed
+      ? `<span class="bot-status-crashed-badge" title="${b.crashReason || 'Nessun tick rilevato'}">⚠️ CRASH</span>`
+      : '';
+
+    // Stato dot: verde = running, rosso-pulse = crashed, grigio = stopped
+    const dotClass = crashed ? 'crashed' : (running ? 'online' : 'offline');
+
+    // Azione principale: se crashed → "↩️ Riavvia", se running → "⏹️ Stop", else → "▶️ Avvia"
+    const mainAction = crashed || !running
+      ? `<button class="btn btn-sm btn-long" onclick="perps.startBot('${b.id}')">${crashed ? '↩️ Riavvia' : '▶️ Avvia'}</button>`
+      : `<button class="btn btn-sm btn-secondary" onclick="perps.stopBot('${b.id}')">⏹️ Stop</button>`;
+
+    return `<div class="bot-card ${running ? 'running' : ''} ${crashed ? 'bot-crashed' : ''}" id="bot-${b.id}">
       <div class="bot-card-head">
         <div>
-          <span class="bot-status-dot ${running ? 'online' : 'offline'}"></span>
+          <span class="bot-status-dot ${dotClass}"></span>
           <strong>${b.name}</strong> <span class="muted">· ${b.coin}</span>
           ${b.paper ? '<span class="testnet-badge" style="font-size:.6em;vertical-align:middle" title="Forward-test: esecuzione simulata su prezzi reali">PAPER</span>' : ''}
-          ${agentBadge}${budgetInfo}
+          ${agentBadge}${budgetInfo}${crashBadge}
         </div>
         <span class="bot-pnl ${pnlClass}">${this.fmtUsd(b.dailyPnl || 0)}</span>
       </div>
@@ -2765,18 +2844,18 @@ class PerpsApp {
         <div class="bot-meta"><span class="label">Posizione</span> ${pos}</div>
         <div class="bot-meta"><span class="label">Ultima valutazione</span> <span class="eval">${evalTxt}</span></div>
         ${statsLine}
-        ${b.lastError ? `<div class="bot-error">⚠️ ${b.lastError}</div>` : ''}
+        ${crashed ? `<div class="bot-error bot-crash-reason">🐕 Watchdog: ${b.crashReason || 'nessun tick rilevato'}</div>` : ''}
+        ${!crashed && b.lastError ? `<div class="bot-error">⚠️ ${b.lastError}</div>` : ''}
       </div>
       <div class="bot-card-actions">
-        ${running
-          ? `<button class="btn btn-sm btn-secondary" onclick="perps.stopBot('${b.id}')">⏹️ Stop</button>`
-          : `<button class="btn btn-sm btn-long" onclick="perps.startBot('${b.id}')">▶️ Avvia</button>`}
+        ${mainAction}
         <button class="btn btn-sm btn-outline" onclick="perps.openBotMonitor('${b.id}')">📡 Monitor</button>
         <button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')">✏️</button>
         <button class="btn btn-sm btn-danger" onclick="perps.deleteBot('${b.id}')">🗑️</button>
       </div>
     </div>`;
   }
+
 
   _updateBotCard(state) {
     const idx = this.bots.findIndex(b => b.id === state.id);

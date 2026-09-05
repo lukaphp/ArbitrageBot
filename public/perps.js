@@ -2805,11 +2805,12 @@ class PerpsApp {
       : '';
 
     // AGENT-AWARE: badge actor — usa i campi arricchiti dall'API admin view se disponibili
-    const agentId = b.linked_agent_id || 'user_manual';
-    const actorIcon = b.actorIcon || (agentId === 'user_manual' ? '👤' : '🤖');
-    const actorLabel = b.actorLabel || (agentId === 'user_manual' ? 'Manuale' : agentId);
-    const agentBadgeClass = b.actorColor || (agentId === 'user_manual' ? 'agent-badge-manual' : 'agent-badge-hermes');
-    const agentBadge = `<span class="agent-badge ${agentBadgeClass}" title="Controllato da: ${agentId}">${actorIcon} ${actorLabel}</span>`;
+    const agentId = b.actor_id || b.linked_agent_id || 'user_manual';
+    const isHermes = b.actor === 'hermes' || String(agentId).toLowerCase().includes('hermes') || Boolean(b.is_managed_by_agent);
+    const actorIcon = b.actorIcon || (isHermes ? '🤖' : '👤');
+    const actorLabel = b.actorLabel || (isHermes ? 'Hermes' : 'Manuale');
+    const agentBadgeClass = b.actorColor || (isHermes ? 'agent-badge-hermes' : 'agent-badge-manual');
+    const agentBadge = `<span class="agent-badge ${agentBadgeClass}" title="Controllato da: ${actorLabel} (${agentId})">${actorIcon} ${actorLabel}</span>`;
 
     // Budget Ceiling info
     const budgetInfo = b.max_allocation_usd != null
@@ -2828,6 +2829,12 @@ class PerpsApp {
     const mainAction = crashed || !running
       ? `<button class="btn btn-sm btn-long" onclick="perps.startBot('${b.id}')">${crashed ? '↩️ Riavvia' : '▶️ Avvia'}</button>`
       : `<button class="btn btn-sm btn-secondary" onclick="perps.stopBot('${b.id}')">⏹️ Stop</button>`;
+
+    // Sicurezza: se il bot è gestito da agente, mostra l'icona lock sul pulsante edit
+    const isManaged = Boolean(b.is_managed_by_agent || isHermes);
+    const editBtn = isManaged
+      ? `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Bot gestito da Agente (${actorLabel}): richiede sblocco">🔒 ✏️</button>`
+      : `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Modifica bot">✏️</button>`;
 
     return `<div class="bot-card ${running ? 'running' : ''} ${crashed ? 'bot-crashed' : ''}" id="bot-${b.id}">
       <div class="bot-card-head">
@@ -2850,7 +2857,7 @@ class PerpsApp {
       <div class="bot-card-actions">
         ${mainAction}
         <button class="btn btn-sm btn-outline" onclick="perps.openBotMonitor('${b.id}')">📡 Monitor</button>
-        <button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')">✏️</button>
+        ${editBtn}
         <button class="btn btn-sm btn-danger" onclick="perps.deleteBot('${b.id}')">🗑️</button>
       </div>
     </div>`;
@@ -3042,7 +3049,20 @@ class PerpsApp {
 
   editBot(id) {
     const bot = this.bots.find(b => b.id === id);
-    if (bot) this.openBotModal(bot);
+    if (!bot) return;
+    const agentId = bot.actor_id || bot.linked_agent_id || 'user_manual';
+    const isManaged = Boolean(bot.is_managed_by_agent || bot.actor === 'hermes' || String(agentId).toLowerCase().includes('hermes'));
+    if (isManaged) {
+      const actorName = bot.actorLabel || 'Hermes';
+      const unlock = confirm(
+        `🤖 Sblocco Modifica Manuale [${actorName}]\n\n` +
+        `Questo bot è gestito autonomamente dall'Agente ${actorName} per i test in tempo reale.\n` +
+        `Modificare manualmente i parametri potrebbe interferire con i calcoli attivi dell'Agente.\n\n` +
+        `Vuoi sbloccare temporaneamente la modifica manuale e procedere?`
+      );
+      if (!unlock) return;
+    }
+    this.openBotModal(bot);
   }
 
   // ---- Modalità bot (semplificata / avanzata) ----

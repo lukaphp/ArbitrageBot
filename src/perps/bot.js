@@ -49,7 +49,10 @@ export class PerpsBot {
 
     // AGENT-AWARE: chi controlla questo bot.
     // Letto dalla riga DB (dopo migrazione v4 è sempre presente, default 'user_manual').
-    this.linked_agent_id = record.linked_agent_id || 'user_manual';
+    this.linked_agent_id = record.linked_agent_id || record.actor_id || 'user_manual';
+    this.actor_label = record.actor_label || null;
+    this.actor_id = record.actor_id || record.linked_agent_id || null;
+    this.is_managed_by_agent = Boolean(record.is_managed_by_agent || (this.linked_agent_id && this.linked_agent_id.toLowerCase().includes('hermes')));
 
     // Budget Ceiling: limite massimo di notional USD per apertura. null = nessun limite.
     // Il valore dal DB prevale; in alternativa può essere nel config (retrocompat).
@@ -1156,6 +1159,9 @@ export class PerpsBot {
       id: this.id, name: this.name, coin: this.coin, network: this.network,
       status: this.status, inPosition: !!this.position, paper: this.paper,
       linked_agent_id: this.linked_agent_id,
+      actor_label: this.actor_label,
+      actor_id: this.actor_id,
+      is_managed_by_agent: this.is_managed_by_agent,
       max_allocation_usd: this.maxAllocationUsd,
       position: this.position, dailyPnl: this.dailyPnl,
       lastEval: this.lastEval, lastError: this.lastError, config: this.config,

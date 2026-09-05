@@ -760,20 +760,29 @@ class ArbitrageBotServer {
 
       // Arricchisce ogni stato con metadati actor per la UI admin
       const ACTOR_META = {
-        'hermes':      { label: 'Hermes',  icon: '🤖', color: 'agent-badge-hermes' },
-        'user_manual': { label: 'Manuale', icon: '👤', color: 'agent-badge-manual' },
+        'hermes':           { label: 'Hermes',  icon: '🤖', color: 'agent-badge-hermes' },
+        'hermes_agent_01':  { label: 'Hermes',  icon: '🤖', color: 'agent-badge-hermes' },
+        'user_manual':      { label: 'Manuale', icon: '👤', color: 'agent-badge-manual' },
       };
       const enriched = states.map(s => {
-        const aid = s.linked_agent_id || 'user_manual';
-        const meta = ACTOR_META[aid] || { label: aid, icon: '🔹', color: 'agent-badge-manual' };
+        const rawAid = s.actor_id || s.linked_agent_id || 'user_manual';
+        const isHermes = String(rawAid).toLowerCase().includes('hermes');
+        const aid = isHermes ? 'hermes' : rawAid;
+        const meta = ACTOR_META[rawAid] || ACTOR_META[aid] || (isHermes ? { label: 'Hermes', icon: '🤖', color: 'agent-badge-hermes' } : { label: s.actor_label || aid, icon: '🔹', color: 'agent-badge-manual' });
+        const label = s.actor_label || meta.label;
+        const isManaged = Boolean(s.is_managed_by_agent || isHermes);
+
         return {
           ...s,
           // Sovrascrive status con 'crashed' se il watchdog ha rilevato un crash in-memory
           status: botManager.bots.get(s.id)?._crashed ? 'crashed' : s.status,
           actor: aid,
-          actorLabel: meta.label,
+          actor_id: rawAid,
+          actorLabel: label,
+          actor_label: label,
           actorIcon: meta.icon,
           actorColor: meta.color,
+          is_managed_by_agent: isManaged,
         };
       });
       res.json({ success: true, data: enriched });
@@ -810,10 +819,10 @@ class ArbitrageBotServer {
     // `max_allocation_usd` (Budget Ceiling, null = nessun limite).
     app.post('/api/perps/bots', (req, res) => {
       try {
-        const { name, coin, masterAddress, config: botConfig, linked_agent_id, max_allocation_usd } = req.body;
+        const { name, coin, masterAddress, config: botConfig, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent } = req.body;
         const state = botManager.createBot({
           name, coin, masterAddress, network: hyperliquid.getNetwork(), config: botConfig,
-          linked_agent_id, max_allocation_usd
+          linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent
         });
         res.json({ success: true, data: state });
       } catch (error) {

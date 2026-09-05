@@ -266,6 +266,12 @@ export class PerpsDatabase {
       () => {
         this._addColumn('bots', 'linked_agent_id', "TEXT NOT NULL DEFAULT 'user_manual'");
         this._addColumn('bots', 'max_allocation_usd', 'REAL');
+      },
+      // v5 (AGENT-METADATA) — colonne additive actor_label, actor_id, is_managed_by_agent
+      () => {
+        this._addColumn('bots', 'actor_label', 'TEXT');
+        this._addColumn('bots', 'actor_id', 'TEXT');
+        this._addColumn('bots', 'is_managed_by_agent', 'INTEGER DEFAULT 0');
       }
     ];
   }
@@ -336,8 +342,8 @@ export class PerpsDatabase {
   insertBot(bot) {
     const now = Date.now();
     this.db.prepare(`
-      INSERT INTO bots (id, name, coin, network, master_address, config_json, status, linked_agent_id, max_allocation_usd, created_at, updated_at)
-      VALUES (@id, @name, @coin, @network, @masterAddress, @configJson, @status, @linkedAgentId, @maxAllocationUsd, @createdAt, @updatedAt)
+      INSERT INTO bots (id, name, coin, network, master_address, config_json, status, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent, created_at, updated_at)
+      VALUES (@id, @name, @coin, @network, @masterAddress, @configJson, @status, @linkedAgentId, @maxAllocationUsd, @actorLabel, @actorId, @isManagedByAgent, @createdAt, @updatedAt)
     `).run({
       id: bot.id,
       name: bot.name,
@@ -346,14 +352,17 @@ export class PerpsDatabase {
       masterAddress: bot.masterAddress.toLowerCase(),
       configJson: JSON.stringify(bot.config),
       status: bot.status || 'stopped',
-      linkedAgentId: bot.linked_agent_id || bot.linkedAgentId || 'user_manual',
+      linkedAgentId: bot.linked_agent_id || bot.linkedAgentId || bot.actor_id || 'user_manual',
       maxAllocationUsd: bot.max_allocation_usd != null ? Number(bot.max_allocation_usd) : (bot.maxAllocationUsd != null ? Number(bot.maxAllocationUsd) : null),
+      actorLabel: bot.actor_label || bot.actorLabel || null,
+      actorId: bot.actor_id || bot.actorId || bot.linked_agent_id || null,
+      isManagedByAgent: bot.is_managed_by_agent ? 1 : 0,
       createdAt: now,
       updatedAt: now
     });
   }
 
-  updateBot(id, { config, status, name, coin, linked_agent_id, linkedAgentId, max_allocation_usd, maxAllocationUsd }) {
+  updateBot(id, { config, status, name, coin, linked_agent_id, linkedAgentId, max_allocation_usd, maxAllocationUsd, actor_label, actorLabel, actor_id, actorId, is_managed_by_agent, isManagedByAgent }) {
     const existing = this.getBot(id);
     if (!existing) return null;
     // Risolvi linked_agent_id da entrambe le forme (snake_case e camelCase)
@@ -361,6 +370,11 @@ export class PerpsDatabase {
     // Risolvi max_allocation_usd da entrambe le forme
     const newMaxAllocationUsd = max_allocation_usd !== undefined ? max_allocation_usd
       : (maxAllocationUsd !== undefined ? maxAllocationUsd : undefined);
+    const newActorLabel = actor_label !== undefined ? actor_label : actorLabel;
+    const newActorId = actor_id !== undefined ? actor_id : actorId;
+    const newIsManaged = is_managed_by_agent !== undefined ? (is_managed_by_agent ? 1 : 0)
+      : (isManagedByAgent !== undefined ? (isManagedByAgent ? 1 : 0) : undefined);
+
     this.db.prepare(`
       UPDATE bots SET
         name = @name,
@@ -369,6 +383,9 @@ export class PerpsDatabase {
         status = @status,
         linked_agent_id = @linkedAgentId,
         max_allocation_usd = @maxAllocationUsd,
+        actor_label = @actorLabel,
+        actor_id = @actorId,
+        is_managed_by_agent = @isManagedByAgent,
         updated_at = @updatedAt
       WHERE id = @id
     `).run({
@@ -381,6 +398,9 @@ export class PerpsDatabase {
       maxAllocationUsd: newMaxAllocationUsd !== undefined
         ? (newMaxAllocationUsd != null ? Number(newMaxAllocationUsd) : null)
         : existing.max_allocation_usd,
+      actorLabel: newActorLabel !== undefined ? newActorLabel : existing.actor_label,
+      actorId: newActorId !== undefined ? newActorId : existing.actor_id,
+      isManagedByAgent: newIsManaged !== undefined ? newIsManaged : (existing.is_managed_by_agent || 0),
       updatedAt: Date.now()
     });
     return this.getBot(id);

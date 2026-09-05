@@ -27,7 +27,17 @@ class BotManager {
   }
 
   _onUpdate = (state) => {
-    if (this.io) this.io.emit('perps:botUpdate', state);
+    if (this.io) {
+      this.io.emit('perps:botUpdate', state);
+      // Emette dashboardRefresh istantaneo se l'azione di trading è operativa (open_long/open_short/close)
+      if (state.lastEval && (state.lastEval.action === 'open_long' || state.lastEval.action === 'open_short' || state.lastEval.action === 'close')) {
+        this.io.emit('perps:dashboardRefresh', {
+          reason: 'strategy_signal',
+          botId: state.id,
+          action: state.lastEval.action
+        });
+      }
+    }
   };
 
   /** Carica i bot dal DB e riavvia quelli che risultavano in esecuzione. */
@@ -100,7 +110,7 @@ class BotManager {
    *  - `linked_agent_id` : chi controlla il bot ('user_manual' | 'hermes' | ...)
    *  - `max_allocation_usd` : Budget Ceiling — null = nessun limite aggiuntivo
    */
-  createBot({ name, coin, network, masterAddress, config, linked_agent_id, max_allocation_usd }) {
+  createBot({ name, coin, network, masterAddress, config, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent }) {
     if (!name || !coin || !masterAddress) {
       throw new Error('name, coin e masterAddress sono obbligatori');
     }
@@ -109,8 +119,11 @@ class BotManager {
     const record = {
       id, name, coin, network: network || 'testnet',
       masterAddress, config: config || {}, status: 'stopped',
-      linked_agent_id: linked_agent_id || 'user_manual',
-      max_allocation_usd: max_allocation_usd != null ? Number(max_allocation_usd) : null
+      linked_agent_id: linked_agent_id || actor_id || 'user_manual',
+      max_allocation_usd: max_allocation_usd != null ? Number(max_allocation_usd) : null,
+      actor_label: actor_label || null,
+      actor_id: actor_id || linked_agent_id || null,
+      is_managed_by_agent: Boolean(is_managed_by_agent || (linked_agent_id && linked_agent_id.toLowerCase().includes('hermes')))
     };
     db.insertBot(record);
     const bot = new PerpsBot(db.getBot(id), this._onUpdate);
@@ -148,14 +161,14 @@ class BotManager {
    *
    * AGENT-AWARE: accetta anche `linked_agent_id` e `max_allocation_usd`.
    */
-  async updateBot(id, { name, coin, config, linked_agent_id, max_allocation_usd }) {
+  async updateBot(id, { name, coin, config, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent }) {
     const bot = this.bots.get(id);
     if (!bot) throw new Error('Bot non trovato');
     const wasRunning = bot.status === 'running';
     if (wasRunning) bot.stop();
     await bot.whenIdle();
 
-    db.updateBot(id, { name, coin, config, linked_agent_id, max_allocation_usd });
+    db.updateBot(id, { name, coin, config, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent });
     const fresh = new PerpsBot(db.getBot(id), this._onUpdate);
     this.bots.set(id, fresh);
     if (wasRunning) fresh.start();

@@ -442,3 +442,81 @@
 .analysis-params { background:rgba(99,102,241,0.05); border:1px solid rgba(99,102,241,0.15); border-radius:10px; padding:12px; margin-bottom:12px; }
 .analysis-params .form-input-sm, .analysis-params .form-select-sm { font-size:13px; }
 .analysis-params textarea.form-input { resize:vertical; }
+
+/* ===== AGENT-AWARE: Badge agente sui bot card ===== */
+.agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.6em;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+  vertical-align: middle;
+  margin-left: 6px;
+  letter-spacing: 0.3px;
+}
+.agent-badge-manual {
+  background: rgba(113, 128, 150, 0.12);
+  color: #718096;
+  border: 1px solid rgba(113, 128, 150, 0.2);
+}
+.agent-badge-hermes {
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.15), rgba(118, 75, 162, 0.15));
+  color: #667eea;
+  border: 1px solid rgba(102, 126, 234, 0.3);
+  animation: hermes-glow 3s ease-in-out infinite;
+}
+@keyframes hermes-glow {
+  0%, 100% { box-shadow: 0 0 0 rgba(102, 126, 234, 0); }
+  50% { box-shadow: 0 0 6px rgba(102, 126, 234, 0.35); }
+}
+
+/* ===== AGENT-AWARE: Filtro agente toolbar ===== */
+.agent-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+.agent-filter-bar label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #718096;
+  white-space: nowrap;
+}
+.agent-filter-select {
+  flex: 1;
+  max-width: 200px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: white;
+  font-size: 0.85rem;
+  color: #2d3748;
+  cursor: pointer;
+}
+.agent-filter-select:focus { outline: none; border-color: #667eea; }
+
+/* ===== Kill Switch button ===== */
+.btn-kill-switch {
+  background: linear-gradient(135deg, #ff416c, #ff4b2b);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+  letter-spacing: 0.3px;
+}
+.btn-kill-switch:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(255, 65, 108, 0.4);
+}
+.btn-kill-switch:active { transform: none; }

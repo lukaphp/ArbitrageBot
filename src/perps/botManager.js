@@ -95,8 +95,12 @@ class BotManager {
    * dire): la forma di `getState()` non cambia per nessun altro consumatore —
    * `listStates()`, le metriche e gli eventi socket non lo vedono nemmeno, perché
    * quelli ricostruiscono lo stato per conto loro.
+   *
+   * AGENT-AWARE:
+   *  - `linked_agent_id` : chi controlla il bot ('user_manual' | 'hermes' | ...)
+   *  - `max_allocation_usd` : Budget Ceiling — null = nessun limite aggiuntivo
    */
-  createBot({ name, coin, network, masterAddress, config }) {
+  createBot({ name, coin, network, masterAddress, config, linked_agent_id, max_allocation_usd }) {
     if (!name || !coin || !masterAddress) {
       throw new Error('name, coin e masterAddress sono obbligatori');
     }
@@ -104,12 +108,14 @@ class BotManager {
     const id = crypto.randomUUID();
     const record = {
       id, name, coin, network: network || 'testnet',
-      masterAddress, config: config || {}, status: 'stopped'
+      masterAddress, config: config || {}, status: 'stopped',
+      linked_agent_id: linked_agent_id || 'user_manual',
+      max_allocation_usd: max_allocation_usd != null ? Number(max_allocation_usd) : null
     };
     db.insertBot(record);
     const bot = new PerpsBot(db.getBot(id), this._onUpdate);
     this.bots.set(id, bot);
-    logger.info(`➕ Bot creato: ${name} (${coin})`, { id });
+    logger.info(`➕ Bot creato: ${name} (${coin}) [agent: ${record.linked_agent_id}]`, { id });
 
     let warning = null;
     if (overlap.length) {
@@ -139,15 +145,17 @@ class BotManager {
    *
    * Asincrono di conseguenza: chi chiama (`PATCH /api/perps/bots/:id`) deve
    * attendere, altrimenti risponderebbe con lo stato della vecchia istanza.
+   *
+   * AGENT-AWARE: accetta anche `linked_agent_id` e `max_allocation_usd`.
    */
-  async updateBot(id, { name, coin, config }) {
+  async updateBot(id, { name, coin, config, linked_agent_id, max_allocation_usd }) {
     const bot = this.bots.get(id);
     if (!bot) throw new Error('Bot non trovato');
     const wasRunning = bot.status === 'running';
     if (wasRunning) bot.stop();
     await bot.whenIdle();
 
-    db.updateBot(id, { name, coin, config });
+    db.updateBot(id, { name, coin, config, linked_agent_id, max_allocation_usd });
     const fresh = new PerpsBot(db.getBot(id), this._onUpdate);
     this.bots.set(id, fresh);
     if (wasRunning) fresh.start();
@@ -188,8 +196,14 @@ class BotManager {
     return bot.getMonitor();
   }
 
-  listStates() {
-    return [...this.bots.values()].map(b => b.getState());
+  /**
+   * Lista stati di tutti i bot, con filtro opzionale per agent_id.
+   * Agente non specificato = tutti i bot.
+   */
+  listStates(agentId = null) {
+    const all = [...this.bots.values()].map(b => b.getState());
+    if (!agentId) return all;
+    return all.filter(s => (s.linked_agent_id || 'user_manual') === agentId);
   }
 
   /**

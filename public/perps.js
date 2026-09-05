@@ -2685,7 +2685,10 @@ class PerpsApp {
   // ---- Bots ----
   async loadBots() {
     try {
-      this.bots = await this.api('/api/perps/bots');
+      // AGENT-AWARE: applica il filtro per agent_id se selezionato
+      const agentFilter = this._agentFilter || '';
+      const url = agentFilter ? `/api/perps/bots?agent_id=${encodeURIComponent(agentFilter)}` : '/api/perps/bots';
+      this.bots = await this.api(url);
       // Mappa bot -> strategia AI d'origine (per mostrare da quale proposta nasce)
       try {
         const hist = await this.api('/api/agents/strategy-history');
@@ -2694,6 +2697,12 @@ class PerpsApp {
       } catch { this._botStrategy = this._botStrategy || {}; }
       this._renderBots();
     } catch (e) { /* ignore */ }
+  }
+
+  /** Cambia il filtro agent e ricarica la lista bot. */
+  setAgentFilter(value) {
+    this._agentFilter = value || '';
+    this.loadBots();
   }
 
   _renderBots() {
@@ -2727,12 +2736,27 @@ class PerpsApp {
     const stratBadge = strat
       ? `<div class="bot-strategy-badge" title="${(strat.rationale || '').replace(/"/g, '&quot;')}">🧠 da strategia AI${strat.decidedAt ? ' · ' + new Date(strat.decidedAt).toLocaleDateString('it-IT') : ''}</div>`
       : '';
+
+    // AGENT-AWARE: badge che mostra chi controlla il bot
+    const agentId = b.linked_agent_id || 'user_manual';
+    const agentLabel = agentId === 'user_manual' ? '👤 Manuale'
+      : agentId === 'hermes' ? '🤖 Hermes'
+      : `🤖 ${agentId}`;
+    const agentBadgeClass = agentId === 'user_manual' ? 'agent-badge-manual' : 'agent-badge-hermes';
+    const agentBadge = `<span class="agent-badge ${agentBadgeClass}" title="Controllato da: ${agentId}">${agentLabel}</span>`;
+
+    // Budget Ceiling info
+    const budgetInfo = b.max_allocation_usd != null
+      ? `<span class="muted" title="Budget Ceiling"> · max ${this.fmtUsd(b.max_allocation_usd)}</span>`
+      : '';
+
     return `<div class="bot-card ${running ? 'running' : ''}" id="bot-${b.id}">
       <div class="bot-card-head">
         <div>
           <span class="bot-status-dot ${running ? 'online' : 'offline'}"></span>
           <strong>${b.name}</strong> <span class="muted">· ${b.coin}</span>
           ${b.paper ? '<span class="testnet-badge" style="font-size:.6em;vertical-align:middle" title="Forward-test: esecuzione simulata su prezzi reali">PAPER</span>' : ''}
+          ${agentBadge}${budgetInfo}
         </div>
         <span class="bot-pnl ${pnlClass}">${this.fmtUsd(b.dailyPnl || 0)}</span>
       </div>
@@ -2783,6 +2807,86 @@ class PerpsApp {
       await this.loadBots();
     } catch (e) { this.toast(e.message, 'error'); }
   }
+
+  /** AGENT-AWARE: Kill Switch — ferma tutti i bot dell'agente selezionato nel filtro. */
+  /**
+   * AGENT-AWARE: Kill Switch "Safe-Exit"
+   *
+   * Ferma SEMPRE tutti i bot dell'agente (nessuna nuova apertura).
+   * Chiude le posizioni via market order SOLO se il loro notional supera la soglia.
+   * Le posizioni piccole restano aperte per gestione manuale ponderata.
+   */
+  async killSwitchAgent() {
+    const agentFilter = this._agentFilter || '';
+    const agentLabel = agentFilter === 'hermes' ? 'Hermes'
+      : agentFilter === 'user_manual' ? 'Manuali'
+      : 'tutti gli agenti';
+
+    // Step 1 — Conferma azione
+    const confirmed = confirm(
+      `🛑 Kill Switch Safe-Exit [${agentLabel}]\n\n` +
+      `• I bot${agentFilter ? ` di "${agentLabel}"` : ''} verranno FERMATI immediatamente.\n` +
+      `• Le posizioni con notional > soglia verranno chiuse via market order.\n` +
+      `• Le posizioni piccole (sotto soglia) rimarranno aperte per gestione manuale.\n\n` +
+      `Continuare?`
+    );
+    if (!confirmed) return;
+
+    // Step 2 — Soglia size (prompt con default 500 USD)
+    const thresholdInput = window.prompt(
+      '💰 Soglia Safe-Exit (USD)\n\n' +
+      'Le posizioni con notional SUPERIORE a questa soglia verranno chiuse con market order.\n' +
+      'Le posizioni inferiori rimarranno aperte per gestione manuale.\n\n' +
+      'Inserisci la soglia in USD (es. 500):\n' +
+      '(Inserisci 0 per chiudere TUTTE le posizioni indipendentemente dalla size)',
+      '500'
+    );
+    if (thresholdInput === null) return; // annullato
+    const threshold = parseFloat(thresholdInput);
+    if (isNaN(threshold) || threshold < 0) {
+      this.toast('Soglia non valida', 'error');
+      return;
+    }
+
+    // Step 3 — Conferma finale con riepilogo
+    const thresholdLabel = threshold === 0
+      ? 'TUTTE le posizioni verranno chiuse'
+      : `Solo posizioni > $${threshold.toFixed(0)} USD verranno chiuse`;
+    const finalOk = confirm(
+      `⚠️ Conferma Kill Switch Safe-Exit\n\n` +
+      `Agente: ${agentLabel}\n` +
+      `Soglia: ${thresholdLabel}\n\n` +
+      `Questa azione è irreversibile. Procedere?`
+    );
+    if (!finalOk) return;
+
+    try {
+      // Se filtro = '' (tutti), iteriamo per ogni agente noto
+      const agentIds = agentFilter ? [agentFilter] : ['user_manual', 'hermes'];
+      let totalStopped = 0;
+      let totalClosed = 0;
+      let totalSkipped = 0;
+
+      for (const aid of agentIds) {
+        const result = await this.api('/api/perps/kill-switch', {
+          method: 'POST',
+          body: JSON.stringify({ agent_id: aid, size_threshold_usd: threshold })
+        });
+        if (result) {
+          totalStopped += (result.stopped || []).length;
+          totalClosed += (result.closedPositions || []).length;
+          totalSkipped += (result.skippedPositions || []).length;
+        }
+      }
+
+      let msg = `🛑 Kill Switch: ${totalStopped} bot fermat${totalStopped === 1 ? 'o' : 'i'}`;
+      if (totalClosed) msg += `, ${totalClosed} posizion${totalClosed === 1 ? 'e chiusa' : 'i chiuse'} (> $${threshold})`;
+      if (totalSkipped) msg += ` · ${totalSkipped} lasciat${totalSkipped === 1 ? 'a aperta' : 'e aperte'} per gestione manuale`;
+      this.toast(msg, 'warning');
+      await this.loadBots();
+    } catch (e) { this.toast('Kill Switch fallito: ' + e.message, 'error'); }
+  }
+
 
   async deleteBot(id) {
     if (!confirm('Eliminare questo bot?')) return;

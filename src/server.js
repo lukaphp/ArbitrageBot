@@ -752,8 +752,10 @@ class ArbitrageBotServer {
     });
 
     // --- Bot ---
+    // AGENT-AWARE: filtro opzionale ?agent_id=hermes|user_manual per isolare la vista
     app.get('/api/perps/bots', (req, res) => {
-      res.json({ success: true, data: botManager.listStates() });
+      const agentId = req.query.agent_id || null;
+      res.json({ success: true, data: botManager.listStates(agentId) });
     });
 
     // Monitor live: cosa sta valutando il bot (indicatori vs soglie, distanza al segnale)
@@ -781,11 +783,15 @@ class ArbitrageBotServer {
     // legittima. Il campo arriva da `botManager.createBot()` e passa da qui senza
     // essere toccato — la decisione di cosa sia una sovrapposizione sta nel
     // manager, che è l'unico a sapere quali bot sono davvero in esecuzione.
+    //
+    // AGENT-AWARE: accetta `linked_agent_id` ('user_manual' default) e
+    // `max_allocation_usd` (Budget Ceiling, null = nessun limite).
     app.post('/api/perps/bots', (req, res) => {
       try {
-        const { name, coin, masterAddress, config: botConfig } = req.body;
+        const { name, coin, masterAddress, config: botConfig, linked_agent_id, max_allocation_usd } = req.body;
         const state = botManager.createBot({
-          name, coin, masterAddress, network: hyperliquid.getNetwork(), config: botConfig
+          name, coin, masterAddress, network: hyperliquid.getNetwork(), config: botConfig,
+          linked_agent_id, max_allocation_usd
         });
         res.json({ success: true, data: state });
       } catch (error) {
@@ -921,7 +927,211 @@ class ArbitrageBotServer {
       }
     });
 
-    // --- Ordine manuale ---
+    // --- AGENT-AWARE: Kill Switch "Safe-Exit" ---
+
+    //
+    // Filosofia: non chiude tutto "a colpo" per evitare slippage devastante.
+    //
+    // Body:
+    //   agent_id          : (required) 'hermes' | 'user_manual' | ...
+    //   size_threshold_usd: (optional, default 500) soglia in USD.
+    //                       Le posizioni con notional > soglia vengono chiuse subito
+    //                       via market order (pericolose per il capitale).
+    //                       Le posizioni < soglia vengono lasciate aperte per una
+    //                       gestione manuale più ponderata (evita slippage su size piccole).
+    //
+    // Risposta: include `skipped` (posizioni sotto soglia, lasciate aperte).
+    app.post('/api/perps/kill-switch', async (req, res) => {
+      try {
+        const { agent_id, size_threshold_usd } = req.body || {};
+        if (!agent_id) return res.status(400).json({ success: false, error: 'agent_id richiesto' });
+
+        // Soglia: default 500 USD, null/0 = chiudi tutto (nessuna soglia)
+        const threshold = size_threshold_usd != null ? Number(size_threshold_usd) : 500;
+
+        // Trova tutti i bot dell'agente (in memoria)
+        const targets = [...botManager.bots.values()].filter(
+          b => (b.linked_agent_id || 'user_manual') === agent_id
+        );
+
+        const stopped = [];           // bot fermati
+        const closedPositions = [];   // posizioni chiuse (size > soglia)
+        const skippedPositions = [];  // posizioni lasciate aperte (size <= soglia)
+        const errors = [];
+
+        for (const bot of targets) {
+          try {
+            // STEP 1 — Ferma SEMPRE il bot (nessuna nuova apertura da questo momento)
+            if (bot.status === 'running') {
+              bot.stop();
+              stopped.push(bot.id);
+            }
+
+            // STEP 2 — Valuta la posizione aperta (Safe-Exit)
+            if (bot.position) {
+              // Stima del notional: size * entryPx (prezzo di ingresso come proxy)
+              // Se entryPx non disponibile, usiamo il prezzo mid live come fallback
+              const entryPx = bot.position.entryPx || 0;
+              const size = bot.position.size || 0;
+              const estimatedNotional = size * entryPx;
+
+              // Una posizione > soglia è pericolosa → chiudi subito
+              // threshold=0 → chiudi tutto (nessuna soglia)
+              const exceedsThreshold = threshold === 0 || estimatedNotional > threshold;
+
+              if (exceedsThreshold) {
+                try {
+                  const result = await hyperliquid.closePosition(
+                    { masterAddress: bot.masterAddress, coin: bot.coin },
+                    hyperliquid.getNetwork()
+                  );
+                  closedPositions.push({
+                    botId: bot.id, coin: bot.coin,
+                    notionalUsd: estimatedNotional, result
+                  });
+                } catch (closeErr) {
+                  errors.push({ botId: bot.id, action: 'close_position', error: closeErr.message });
+                }
+            } else {
+                // Posizione piccola: lascia aperta, segnala per gestione manuale.
+                // Il uPNL live viene arricchito dopo il loop (batch per wallet).
+                skippedPositions.push({
+                  botId: bot.id,
+                  coin: bot.coin,
+                  masterAddress: bot.masterAddress,
+                  notionalUsd: estimatedNotional,
+                  side: bot.position.side,
+                  size: bot.position.size,
+                  unrealizedPnl: null, // popolato sotto
+                  reason: `notional ${estimatedNotional.toFixed(2)} USD <= soglia ${threshold} USD — gestione manuale raccomandata`
+                });
+              }
+            }
+          } catch (botErr) {
+            errors.push({ botId: bot.id, action: 'stop', error: botErr.message });
+          }
+        }
+
+        // --- Arricchimento uPNL live per le posizioni skippate ---
+        // Una singola call getAccount per wallet (non per bot) per minimizzare le API call.
+        // Il uPNL è l'informazione critica per decidere se chiudere manualmente.
+        if (skippedPositions.length > 0) {
+          const uniqueWallets = [...new Set(skippedPositions.map(p => p.masterAddress))];
+          const accountsByWallet = new Map();
+          await Promise.allSettled(
+            uniqueWallets.map(async addr => {
+              try {
+                const acc = await hyperliquid.getAccount(addr, hyperliquid.getNetwork());
+                // Mappa coin → unrealizedPnl per lookup O(1)
+                const pnlByCoin = new Map(
+                  (acc.positions || []).map(pos => [pos.coin, pos.unrealizedPnl])
+                );
+                accountsByWallet.set(addr, pnlByCoin);
+              } catch (e) {
+                logger.warn(`Kill Switch: impossibile recuperare uPNL per ${addr}: ${e.message}`);
+              }
+            })
+          );
+
+          // Arricchisci ogni posizione skippata con il uPNL live
+          for (const sp of skippedPositions) {
+            const pnlByCoin = accountsByWallet.get(sp.masterAddress);
+            if (pnlByCoin) {
+              sp.unrealizedPnl = pnlByCoin.get(sp.coin) ?? null;
+            }
+          }
+        }
+
+        db.insertAudit('system', 'kill_switch_safe_exit', {
+          agent_id, threshold, stopped, closedPositions: closedPositions.length,
+          skippedPositions: skippedPositions.length, errors
+        });
+
+        const logMsg = `🛑 Kill Switch Safe-Exit: agent=${agent_id}, soglia=${threshold} USD, ` +
+          `fermati=${stopped.length}, chiuse=${closedPositions.length}, skip=${skippedPositions.length}`;
+        logger.warn(logMsg);
+
+        // Notifica Telegram con dettaglio Safe-Exit
+        const notifParts = [
+          `🛑 <b>Kill Switch Safe-Exit</b> [${agent_id}]`,
+          `🔴 ${stopped.length} bot fermat${stopped.length === 1 ? 'o' : 'i'} (nessuna nuova apertura)`
+        ];
+        if (closedPositions.length) {
+          notifParts.push(`⚡ ${closedPositions.length} posizion${closedPositions.length === 1 ? 'e chiusa' : 'i chiuse'} (notional > ${threshold} USD)`);
+        }
+        if (skippedPositions.length) {
+          const skLines = skippedPositions.map(p => {
+            const pnl = p.unrealizedPnl;
+            let pnlStr;
+            if (pnl == null) {
+              pnlStr = '⚪ uPNL n/d';
+            } else if (pnl >= 0) {
+              pnlStr = `🟢 uPNL +$${pnl.toFixed(2)}`;
+            } else {
+              pnlStr = `🔴 uPNL -$${Math.abs(pnl).toFixed(2)}`;
+            }
+            return `  • ${p.coin} ${(p.side || '').toUpperCase()} | $${p.notionalUsd?.toFixed(0)} | ${pnlStr}`;
+          }).join('\n');
+          notifParts.push(
+            `⏸️ ${skippedPositions.length} posizion${skippedPositions.length === 1 ? 'e lasciata aperta' : 'i lasciate aperte'} (size &lt; soglia):\n${skLines}`
+          );
+        }
+        if (errors.length) notifParts.push(`⚠️ ${errors.length} errori`);
+        if (stopped.length || closedPositions.length || skippedPositions.length) {
+          notifier.notify(notifParts.join('\n'), { urgent: closedPositions.length > 0 });
+        }
+
+        this.io.emit('perps:killSwitch', {
+          agent_id, threshold, stopped, closedPositions, skippedPositions, errors
+        });
+
+        res.json({
+          success: true,
+          data: {
+            agent_id, threshold,
+            botsFound: targets.length,
+            stopped,
+            closedPositions,
+            skippedPositions,
+            errors
+          }
+        });
+      } catch (error) {
+        logger.error('Kill Switch errore:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // --- AGENT-AWARE: Posizioni con filtro opzionale per agent ---
+
+    // GET /api/perps/positions?agent_id=hermes&limit=50
+    app.get('/api/perps/positions', (req, res) => {
+      try {
+        const agentId = req.query.agent_id || null;
+        const limit = parseInt(req.query.limit) || 100;
+        const rows = db.listPositions(limit, agentId);
+        res.json({ success: true, data: rows });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // --- AGENT-AWARE: Trades con filtro opzionale per agent ---
+    // GET /api/perps/trades?agent_id=hermes&limit=50
+    app.get('/api/perps/trades', (req, res) => {
+      try {
+        const agentId = req.query.agent_id || null;
+        const botId = req.query.bot_id || null;
+        const coin = req.query.coin || null;
+        const limit = parseInt(req.query.limit) || 100;
+        const rows = db.listTradesBy({ agentId, botId, coin, limit });
+        res.json({ success: true, data: rows });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+
     app.post('/api/perps/order', async (req, res) => {
       try {
         const { masterAddress, coin, side, sizeUsd, size, leverage, tp, sl, slippage } = req.body;

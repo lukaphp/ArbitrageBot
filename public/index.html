@@ -526,6 +526,18 @@
                         <button class="btn btn-primary" onclick="perps.openBotModal()">➕ Nuovo Bot</button>
                     </div>
                     <div class="card-content">
+                        <!-- AGENT-AWARE: Barra filtro agente + Kill Switch -->
+                        <div class="agent-filter-bar">
+                            <label for="agentFilterSelect">👁️ Vista:</label>
+                            <select id="agentFilterSelect" class="agent-filter-select"
+                                onchange="perps.setAgentFilter(this.value)">
+                                <option value="">Tutti i bot</option>
+                                <option value="user_manual">👤 Solo Manuali</option>
+                                <option value="hermes">🤖 Solo Hermes</option>
+                            </select>
+                            <button class="btn-kill-switch" title="Ferma tutti i bot dell'agente selezionato"
+                                onclick="perps.killSwitchAgent()">🛑 Kill Switch</button>
+                        </div>
                         <div id="botsList" class="bots-list"></div>
                         <div id="noBots" class="no-data">
                             <div class="no-data-icon">🤖</div>
@@ -534,6 +546,7 @@
                         </div>
                     </div>
                 </section>
+
 
                 <!-- Rischio di portafoglio & Notifiche -->
                 <section class="card">

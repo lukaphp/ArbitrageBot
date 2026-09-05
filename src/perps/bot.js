@@ -47,6 +47,16 @@ export class PerpsBot {
       : (record.config || {});
     this.onUpdate = onUpdate || (() => {});
 
+    // AGENT-AWARE: chi controlla questo bot.
+    // Letto dalla riga DB (dopo migrazione v4 è sempre presente, default 'user_manual').
+    this.linked_agent_id = record.linked_agent_id || 'user_manual';
+
+    // Budget Ceiling: limite massimo di notional USD per apertura. null = nessun limite.
+    // Il valore dal DB prevale; in alternativa può essere nel config (retrocompat).
+    this.maxAllocationUsd = record.max_allocation_usd != null
+      ? Number(record.max_allocation_usd)
+      : (this.config.max_allocation_usd != null ? Number(this.config.max_allocation_usd) : null);
+
     // Broker di esecuzione: reale (client) o simulato (paperBroker) se paper-mode.
     // I prezzi/segnali restano sempre reali e live; solo l'esecuzione è simulata.
     this.paper = !!this.config.paper;
@@ -365,6 +375,23 @@ export class PerpsBot {
         this._lastCooldownNotifyUntil = pf.cooldownUntil;
         notifier.notify(`⏸️ <b>${this.name}</b>: ${pf.reason}`);
       }
+      return;
+    }
+
+    // AGENT-AWARE — Budget Ceiling (CRIT-BUDGET).
+    // Fail-fast e senza effetti collaterali: eseguito PRIMA del lock di apertura
+    // (stessa filosofia di CRIT-03) così non lascia tracce in caso di blocco.
+    // `plan.notionalUsd` è il valore nozionale dell'apertura pianificata (size * prezzo).
+    if (this.maxAllocationUsd != null && plan.notionalUsd > this.maxAllocationUsd) {
+      logger.warn(
+        `Bot ${this.name}: apertura bloccata dal Budget Ceiling — ` +
+        `notional ${plan.notionalUsd.toFixed(2)} USD > limite ${this.maxAllocationUsd} USD`
+      );
+      this.lastEval = {
+        action: 'hold',
+        reason: `Budget Ceiling: notional ${plan.notionalUsd.toFixed(2)} USD supera il limite di ${this.maxAllocationUsd} USD`,
+        ts: Date.now()
+      };
       return;
     }
 
@@ -1128,6 +1155,8 @@ export class PerpsBot {
     return {
       id: this.id, name: this.name, coin: this.coin, network: this.network,
       status: this.status, inPosition: !!this.position, paper: this.paper,
+      linked_agent_id: this.linked_agent_id,
+      max_allocation_usd: this.maxAllocationUsd,
       position: this.position, dailyPnl: this.dailyPnl,
       lastEval: this.lastEval, lastError: this.lastError, config: this.config,
       lastTickAt: this.lastTickAt, tickErrors: this.tickErrors,

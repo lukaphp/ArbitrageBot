@@ -58,15 +58,16 @@ export function createArbitrageBotMcpServer() {
   // 2. Tool: place_order_paper
   server.tool(
     'place_order_paper',
-    'Piazza un ordine di trading paper (simulato su dati reali) validando maxPositionUsd e kill-switch.',
+    'Piazza un ordine di trading paper validando i guardrail di rischio (leva <= 5x, account exposure, blacklist, cooldown, daily loss limit).',
     {
       bot_id: z.string().describe('UUID del bot che invia l\'ordine'),
       side: z.enum(['long', 'short']).describe("Direzione dell'operazione: 'long' o 'short'"),
       size: z.number().positive().describe('Dimensione/quantità in unità della coin (es. 10.5)'),
-      entry_price: z.number().positive().optional().describe('Prezzo stimato di ingresso (opzionale, default: mid di mercato corrente)')
+      entry_price: z.number().positive().optional().describe('Prezzo stimato di ingresso (opzionale, default: mid di mercato corrente)'),
+      leverage: z.number().int().min(1).max(5).optional().describe('Leva richiesta per l\'ordine (max 5x autorizzata da guardrail)')
     },
-    async ({ bot_id, side, size, entry_price }) => {
-      const res = await handlePlaceOrderPaper({ bot_id, side, size, entry_price });
+    async ({ bot_id, side, size, entry_price, leverage }) => {
+      const res = await handlePlaceOrderPaper({ bot_id, side, size, entry_price, leverage });
       return {
         content: [{ type: 'text', text: JSON.stringify(res, null, 2) }],
         isError: !res.success
@@ -91,13 +92,14 @@ export function createArbitrageBotMcpServer() {
   // 4. Tool: emergency_shutdown
   server.tool(
     'emergency_shutdown',
-    'Arresta immediatamente tutti i bot attivi e abilita il kill-switch globale di emergenza.',
+    'Arresta immediatamente tutti i bot attivi e abilita il kill-switch globale con conferma a due stadi (60s TTL).',
     {
-      confirm: z.boolean().describe('Safe-guard esplicito: DEVE essere true per autorizzare l\'arresto immediato'),
+      confirmation_token: z.string().optional().describe('Token di conferma ricevuto allo stadio 1 (obbligatorio per confermare ed eseguire entro 60s)'),
+      confirm: z.boolean().optional().describe('Legacy flag di conferma diretta'),
       threshold: z.number().optional().describe('Soglia numerica di perdita o drawdown che ha innescato l\'emergenza (opzionale per tracciamento)')
     },
-    async ({ confirm, threshold }) => {
-      const res = await handleEmergencyShutdown({ confirm, threshold });
+    async ({ confirmation_token, confirm, threshold }) => {
+      const res = await handleEmergencyShutdown({ confirmation_token, confirm, threshold });
       return {
         content: [{ type: 'text', text: JSON.stringify(res, null, 2) }],
         isError: !res.success
@@ -108,13 +110,14 @@ export function createArbitrageBotMcpServer() {
   // 5. Tool: update_strategy_params
   server.tool(
     'update_strategy_params',
-    'Modifica i parametri di strategia del bot nel DB SQLite e ricarica istantaneamente la cache runtime in memoria.',
+    'Modifica i parametri di strategia del bot nel DB SQLite con conferma a due stadi (60s) e ricarica della cache runtime.',
     {
       bot_id: z.string().describe('UUID del bot da riconfigurare'),
-      params: z.record(z.any()).describe('Dizionario chiave-valore con i nuovi parametri (es. { leverage: 5, maxPositionUsd: 1000, takeProfitPct: 0.02 })')
+      params: z.record(z.any()).describe('Dizionario chiave-valore con i nuovi parametri (es. { leverage: 5, maxPositionUsd: 1000, takeProfitPct: 0.02 })'),
+      confirmation_token: z.string().optional().describe('Token di conferma ricevuto allo stadio 1 (obbligatorio per confermare ed applicare le modifiche entro 60s)')
     },
-    async ({ bot_id, params }) => {
-      const res = await handleUpdateStrategyParams({ bot_id, params });
+    async ({ bot_id, params, confirmation_token }) => {
+      const res = await handleUpdateStrategyParams({ bot_id, params, confirmation_token });
       return {
         content: [{ type: 'text', text: JSON.stringify(res, null, 2) }],
         isError: !res.success

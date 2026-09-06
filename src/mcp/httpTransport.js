@@ -29,14 +29,15 @@ export const MCP_TOOLS_DEFINITIONS = [
   },
   {
     name: 'place_order_paper',
-    description: 'Piazza un ordine di trading paper (simulato) validando maxPositionUsd e kill-switch.',
+    description: 'Piazza un ordine di trading paper validando i guardrail di rischio (leva <= 5x, account exposure, blacklist, cooldown, daily loss limit).',
     inputSchema: {
       type: 'object',
       properties: {
         bot_id: { type: 'string', description: "UUID del bot che invia l'ordine" },
         side: { type: 'string', enum: ['long', 'short'], description: "Direzione: 'long' o 'short'" },
         size: { type: 'number', description: 'Dimensione/quantità in unità della coin' },
-        entry_price: { type: 'number', description: 'Prezzo stimato di ingresso (opzionale)' }
+        entry_price: { type: 'number', description: 'Prezzo stimato di ingresso (opzionale)' },
+        leverage: { type: 'number', description: 'Leva richiesta per l\'ordine (max 5x)' }
       },
       required: ['bot_id', 'side', 'size']
     }
@@ -51,24 +52,25 @@ export const MCP_TOOLS_DEFINITIONS = [
   },
   {
     name: 'emergency_shutdown',
-    description: 'Arresta immediatamente tutti i bot attivi e abilita il kill-switch globale di emergenza.',
+    description: 'Arresta immediatamente tutti i bot attivi e abilita il kill-switch globale con conferma a due stadi (60s TTL).',
     inputSchema: {
       type: 'object',
       properties: {
-        confirm: { type: 'boolean', description: 'Safe-guard: DEVE essere true per autorizzare lo spegnimento' },
+        confirmation_token: { type: 'string', description: 'Token di conferma ricevuto allo stadio 1 (obbligatorio per confermare ed eseguire)' },
+        confirm: { type: 'boolean', description: 'Legacy flag di conferma diretta' },
         threshold: { type: 'number', description: 'Soglia numerica di perdita o drawdown (opzionale)' }
-      },
-      required: ['confirm']
+      }
     }
   },
   {
     name: 'update_strategy_params',
-    description: 'Modifica i parametri di strategia del bot nel DB SQLite e ricarica istantaneamente la cache runtime in memoria.',
+    description: 'Modifica i parametri di strategia del bot nel DB SQLite con conferma a due stadi (60s) e ricarica della cache runtime.',
     inputSchema: {
       type: 'object',
       properties: {
         bot_id: { type: 'string', description: 'UUID del bot da riconfigurare' },
-        params: { type: 'object', description: 'Dizionario chiave-valore con i nuovi parametri' }
+        params: { type: 'object', description: 'Dizionario chiave-valore con i nuovi parametri' },
+        confirmation_token: { type: 'string', description: 'Token di conferma ricevuto allo stadio 1 (obbligatorio per confermare ed applicare le modifiche)' }
       },
       required: ['bot_id', 'params']
     }

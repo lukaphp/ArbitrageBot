@@ -4,8 +4,8 @@
  *
  * Layer di sicurezza e middleware per l'interazione con agenti AI (Hermes).
  * Nessun agente scrive direttamente sul DB SQLite; ogni operazione passa da
- * queste funzioni che applicano safeguards, validazione, cache invalidation
- * e audit logging con actor 'hermes_mcp_call'.
+ * queste funzioni che applicano safeguards, validazione, cache invalidation,
+ * il Protocollo Guardrails pre-flight e audit logging con actor 'hermes_mcp_call'.
  */
 
 import db from '../db/database.js';
@@ -14,6 +14,15 @@ import paperBroker from '../perps/paperBroker.js';
 import client from '../perps/hyperliquidClient.js';
 import riskAgent from '../agents/riskAgent.js';
 import logger from '../utils/logger.js';
+import {
+  validateInstructionOverride,
+  checkOrderVelocity,
+  recordOrderExecution,
+  validateRiskCeiling,
+  requestTwoStageConfirmation,
+  validateAndConsumeConfirmation,
+  GUARDRAILS_CONFIG
+} from './guardrails.js';
 
 /**
  * Registra una chiamata MCP nell'audit log del database.
@@ -109,9 +118,12 @@ export async function handleBotControl({ bot_id, action }) {
 
 /**
  * 2. PLACE ORDER PAPER
- * Esegue un ordine paper con validazione immediata contro maxPositionUsd e kill-switch.
+ * Esegue un ordine paper con Protocollo Guardrails Pre-Flight:
+ * - Instruction Override (Blacklist check)
+ * - Order Velocity Gate (Cooldown anti-loop)
+ * - Risk Ceiling Hard-Gate (Max Leverage <= 5x, Account Exposure <= maxPositionUsd, Daily Loss Limit)
  */
-export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = null }) {
+export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = null, leverage = null }) {
   if (!bot_id) {
     return { success: false, message: 'Parametro bot_id obbligatorio.' };
   }
@@ -124,11 +136,11 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
     return { success: false, message: `Size non valida: ${size}. Deve essere un numero positivo.` };
   }
 
-  // Safe-guard 1: Kill-Switch Globale
+  // Safe-guard 0: Kill-Switch Globale
   if (riskAgent.isKillSwitchOn()) {
-    const msg = 'Ordine rifiutato: Kill-switch globale attivo.';
-    logMcpAudit('place_order_paper', { bot_id, side, size, error: msg, success: false });
-    return { success: false, message: msg };
+    const msg = 'GUARDRAIL_VIOLATION: Kill-switch globale attivo. Ordine rifiutato.';
+    logMcpAudit('place_order_paper', { bot_id, side, size, error: msg, guardrail: 'kill_switch', success: false });
+    return { success: false, error: msg, message: msg };
   }
 
   db.ensure();
@@ -142,6 +154,21 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
   const coin = botRow.coin;
   const network = botRow.network || 'testnet';
   const masterAddress = botRow.masterAddress || botRow.master_address || 'paper_hermes';
+  const botConfig = typeof botRow.config === 'string' ? JSON.parse(botRow.config || '{}') : (botRow.config || {});
+
+  // GUARDRAIL 1: INSTRUCTION OVERRIDE & BLACKLIST
+  const overrideCheck = validateInstructionOverride({ coin, botConfig });
+  if (!overrideCheck.ok) {
+    logMcpAudit('place_order_paper', { bot_id, coin, side, size, error: overrideCheck.error, guardrail: 'instruction_override', success: false });
+    return { success: false, error: overrideCheck.error, message: overrideCheck.error };
+  }
+
+  // GUARDRAIL 2: ORDER VELOCITY GATE (Cooldown anti-loop)
+  const velocityCheck = checkOrderVelocity(bot_id);
+  if (!velocityCheck.ok) {
+    logMcpAudit('place_order_paper', { bot_id, coin, side, size, error: velocityCheck.error, guardrail: 'order_velocity', success: false });
+    return { success: false, error: velocityCheck.error, message: velocityCheck.error };
+  }
 
   try {
     // Ottiene il prezzo di mercato corrente o usa entry_price fornito
@@ -155,24 +182,27 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
       return { success: false, message: msg };
     }
 
-    const orderNotionalUsd = numericSize * px;
-
-    // Safe-guard 2: Validazione maxPositionUsd
-    const botConfig = typeof botRow.config === 'string' ? JSON.parse(botRow.config || '{}') : (botRow.config || {});
-    const maxPositionUsd = parseFloat(botConfig.maxPositionUsd || botConfig.max_position_usd || botRow.max_allocation_usd || 5000);
-
+    // Recupera lo stato paper e il daily PnL del bot/account
     const paperAccount = await paperBroker.getAccount(masterAddress, network);
-    const existingPos = paperAccount.positions.find(p => p.coin === coin);
+    const botInstance = botManager.bots.get(bot_id);
+    const currentDailyPnl = botInstance?.dailyPnl ?? 0;
 
-    let resultingNotional = orderNotionalUsd;
-    if (existingPos && existingPos.side === normalizedSide) {
-      resultingNotional = (existingPos.size + numericSize) * px;
-    }
+    // GUARDRAIL 3: RISK CEILING HARD-GATE
+    // (Max Leverage <= 5x, Account Exposure <= maxPositionUsd, Daily Loss Limit)
+    const riskCeilingCheck = validateRiskCeiling({
+      botRow,
+      botConfig,
+      side: normalizedSide,
+      size: numericSize,
+      entryPrice: px,
+      requestedLeverage: leverage,
+      accountPositions: paperAccount.positions || [],
+      dailyPnl: currentDailyPnl
+    });
 
-    if (resultingNotional > maxPositionUsd) {
-      const msg = `Ordine rifiutato per limite rischio: esposizione risultante ($${resultingNotional.toFixed(2)}) supera maxPositionUsd configurato ($${maxPositionUsd.toFixed(2)}).`;
-      logMcpAudit('place_order_paper', { bot_id, coin, side, size, notional: resultingNotional, maxPositionUsd, error: msg, success: false });
-      return { success: false, message: msg };
+    if (!riskCeilingCheck.ok) {
+      logMcpAudit('place_order_paper', { bot_id, coin, side, size, error: riskCeilingCheck.error, guardrail: 'risk_ceiling', success: false });
+      return { success: false, error: riskCeilingCheck.error, message: riskCeilingCheck.error };
     }
 
     // Esecuzione Paper Order
@@ -188,6 +218,9 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
       logMcpAudit('place_order_paper', { bot_id, coin, side, size, error: result.error, success: false });
       return { success: false, message: `Errore broker paper: ${result.error}` };
     }
+
+    // Registra timestamp per Order Velocity Gate
+    recordOrderExecution(bot_id);
 
     // Salva nel database trades per tracciabilità storica
     try {
@@ -343,17 +376,33 @@ export async function handleGetSystemSnapshot() {
 
 /**
  * 4. EMERGENCY SHUTDOWN
- * Safe-guard a due passaggi: blocca tutti i bot e inserisce il kill-switch globale.
+ * Protocollo Guardrail: Conferma a due stadi temporizzata (finestra di 60s).
  */
-export async function handleEmergencyShutdown({ threshold = null, confirm = false }) {
-  if (confirm !== true) {
-    const msg = 'Safe-guard: emergency_shutdown richiede il parametro esplicito confirm: true per essere eseguito.';
-    logMcpAudit('emergency_shutdown', { confirm, threshold, rejected: true, success: false });
+export async function handleEmergencyShutdown({ threshold = null, confirmation_token = null, confirm = false }) {
+  // Se non viene fornito un token di conferma valido (Stadio 1)
+  if (!confirmation_token && confirm !== true) {
+    const prompt = requestTwoStageConfirmation({
+      action: 'emergency_shutdown',
+      payload: { threshold },
+      summary: 'Arresto immediato di tutti i bot attivi e attivazione del kill-switch globale.'
+    });
+    logMcpAudit('emergency_shutdown', { status: 'confirmation_required', threshold, success: false });
     return {
       success: false,
-      message: msg,
-      required_action: 'Passa { confirm: true } per arrestare tutti i bot e bloccare l\'operatività.'
+      ...prompt
     };
+  }
+
+  // Se è fornito confirmation_token, effettua la validazione e il consumo anti-replay (Stadio 2)
+  if (confirmation_token) {
+    const validation = validateAndConsumeConfirmation({
+      confirmation_token,
+      action: 'emergency_shutdown'
+    });
+    if (!validation.ok) {
+      logMcpAudit('emergency_shutdown', { confirmation_token, error: validation.error, success: false });
+      return { success: false, error: validation.error, message: validation.error };
+    }
   }
 
   db.ensure();
@@ -404,9 +453,10 @@ export async function handleEmergencyShutdown({ threshold = null, confirm = fals
 
 /**
  * 5. UPDATE STRATEGY PARAMS
- * Modifica i parametri di strategia di un bot, aggiorna il DB e invalida/ricarica la cache runtime.
+ * Protocollo Guardrail: Modifica parametri di strategia con conferma a due stadi (60s)
+ * e aggiornamento atomico DB / invalidazione cache runtime.
  */
-export async function handleUpdateStrategyParams({ bot_id, params }) {
+export async function handleUpdateStrategyParams({ bot_id, params, confirmation_token = null }) {
   if (!bot_id) {
     return { success: false, message: 'Parametro bot_id obbligatorio.' };
   }
@@ -422,22 +472,51 @@ export async function handleUpdateStrategyParams({ bot_id, params }) {
     return { success: false, message: msg };
   }
 
+  // Validazione dei parametri chiave prima di richiedere o eseguire la conferma
+  if (params.leverage != null) {
+    const lev = parseInt(params.leverage, 10);
+    if (isNaN(lev) || lev < 1 || lev > GUARDRAILS_CONFIG.MAX_ACCOUNT_LEVERAGE) {
+      const err = `GUARDRAIL_VIOLATION: Leva non valida: ${params.leverage}. Deve essere compresa tra 1 e ${GUARDRAILS_CONFIG.MAX_ACCOUNT_LEVERAGE}x.`;
+      logMcpAudit('update_strategy_params', { bot_id, params, error: err, success: false });
+      return { success: false, error: err, message: err };
+    }
+  }
+  if (params.maxPositionUsd != null || params.max_position_usd != null) {
+    const maxPos = parseFloat(params.maxPositionUsd || params.max_position_usd);
+    if (isNaN(maxPos) || maxPos <= 0) {
+      const err = 'GUARDRAIL_VIOLATION: maxPositionUsd deve essere un numero positivo.';
+      return { success: false, error: err, message: err };
+    }
+  }
+
+  // Se non viene fornito il token di conferma (Stadio 1)
+  if (!confirmation_token) {
+    const prompt = requestTwoStageConfirmation({
+      action: 'update_strategy_params',
+      botId: bot_id,
+      payload: { params },
+      summary: `Aggiornamento parametri per bot '${botRow.name}' (${bot_id}): ${JSON.stringify(params)}`
+    });
+    logMcpAudit('update_strategy_params', { bot_id, params, status: 'confirmation_required', success: false });
+    return {
+      success: false,
+      ...prompt
+    };
+  }
+
+  // Se viene fornito confirmation_token, valida e consuma (Stadio 2)
+  const validation = validateAndConsumeConfirmation({
+    confirmation_token,
+    action: 'update_strategy_params',
+    botId: bot_id
+  });
+  if (!validation.ok) {
+    logMcpAudit('update_strategy_params', { bot_id, confirmation_token, error: validation.error, success: false });
+    return { success: false, error: validation.error, message: validation.error };
+  }
+
   try {
     const currentConfig = typeof botRow.config === 'string' ? JSON.parse(botRow.config || '{}') : (botRow.config || {});
-
-    // Validazione parametri chiave
-    if (params.leverage != null) {
-      const lev = parseInt(params.leverage);
-      if (isNaN(lev) || lev < 1 || lev > 50) {
-        return { success: false, message: `Leva non valida: ${params.leverage}. Deve essere compresa tra 1 e 50.` };
-      }
-    }
-    if (params.maxPositionUsd != null || params.max_position_usd != null) {
-      const maxPos = parseFloat(params.maxPositionUsd || params.max_position_usd);
-      if (isNaN(maxPos) || maxPos <= 0) {
-        return { success: false, message: 'maxPositionUsd deve essere un numero positivo.' };
-      }
-    }
 
     const mergedConfig = {
       ...currentConfig,

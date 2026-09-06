@@ -104,6 +104,25 @@ export function requireAuth(req, res, next) {
   if (!isAuthEnabled()) return next(); // auth disattivata (solo sviluppo)
   const token = req.cookies?.[COOKIE_NAME];
   if (verifyToken(token)) return next();
+
+  // Supporto Bearer token per chiamate API / MCP da agenti esterni (es. Hermes)
+  const authHeader = req.headers?.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const bearer = authHeader.slice(7).trim();
+    if (verifyToken(bearer)) return next();
+    if (process.env.SESSION_SECRET && bearer === process.env.SESSION_SECRET) return next();
+    if (process.env.AGENT_ENCRYPTION_KEY && bearer === process.env.AGENT_ENCRYPTION_KEY) return next();
+    if (process.env.HERMES_API_KEY && bearer === process.env.HERMES_API_KEY) return next();
+  }
+
+  // Supporto header x-api-key o query apiKey per MCP HTTP
+  const apiKey = req.headers?.['x-api-key'] || req.query?.apiKey;
+  if (apiKey) {
+    if (process.env.SESSION_SECRET && apiKey === process.env.SESSION_SECRET) return next();
+    if (process.env.AGENT_ENCRYPTION_KEY && apiKey === process.env.AGENT_ENCRYPTION_KEY) return next();
+    if (process.env.HERMES_API_KEY && apiKey === process.env.HERMES_API_KEY) return next();
+  }
+
   return res.status(401).json({ success: false, error: 'Non autenticato' });
 }
 

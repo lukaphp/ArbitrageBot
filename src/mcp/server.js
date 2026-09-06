@@ -127,6 +127,10 @@ export function createArbitrageBotMcpServer() {
 
 // Avvio automatico se eseguito direttamente via CLI / Stdio
 if (process.argv[1] && process.argv[1].endsWith('server.js')) {
+  // Garantisce che STDOUT sia riservato esclusivamente ai messaggi di protocollo JSON-RPC MCP
+  console.log = (...args) => console.error(...args);
+  console.info = (...args) => console.error(...args);
+
   (async () => {
     try {
       db.init();

@@ -118,9 +118,11 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     assert.match(oversizedOrder.message, /GUARDRAIL_VIOLATION: Account Exposure exceeded/i);
 
     // 2.3 Daily Loss Limit
+    const today = new Date().toISOString().split('T')[0];
+    db.setDailyPnl(testBotId, today, -300); // Supera soglia maxDailyLossUsd (200$)
     const botInstance = botManager.bots.get(testBotId);
     if (botInstance) {
-      botInstance.dailyPnl = -300; // Supera soglia maxDailyLossUsd (200$)
+      botInstance.dailyPnl = -300;
     }
     resetOrderVelocity(testBotId);
     const lossBlockedOrder = await handlePlaceOrderPaper({
@@ -133,6 +135,7 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     assert.match(lossBlockedOrder.message, /GUARDRAIL_VIOLATION: Daily Loss Limit exceeded/i);
 
     // Ripristina dailyPnl
+    db.setDailyPnl(testBotId, today, 0);
     if (botInstance) {
       botInstance.dailyPnl = 0;
     }

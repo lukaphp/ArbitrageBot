@@ -184,8 +184,11 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
 
     // Recupera lo stato paper e il daily PnL del bot/account
     const paperAccount = await paperBroker.getAccount(masterAddress, network);
+    const today = new Date().toISOString().split('T')[0];
     const botInstance = botManager.bots.get(bot_id);
-    const currentDailyPnl = botInstance?.dailyPnl ?? 0;
+    const currentDailyPnl = (botInstance && typeof botInstance.dailyPnl === 'number')
+      ? botInstance.dailyPnl
+      : db.getDailyPnl(bot_id, today);
 
     // GUARDRAIL 3: RISK CEILING HARD-GATE
     // (Max Leverage <= 5x, Account Exposure <= maxPositionUsd, Daily Loss Limit)

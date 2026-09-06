@@ -52,7 +52,7 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     masterAddress: '0x000000000000000000000000000000000000dEaD',
     config: {
       leverage: 2,
-      maxPositionUsd: 500,
+      maxPositionUsd: 5000,
       maxDailyLossUsd: 200,
       loopInterval: 60000
     },

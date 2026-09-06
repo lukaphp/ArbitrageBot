@@ -327,6 +327,7 @@ class PerpsApp {
     await this.loadNotifications();
     await this.loadAgents();
     await this.refreshRiskSnapshot();
+    await this.loadFills();
     if (!this.accountTimer) {
       this.accountTimer = setInterval(() => {
         if (!document.getElementById('view-perps').classList.contains('hidden')) {
@@ -2634,13 +2635,16 @@ class PerpsApp {
   }
 
   async loadFills() {
-    if (!this.connected) return;
     try {
-      const fills = await this.api('/api/perps/fills?address=' + this.address);
+      const url = this.address ? `/api/perps/fills?address=${encodeURIComponent(this.address)}` : '/api/perps/fills';
+      const fills = await this.api(url);
       this._allFills = fills || [];
       this._populateHistBotFilter();
       this.applyHistoryFilter();
-    } catch (e) { this._allFills = []; this._renderFills([]); }
+    } catch {
+      this._allFills = [];
+      this._renderFills([]);
+    }
   }
 
   /** Popola il menu dei bot nel filtro storico (dai nomi presenti nei fill). */
@@ -2703,24 +2707,25 @@ class PerpsApp {
     empty?.classList.add('hidden');
     tbody.innerHTML = fills.map(f => {
       const date = new Date(f.time).toLocaleString('it-IT');
-      const isLong = /Long/i.test(f.dir);
+      const isLong = /Long/i.test(f.dir) || f.side === 'B' || f.side === 'buy';
       const dirClass = isLong ? 'side-badge long' : 'side-badge short';
       const pnl = f.closedPnl;
-      const pnlCell = pnl ? `<span class="${pnl >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(pnl)}</span>` : '—';
+      const pnlCell = pnl != null ? `<span class="${pnl >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(pnl)}</span>` : '—';
       const txLink = f.hash && f.hash !== '0x0000000000000000000000000000000000000000000000000000000000000000'
         ? `<a href="${this._explorerTxUrl(f.hash)}" target="_blank" rel="noopener">🔗</a>` : '—';
       const botCell = f.botName
         ? `<span class="hist-bot">${f.botName === 'Manuale' ? '✋ Manuale' : '🤖 ' + f.botName}</span>`
-        : '<span class="muted">—</span>';
+        : (f.botId ? `<span class="hist-bot">🤖 Bot #${String(f.botId).slice(0, 4)}</span>` : '<span class="muted">—</span>');
+      const paperBadge = f.isPaper ? ' <span class="testnet-badge" style="font-size:.6em;padding:1px 4px;vertical-align:middle">PAPER</span>' : '';
       return `<tr>
         <td>${date}</td>
         <td>${botCell}</td>
-        <td>${f.coin}</td>
-        <td><span class="${dirClass}">${f.dir || (f.side === 'buy' ? 'Buy' : 'Sell')}</span></td>
+        <td>${f.coin}${paperBadge}</td>
+        <td><span class="${dirClass}">${f.dir || (isLong ? 'Buy' : 'Sell')}</span></td>
         <td>${this.fmtNum(f.sz)}</td>
         <td>${this.fmtUsd(f.px)}</td>
         <td>${pnlCell}</td>
-        <td class="muted">${this.fmtUsd(f.fee)}</td>
+        <td class="muted">${this.fmtUsd(f.fee || 0)}</td>
         <td>${txLink}</td>
       </tr>`;
     }).join('');

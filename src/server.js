@@ -366,33 +366,113 @@ class ArbitrageBotServer {
       }
     });
 
-    // Storico operazioni eseguite (fill Hyperliquid: manuali + bot)
+    // Storico operazioni eseguite (fill Hyperliquid on-chain + trade DB di tutti i bot attivi e storici)
     app.get('/api/perps/fills', async (req, res) => {
       try {
-        const { address } = req.query;
-        if (!address) return res.status(400).json({ success: false, error: 'address richiesto' });
-        const fills = await hyperliquid.getUserFills(address);
-
-        // Attribuzione al bot d'origine: mappa oid->bot dai trade registrati,
-        // più fallback per coin con un solo bot.
         const bots = db.listBots();
-        const botById = new Map(bots.map(b => [b.id, b.name]));
-        const oidToBot = new Map();
-        for (const t of db.listTrades(500)) {
-          if (t.hl_oid != null) oidToBot.set(String(t.hl_oid), t.bot_id ? (botById.get(t.bot_id) || 'Bot') : 'Manuale');
+        const address = req.query.address || bots[0]?.master_address || hyperliquid.config?.masterAddress || null;
+        let onChainFills = [];
+        if (address) {
+          try {
+            onChainFills = await hyperliquid.getUserFills(address);
+          } catch {
+            onChainFills = [];
+          }
         }
+
+        // Mappa bot per ID e nome (inclusi bot storici/proposals)
+        const botNameMap = new Map(bots.map(b => [b.id, b.name]));
+        try {
+          const proposals = db.db?.prepare('SELECT linked_bot_id, coin, type FROM proposals WHERE linked_bot_id IS NOT NULL').all() || [];
+          for (const p of proposals) {
+            if (p.linked_bot_id && !botNameMap.has(p.linked_bot_id)) {
+              const shortId = p.linked_bot_id.slice(0, 4);
+              botNameMap.set(p.linked_bot_id, `${p.coin} (AI #${shortId})`);
+            }
+          }
+        } catch { /* noop */ }
+
+        // Mappa oid -> trade info
+        const dbTrades = db.listTrades(1000);
+        const oidToTrade = new Map();
+        for (const t of dbTrades) {
+          if (t.hl_oid != null) {
+            oidToTrade.set(String(t.hl_oid), t);
+          }
+        }
+
+        // Mappa posizioni chiuse per PnL
+        const dbPositions = db.listPositions(500);
+        const posByBot = new Map();
+        for (const p of dbPositions) {
+          if (p.bot_id) {
+            if (!posByBot.has(p.bot_id)) posByBot.set(p.bot_id, []);
+            posByBot.get(p.bot_id).push(p);
+          }
+        }
+
         const coinBots = {};
         for (const b of bots) (coinBots[b.coin] ||= new Set()).add(b.name);
 
-        const enriched = fills.map(f => {
-          let botName = oidToBot.get(String(f.oid));
-          if (!botName) {
+        const seenOids = new Set();
+        const merged = [];
+
+        // 1. Fill on-chain Hyperliquid
+        for (const f of onChainFills) {
+          if (f.oid != null) seenOids.add(String(f.oid));
+          const dbTrade = f.oid != null ? oidToTrade.get(String(f.oid)) : null;
+          let botName = null;
+          if (dbTrade?.bot_id) {
+            botName = botNameMap.get(dbTrade.bot_id) || `Bot #${dbTrade.bot_id.slice(0, 4)}`;
+          } else {
             const s = coinBots[f.coin];
             botName = (s && s.size === 1) ? [...s][0] : null;
           }
-          return { ...f, botName };
-        });
-        res.json({ success: true, data: enriched });
+
+          merged.push({
+            ...f,
+            botId: dbTrade?.bot_id || null,
+            botName: botName || (f.oid ? 'Manuale' : null),
+            isPaper: false
+          });
+        }
+
+        // 2. Trade dal database locale (es. Paper trades o trade storici)
+        for (const t of dbTrades) {
+          if (t.hl_oid != null && seenOids.has(String(t.hl_oid))) {
+            continue; // già incluso da onChainFills
+          }
+          const botName = (t.bot_id ? botNameMap.get(t.bot_id) : null) || (t.bot_id ? `Bot #${t.bot_id.slice(0, 4)}` : 'Manuale');
+          const isLong = String(t.side).toLowerCase().includes('buy') || String(t.side).toLowerCase() === 'long';
+
+          let closedPnl = null;
+          if (t.bot_id && posByBot.has(t.bot_id)) {
+            const matchPos = posByBot.get(t.bot_id).find(p => Math.abs((p.closed_at || p.opened_at) - t.ts) < 60000);
+            if (matchPos && matchPos.pnl != null) {
+              closedPnl = matchPos.pnl;
+            }
+          }
+
+          merged.push({
+            tid: `db_${t.id}`,
+            time: t.ts,
+            coin: t.coin,
+            side: isLong ? 'buy' : 'sell',
+            dir: isLong ? 'Open Long' : 'Open Short',
+            sz: t.sz,
+            px: t.px,
+            fee: t.fee || 0,
+            closedPnl: closedPnl,
+            hash: null,
+            oid: t.hl_oid,
+            botId: t.bot_id || null,
+            botName: botName,
+            isPaper: Boolean(t.hl_oid && String(t.hl_oid).length < 8)
+          });
+        }
+
+        merged.sort((a, b) => (b.time || 0) - (a.time || 0));
+        res.json({ success: true, data: merged });
       } catch (error) {
         res.status(500).json({ success: false, error: error.message });
       }

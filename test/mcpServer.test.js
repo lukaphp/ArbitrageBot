@@ -151,6 +151,7 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
       size: 1.0,
       entry_price: 50.0
     });
+    if (!firstOrder.success) console.error('SUBTEST 3 FIRST ORDER ERROR:', firstOrder);
     assert.equal(firstOrder.success, true);
 
     // Secondo ordine immediato (cooldown attivo)
@@ -191,6 +192,7 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
       size: 1.0,
       entry_price: 50.0
     });
+    if (!allowedOrder.success) console.error('SUBTEST 4 ALLOWED ORDER ERROR:', allowedOrder);
     assert.equal(allowedOrder.success, true);
     resetOrderVelocity(testBotId);
   });

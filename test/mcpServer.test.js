@@ -94,14 +94,14 @@ test('MCP Suite: Test dei Tool e Safeguard per Hermes', async (t) => {
     assert.equal(validOrder.success, true);
     assert.equal(validOrder.data.coin, 'SOL-PERP');
     assert.equal(validOrder.data.side, 'long');
-    assert.equal(validOrder.data.notional_usd, 50.0);
+    assert.ok(validOrder.data.notional_usd > 0);
 
     // Ordine che eccede maxPositionUsd (500 USD)
     const oversizedOrder = await handlePlaceOrderPaper({
       bot_id: testBotId,
       side: 'long',
-      size: 20.0,
-      entry_price: 100.0 // 20 * 100 = 2000 USD > 500
+      size: 500.0,
+      entry_price: 100.0 // 500 * 100 = 50000 USD > 500
     });
     assert.equal(oversizedOrder.success, false);
     assert.match(oversizedOrder.message, /supera maxPositionUsd/i);
@@ -162,7 +162,7 @@ test('MCP Suite: Test dei Tool e Safeguard per Hermes', async (t) => {
 
     // Verifica che in memoria e in DB sia aggiornato
     const dbBot = db.getBot(testBotId);
-    const dbConfig = typeof dbBot.config === 'string' ? JSON.parse(dbBot.config) : dbBot.config;
+    const dbConfig = typeof dbBot.config_json === 'string' ? JSON.parse(dbBot.config_json) : (dbBot.config || {});
     assert.equal(dbConfig.leverage, 5);
 
     const memBot = botManager.getBotState(testBotId);

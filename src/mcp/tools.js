@@ -192,14 +192,13 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
     // Salva nel database trades per tracciabilità storica
     try {
       db.insertTrade({
-        bot_id,
+        botId: bot_id,
         coin,
         side: normalizedSide,
         px: result.avgPx || px,
         sz: numericSize,
         fee: (result.avgPx || px) * numericSize * 0.00035,
-        hl_oid: result.oid || Date.now(),
-        ts: Date.now()
+        hlOid: result.oid || Date.now()
       });
     } catch (dbErr) {
       logger.warn('Registrazione trade paper in DB fallita:', dbErr.message);
@@ -262,7 +261,7 @@ export async function handleGetSystemSnapshot() {
     }));
 
     // Trade chiusi e P&L totale
-    const trades = db.listRecentTrades(50);
+    const trades = db.listTrades(50);
     const closedTradesCount = trades.length;
     const totalFees = trades.reduce((sum, t) => sum + (Number(t.fee) || 0), 0);
     const realizedPnl = trades.reduce((sum, t) => sum + (Number(t.pnl) || 0), 0);
@@ -368,7 +367,7 @@ export async function handleEmergencyShutdown({ threshold = null, confirm = fals
       if (bot.status === 'running') {
         try {
           bot.stop();
-          db.updateBotStatus(bot.id, 'stopped');
+          db.updateBot(bot.id, { status: 'stopped' });
           stoppedCount++;
         } catch (err) {
           logger.warn(`Arresto bot ${bot.id} in emergency_shutdown fallito:`, err.message);

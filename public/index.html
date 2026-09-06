@@ -144,7 +144,17 @@
                         <section class="cockpit-surface" aria-labelledby="portfolio-performance-title">
                             <div class="cockpit-surface-head">
                                 <h3 class="cockpit-surface-title" id="portfolio-performance-title">PORTFOLIO PERFORMANCE</h3>
-                                <span class="cockpit-surface-note">1D · EQUITY CURVE</span>
+                                <div class="cockpit-surface-controls">
+                                    <div class="cockpit-range-presets" id="dashboardEquityRanges" role="group" aria-label="Intervallo temporale grafico dashboard">
+                                        <button type="button" class="cockpit-range-btn" data-range="1d" onclick="perps.setDashboardEquityRange('1d')">1G</button>
+                                        <button type="button" class="cockpit-range-btn" data-range="7d" onclick="perps.setDashboardEquityRange('7d')">7G</button>
+                                        <button type="button" class="cockpit-range-btn" data-range="30d" onclick="perps.setDashboardEquityRange('30d')">30G</button>
+                                        <button type="button" class="cockpit-range-btn" data-range="90d" onclick="perps.setDashboardEquityRange('90d')">90G</button>
+                                        <button type="button" class="cockpit-range-btn" data-range="365d" onclick="perps.setDashboardEquityRange('365d')">1A</button>
+                                        <button type="button" class="cockpit-range-btn active" data-range="all" onclick="perps.setDashboardEquityRange('all')">Tutto</button>
+                                    </div>
+                                    <span class="cockpit-surface-note" id="dashboardEquityNote">EQUITY CURVE</span>
+                                </div>
                             </div>
                             <div id="cockpitChart" class="cockpit-chart" role="img" aria-label="Equity curve for the current session"></div>
                             <!-- "Session high" annunciava una seconda serie che il grafico non ha
@@ -444,7 +454,17 @@
                         <section class="cockpit-surface" aria-labelledby="perf-equity-title">
                             <div class="cockpit-surface-head">
                                 <h3 class="cockpit-surface-title" id="perf-equity-title">CURVA EQUITY STORICA</h3>
-                                <span class="cockpit-surface-note" id="perfEquityRange">—</span>
+                                <div class="cockpit-surface-controls">
+                                    <div class="cockpit-range-presets" id="perfEquityRanges" role="group" aria-label="Intervallo temporale grafico performance">
+                                        <button type="button" class="cockpit-range-btn" data-range="1d" onclick="perps.setPerfEquityRange('1d')">1G</button>
+                                        <button type="button" class="cockpit-range-btn" data-range="7d" onclick="perps.setPerfEquityRange('7d')">7G</button>
+                                        <button type="button" class="cockpit-range-btn" data-range="30d" onclick="perps.setPerfEquityRange('30d')">30G</button>
+                                        <button type="button" class="cockpit-range-btn" data-range="90d" onclick="perps.setPerfEquityRange('90d')">90G</button>
+                                        <button type="button" class="cockpit-range-btn" data-range="365d" onclick="perps.setPerfEquityRange('365d')">1A</button>
+                                        <button type="button" class="cockpit-range-btn active" data-range="all" onclick="perps.setPerfEquityRange('all')">Tutto</button>
+                                    </div>
+                                    <span class="cockpit-surface-note" id="perfEquityRange">—</span>
+                                </div>
                             </div>
                             <div id="perfEquityChart" class="cockpit-chart" role="img" aria-label="Curva equity storica del conto"></div>
                             <p class="cockpit-empty" id="perfEquityEmpty" hidden>Nessun campione di equity ancora registrato.</p>

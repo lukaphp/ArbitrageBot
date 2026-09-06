@@ -572,11 +572,11 @@ class ArbitrageBotServer {
         defaultMaxDailyLossUsd: config.HYPERLIQUID_CONFIG.risk.maxDailyLossUsd
       }));
       const marketStatus = marketData.getStatus();
-      let equityHistory = address ? db.listRiskEquityHistory(network, address, 180) : [];
+      let equityHistory = address ? db.listRiskEquityHistory(network, address, 2000) : [];
       const persistedDrawdown = address ? db.getRiskDrawdownState(network, address) : null;
       if (account && Number.isFinite(Number(account.equity)) && address) {
-        db.insertRiskEquitySample(network, address, Math.floor(now / 1000), Number(account.equity), 180);
-        equityHistory = db.listRiskEquityHistory(network, address, 180);
+        db.insertRiskEquitySample(network, address, Math.floor(now / 1000), Number(account.equity), 10000);
+        equityHistory = db.listRiskEquityHistory(network, address, 2000);
       }
       const drawdown = mergeDrawdownState(calculateDrawdown(equityHistory), persistedDrawdown);
       if (address) db.upsertRiskDrawdownState(network, address, drawdown, now);

@@ -842,7 +842,7 @@ export class PerpsDatabase {
   }
 
   /** Inserisce/aggiorna il campione equity per un account e una rete. */
-  insertRiskEquitySample(network, address, time, equity, limit = 180) {
+  insertRiskEquitySample(network, address, time, equity, limit = 10000) {
     this.ensure();
     const scope = this._riskScope(network, address);
     const ts = Math.floor(Number(time));
@@ -855,7 +855,7 @@ export class PerpsDatabase {
       ON CONFLICT(network, address, ts) DO UPDATE SET equity = excluded.equity
     `).run(scope.network, scope.address, ts, value);
 
-    const keep = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 180)));
+    const keep = Math.max(1, Math.min(50000, Math.floor(Number(limit) || 10000)));
     this.db.prepare(`
       DELETE FROM risk_equity_history
       WHERE network = ? AND address = ? AND ts NOT IN (
@@ -868,10 +868,10 @@ export class PerpsDatabase {
   }
 
   /** Ritorna i campioni più recenti in ordine cronologico per il cockpit. */
-  listRiskEquityHistory(network, address, limit = 180) {
+  listRiskEquityHistory(network, address, limit = 5000) {
     this.ensure();
     const scope = this._riskScope(network, address);
-    const keep = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 180)));
+    const keep = Math.max(1, Math.min(50000, Math.floor(Number(limit) || 5000)));
     return this.db.prepare(`
       SELECT ts AS time, equity AS value
       FROM risk_equity_history

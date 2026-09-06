@@ -135,6 +135,8 @@ class PerpsApp {
     this.perfMlAccuracySeries = null;
     this.perfMlBaselineSeries = null;
     this.perfMlCoin = null;
+    this.dashboardEquityRange = 'all';
+    this.perfEquityRange = 'all';
     // Stato del wallet MetaMask (ex app.isConnected / app.walletAddress)
     this.walletAddress = null;
     this.isConnected = false;
@@ -789,21 +791,70 @@ class PerpsApp {
     }
   }
 
+  _filterEquityPointsByRange(points, range = 'all') {
+    if (!Array.isArray(points) || !points.length) return [];
+    if (!range || range === 'all') return points;
+    const rangeSeconds = {
+      '1d': 86400,
+      '7d': 7 * 86400,
+      '30d': 30 * 86400,
+      '90d': 90 * 86400,
+      '365d': 365 * 86400,
+      '1y': 365 * 86400
+    }[range];
+    if (!rangeSeconds) return points;
+    const latestTime = points[points.length - 1]?.time || Math.floor(Date.now() / 1000);
+    const cutoff = latestTime - rangeSeconds;
+    const filtered = points.filter(p => p.time >= cutoff);
+    return filtered.length > 0 ? filtered : [points[points.length - 1]];
+  }
+
+  setDashboardEquityRange(range = 'all') {
+    this.dashboardEquityRange = range;
+    const container = document.getElementById('dashboardEquityRanges');
+    if (container) {
+      container.querySelectorAll('.cockpit-range-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.range === range);
+      });
+    }
+    const note = document.getElementById('dashboardEquityNote');
+    if (note) {
+      const labels = {
+        '1d': '1D · 24 ORE',
+        '7d': '7D · 1 SETTIMANA',
+        '30d': '30D · 1 MESE',
+        '90d': '90D · 3 MESI',
+        '365d': '1A · 1 ANNO',
+        'all': 'TUTTO · STORICO'
+      };
+      note.textContent = `${labels[range] || range.toUpperCase()} · EQUITY CURVE`;
+    }
+    if (this.dashboardSeries) {
+      const data = this._dashboardEquityData();
+      this.dashboardSeries.setData(data);
+      if (data.length) this.dashboardChart?.timeScale().fitContent();
+    }
+  }
+
   _dashboardEquityData() {
+    let points = [];
     const liveHistory = this.riskSnapshot?.equityHistory || [];
-    if (liveHistory.length) return liveHistory.map((point) => ({ time: point.time, value: Number(point.value) }));
-    if (this.riskSnapshot?.account) {
+    if (liveHistory.length) {
+      points = liveHistory.map((point) => ({
+        time: this._toChartTime(point?.time ?? point?.ts),
+        value: Number(point?.value ?? point?.equity)
+      }));
+    } else if (this.riskSnapshot?.account) {
       const value = Number(this.riskSnapshot.account.equity ?? this.riskSnapshot.account.accountValue);
-      if (Number.isFinite(value)) return [{ time: Math.floor((this.riskSnapshot.generatedAt || Date.now()) / 1000), value }];
+      if (Number.isFinite(value)) points = [{ time: Math.floor((this.riskSnapshot.generatedAt || Date.now()) / 1000), value }];
+    } else {
+      const value = Number(this.account?.equity ?? this.account?.accountValue);
+      if (Number.isFinite(value)) {
+        points = [{ time: Math.floor(Date.now() / 1000), value }];
+      }
     }
-    // Senza storico reale il grafico resta VUOTO. In precedenza veniva
-    // sintetizzata una curva in salita da una serie di offset fissi: sembrava
-    // un andamento storico autentico ed era interamente inventata.
-    const value = Number(this.account?.equity ?? this.account?.accountValue);
-    if (Number.isFinite(value)) {
-      return [{ time: Math.floor(Date.now() / 1000), value }];
-    }
-    return [];
+    const sanitized = this._chartSeries(points);
+    return this._filterEquityPointsByRange(sanitized, this.dashboardEquityRange || 'all');
   }
 
   _refreshCockpitDashboard() {
@@ -929,7 +980,7 @@ class PerpsApp {
     this.perfLoading = true;
     this._setPerfNotice(this.perfData && !force ? null : 'Caricamento dati storici…', 'info');
     try {
-      const data = await this.api('/api/perps/performance');
+      const data = await this.api('/api/perps/performance?limit=5000');
       this.perfData = {
         bots: Array.isArray(data?.bots) ? data.bots : [],
         equityHistory: Array.isArray(data?.equityHistory) ? data.equityHistory : [],
@@ -955,6 +1006,17 @@ class PerpsApp {
     el.textContent = text || '';
     el.hidden = !text;
     el.className = `cockpit-perf-notice cockpit-perf-notice-${kind}`;
+  }
+
+  setPerfEquityRange(range = 'all') {
+    this.perfEquityRange = range;
+    const container = document.getElementById('perfEquityRanges');
+    if (container) {
+      container.querySelectorAll('.cockpit-range-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.range === range);
+      });
+    }
+    this._renderPerformanceEquity();
   }
 
   /**
@@ -989,14 +1051,25 @@ class PerpsApp {
 
   _renderPerformanceEquity() {
     const empty = document.getElementById('perfEquityEmpty');
-    const range = document.getElementById('perfEquityRange');
-    const points = this._chartSeries((this.perfData?.equityHistory || []).map((p) => ({
+    const rangeEl = document.getElementById('perfEquityRange');
+    const rawPoints = this._chartSeries((this.perfData?.equityHistory || []).map((p) => ({
       time: this._toChartTime(p?.time ?? p?.ts), value: Number(p?.value ?? p?.equity)
     })));
+    const points = this._filterEquityPointsByRange(rawPoints, this.perfEquityRange || 'all');
+
     if (empty) empty.hidden = points.length > 0;
-    if (range) {
-      range.textContent = points.length
-        ? `${points.length} campioni · dal ${new Date(points[0].time * 1000).toLocaleDateString('it-IT')}`
+    if (rangeEl) {
+      const rangeLabels = {
+        '1d': 'ultime 24h',
+        '7d': 'ultimi 7gg',
+        '30d': 'ultimi 30gg',
+        '90d': 'ultimi 90gg',
+        '365d': 'ultimo anno',
+        'all': 'tutto lo storico'
+      };
+      const currentRange = rangeLabels[this.perfEquityRange] || this.perfEquityRange || 'tutto lo storico';
+      rangeEl.textContent = points.length
+        ? `${points.length} campioni · ${currentRange} (dal ${new Date(points[0].time * 1000).toLocaleDateString('it-IT')})`
         : '—';
     }
     const el = document.getElementById('perfEquityChart');
@@ -1014,6 +1087,13 @@ class PerpsApp {
         lineColor: '#26d07c', topColor: 'rgba(38, 208, 124, 0.24)', bottomColor: 'rgba(38, 208, 124, 0.02)',
         lineWidth: 2, priceLineVisible: false
       });
+      if (window.ResizeObserver) {
+        this.perfResizeObserver = new ResizeObserver(() => {
+          if (!this.perfChart || !el.clientWidth) return;
+          this.perfChart.resize(el.clientWidth, Math.max(el.clientHeight, 214));
+        });
+        this.perfResizeObserver.observe(el);
+      }
     }
     this.perfEquitySeries?.setData(points);
     if (points.length) this.perfChart?.timeScale?.().fitContent();

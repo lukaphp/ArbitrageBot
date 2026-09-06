@@ -54,6 +54,7 @@ import predictor from './perps/predictor.js';
 import telegramControl from './perps/telegramControl.js';
 import strategySchema from './perps/strategySchema.js';
 import { runBacktest } from './perps/backtester.js';
+import { handleJsonRpcMcp, executeMcpTool, MCP_TOOLS_DEFINITIONS } from './mcp/httpTransport.js';
 
 // Polyfill globale per la serializzazione di BigInt in JSON (Express, Socket.IO, logger)
 if (typeof BigInt.prototype.toJSON !== 'function') {
@@ -1643,6 +1644,23 @@ class ArbitrageBotServer {
         }
       }
       res.json({ success: true, data: { killSwitch: on, changed: was !== on } });
+    });
+
+    /**
+     * MCP (Model Context Protocol) Endpoints per Hermes e agenti AI esterni.
+     * Supporta JSON-RPC 2.0 (`POST /api/mcp`), lista tools (`GET /api/mcp/tools`)
+     * e invocazione REST diretta (`POST /api/mcp/call` e `POST /api/mcp/tools/:toolName`).
+     */
+    app.post('/api/mcp', handleJsonRpcMcp);
+    app.get('/api/mcp/tools', (req, res) => res.json({ success: true, tools: MCP_TOOLS_DEFINITIONS }));
+    app.post('/api/mcp/call', async (req, res) => {
+      const { name, arguments: toolArgs } = req.body || {};
+      const result = await executeMcpTool(name, toolArgs || {});
+      res.json(result);
+    });
+    app.post('/api/mcp/tools/:toolName', async (req, res) => {
+      const result = await executeMcpTool(req.params.toolName, req.body || {});
+      res.json(result);
     });
 
     /**

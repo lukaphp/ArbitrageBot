@@ -20,6 +20,7 @@
     "dev:infisical": "infisical run -- nodemon src/server.js",
     "secrets:check": "node scripts/check-secrets.js",
     "secrets:rotate": "node scripts/rotate-encryption-key.js",
+    "mcp": "node src/mcp/server.js",
     "rebuild:native": "npm rebuild better-sqlite3 --ignore-scripts=false"
   },
   "keywords": [
@@ -34,6 +35,7 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.102.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@playwright/test": "^1.54.2",
     "axios": "^1.5.0",
     "better-sqlite3": "^12.10.0",
@@ -49,7 +51,8 @@
     "node-cron": "^4.6.0",
     "socket.io": "^4.7.2",
     "technicalindicators": "^3.1.0",
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/node": "^20.8.0"

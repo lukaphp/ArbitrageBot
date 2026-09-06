@@ -37,6 +37,22 @@ export function logMcpAudit(toolName, detail = {}) {
 }
 
 /**
+ * Helper per estrarre e parsare in sicurezza la configurazione di un bot da DB.
+ */
+export function extractBotConfig(botRow) {
+  if (!botRow) return {};
+  const raw = botRow.config_json || botRow.config || {};
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw || '{}');
+    } catch {
+      return {};
+    }
+  }
+  return raw && typeof raw === 'object' ? raw : {};
+}
+
+/**
  * 1. BOT CONTROL
  * Controlla il ciclo di vita del bot (start, stop, restart) con salvaguardia crash/watchdog.
  */
@@ -154,7 +170,7 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
   const coin = botRow.coin;
   const network = botRow.network || 'testnet';
   const masterAddress = botRow.masterAddress || botRow.master_address || 'paper_hermes';
-  const botConfig = typeof botRow.config === 'string' ? JSON.parse(botRow.config || '{}') : (botRow.config || {});
+  const botConfig = extractBotConfig(botRow);
 
   // GUARDRAIL 1: INSTRUCTION OVERRIDE & BLACKLIST
   const overrideCheck = validateInstructionOverride({ coin, botConfig });
@@ -519,7 +535,7 @@ export async function handleUpdateStrategyParams({ bot_id, params, confirmation_
   }
 
   try {
-    const currentConfig = typeof botRow.config === 'string' ? JSON.parse(botRow.config || '{}') : (botRow.config || {});
+    const currentConfig = extractBotConfig(botRow);
 
     const mergedConfig = {
       ...currentConfig,

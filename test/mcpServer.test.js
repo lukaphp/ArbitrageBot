@@ -368,7 +368,7 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
 
     // Verifica cancellazione DB
     const deletedDbBot = db.getBot(createdBotId);
-    assert.equal(deletedDbBot, null);
+    assert.ok(!deletedDbBot);
   });
 
   // Cleanup finale del bot di test

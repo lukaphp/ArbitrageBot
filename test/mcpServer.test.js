@@ -25,7 +25,9 @@ import {
   handlePlaceOrderPaper,
   handleGetSystemSnapshot,
   handleEmergencyShutdown,
-  handleUpdateStrategyParams
+  handleUpdateStrategyParams,
+  handleRegisterBot,
+  handleDeleteBot
 } from '../src/mcp/tools.js';
 import {
   resetOrderVelocity,
@@ -293,16 +295,80 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
   });
 
   await t.test('9. JSON-RPC 2.0 Tool Execution', async () => {
-    assert.equal(MCP_TOOLS_DEFINITIONS.length, 5);
+    assert.equal(MCP_TOOLS_DEFINITIONS.length, 7);
     const toolNames = MCP_TOOLS_DEFINITIONS.map(t => t.name);
     assert.ok(toolNames.includes('bot_control'));
     assert.ok(toolNames.includes('place_order_paper'));
     assert.ok(toolNames.includes('get_system_snapshot'));
     assert.ok(toolNames.includes('emergency_shutdown'));
     assert.ok(toolNames.includes('update_strategy_params'));
+    assert.ok(toolNames.includes('register_bot'));
+    assert.ok(toolNames.includes('delete_bot'));
 
     const directCall = await executeMcpTool('get_system_snapshot', {});
     assert.equal(directCall.success, true);
+  });
+
+  await t.test('10. register_bot - Validazione guardrails e creazione bot', async () => {
+    // 10.1 Violazione Guardrail: Leva > 5x rifiutata
+    const invalidLev = await handleRegisterBot({
+      name: 'High Leverage Bot',
+      coin: 'BTC-PERP',
+      config: { leverage: 10 }
+    });
+    assert.equal(invalidLev.success, false);
+    assert.match(invalidLev.message, /GUARDRAIL_VIOLATION: Max Account Leverage exceeded/i);
+
+    // 10.2 Violazione Blacklist
+    addBlacklistedAsset('AVAX-PERP');
+    const blacklisted = await handleRegisterBot({
+      name: 'Blacklisted Bot',
+      coin: 'AVAX-PERP',
+      config: { leverage: 2 }
+    });
+    assert.equal(blacklisted.success, false);
+    assert.match(blacklisted.message, /GUARDRAIL_VIOLATION: Asset Blacklisted/i);
+    removeBlacklistedAsset('AVAX-PERP');
+
+    // 10.3 Creazione valida
+    const regRes = await handleRegisterBot({
+      name: 'Automated Hermes Trend Bot',
+      coin: 'ETH-PERP',
+      config: { leverage: 3, maxPositionUsd: 1500 },
+      actor_label: 'Hermes',
+      actor_id: 'hermes_agent_01'
+    });
+    assert.equal(regRes.success, true);
+    assert.ok(regRes.data.bot_id);
+    assert.equal(regRes.data.coin, 'ETH-PERP');
+    assert.equal(regRes.data.actor_label, 'Hermes');
+    assert.equal(regRes.data.is_managed_by_agent, true);
+
+    const createdBotId = regRes.data.bot_id;
+
+    // Verifica persistenza DB
+    const dbBot = db.getBot(createdBotId);
+    assert.ok(dbBot);
+    assert.equal(dbBot.name, 'Automated Hermes Trend Bot');
+    assert.equal(dbBot.actor_label, 'Hermes');
+
+    // 11. delete_bot - Two-stage deletion
+    // Stadio 1: Prompt conferma
+    const delPrompt = await handleDeleteBot({ bot_id: createdBotId });
+    assert.equal(delPrompt.success, false);
+    assert.equal(delPrompt.status, 'confirmation_required');
+    assert.ok(delPrompt.confirmation_token);
+
+    // Stadio 2: Esecuzione con token valido
+    const delRes = await handleDeleteBot({
+      bot_id: createdBotId,
+      confirmation_token: delPrompt.confirmation_token
+    });
+    assert.equal(delRes.success, true);
+
+    // Verifica cancellazione DB
+    const deletedDbBot = db.getBot(createdBotId);
+    assert.equal(deletedDbBot, null);
   });
 
   // Cleanup finale del bot di test

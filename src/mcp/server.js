@@ -29,7 +29,9 @@ import {
   handlePlaceOrderPaper,
   handleGetSystemSnapshot,
   handleEmergencyShutdown,
-  handleUpdateStrategyParams
+  handleUpdateStrategyParams,
+  handleRegisterBot,
+  handleDeleteBot
 } from './tools.js';
 
 export function createArbitrageBotMcpServer() {
@@ -118,6 +120,47 @@ export function createArbitrageBotMcpServer() {
     },
     async ({ bot_id, params, confirmation_token }) => {
       const res = await handleUpdateStrategyParams({ bot_id, params, confirmation_token });
+      return {
+        content: [{ type: 'text', text: JSON.stringify(res, null, 2) }],
+        isError: !res.success
+      };
+    }
+  );
+
+  // 6. Tool: register_bot
+  server.tool(
+    'register_bot',
+    'Registra e crea un nuovo bot di trading nel DB e in memoria, validando parametri, leverage <= 5x e blacklist.',
+    {
+      name: z.string().describe('Nome descrittivo del bot (es. "Trend Rider SOL")'),
+      coin: z.string().describe('Simbolo del perpetual market (es. "SOL" o "SOL-PERP")'),
+      config: z.record(z.any()).optional().describe('Configurazione opzionale della strategia (es. { leverage: 2, maxPositionUsd: 1000 })'),
+      network: z.string().optional().describe('Rete di trading ("testnet" o "mainnet", default: testnet)'),
+      master_address: z.string().optional().describe('Master address o wallet associato (default: paper_hermes)'),
+      actor_label: z.string().optional().describe('Label identità visualizzata in UI (default: "Hermes")'),
+      actor_id: z.string().optional().describe('ID agente (default: "hermes_agent_01")'),
+      is_managed_by_agent: z.boolean().optional().describe('Indica se il bot è gestito da agente AI per inibire modifiche manuali in UI (default: true)'),
+      auto_start: z.boolean().optional().describe('Se true, avvia immediatamente il bot dopo la registrazione (default: false)')
+    },
+    async (args) => {
+      const res = await handleRegisterBot(args);
+      return {
+        content: [{ type: 'text', text: JSON.stringify(res, null, 2) }],
+        isError: !res.success
+      };
+    }
+  );
+
+  // 7. Tool: delete_bot
+  server.tool(
+    'delete_bot',
+    'Elimina definitivamente un bot dal DB e dalla memoria runtime con conferma a due stadi (60s TTL).',
+    {
+      bot_id: z.string().describe('UUID del bot da eliminare'),
+      confirmation_token: z.string().optional().describe('Token di conferma ricevuto allo stadio 1 (obbligatorio per confermare ed eliminare entro 60s)')
+    },
+    async (args) => {
+      const res = await handleDeleteBot(args);
       return {
         content: [{ type: 'text', text: JSON.stringify(res, null, 2) }],
         isError: !res.success

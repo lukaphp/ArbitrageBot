@@ -577,3 +577,174 @@ export async function handleUpdateStrategyParams({ bot_id, params, confirmation_
     return { success: false, message: msg };
   }
 }
+
+/**
+ * 6. REGISTER BOT (CREATE BOT)
+ * Permette ad agenti autonomi (Hermes) di registrare e inizializzare nuovi bot di trading
+ * validando i guardrail pre-flight (leva <= 5x, blacklist) e sincronizzando SQLite e runtime.
+ */
+export async function handleRegisterBot({
+  name,
+  coin,
+  network = 'testnet',
+  master_address = 'paper_hermes',
+  config = {},
+  max_allocation_usd = null,
+  actor_label = 'Hermes',
+  actor_id = 'hermes_agent_01',
+  is_managed_by_agent = true,
+  auto_start = false
+}) {
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return { success: false, message: 'Parametro name obbligatorio.' };
+  }
+  if (!coin || typeof coin !== 'string' || !coin.trim()) {
+    return { success: false, message: 'Parametro coin obbligatorio.' };
+  }
+
+  // Normalizza coin (es. SOL -> SOL-PERP)
+  let normalizedCoin = coin.trim().toUpperCase();
+  if (!normalizedCoin.endsWith('-PERP')) {
+    normalizedCoin = `${normalizedCoin}-PERP`;
+  }
+
+  const parsedConfig = typeof config === 'string' ? JSON.parse(config || '{}') : (config || {});
+
+  // Pre-flight Guardrail 1: Instruction Override & Blacklist
+  const overrideCheck = validateInstructionOverride({ coin: normalizedCoin, botConfig: parsedConfig });
+  if (!overrideCheck.ok) {
+    logMcpAudit('register_bot', { name, coin: normalizedCoin, error: overrideCheck.error, guardrail: 'instruction_override', success: false });
+    return { success: false, error: overrideCheck.error, message: overrideCheck.error };
+  }
+
+  // Pre-flight Guardrail 2: Risk Ceiling - Max Leverage check
+  if (parsedConfig.leverage != null) {
+    const lev = parseInt(parsedConfig.leverage, 10);
+    if (isNaN(lev) || lev < 1 || lev > GUARDRAILS_CONFIG.MAX_ACCOUNT_LEVERAGE) {
+      const err = `GUARDRAIL_VIOLATION: Max Account Leverage exceeded. Richiesta leva ${parsedConfig.leverage}x, massimo consentito ${GUARDRAILS_CONFIG.MAX_ACCOUNT_LEVERAGE}x.`;
+      logMcpAudit('register_bot', { name, coin: normalizedCoin, error: err, guardrail: 'risk_ceiling', success: false });
+      return { success: false, error: err, message: err };
+    }
+  }
+
+  if (parsedConfig.maxPositionUsd != null || parsedConfig.max_position_usd != null) {
+    const maxPos = parseFloat(parsedConfig.maxPositionUsd || parsedConfig.max_position_usd);
+    if (isNaN(maxPos) || maxPos <= 0) {
+      const err = 'GUARDRAIL_VIOLATION: maxPositionUsd deve essere un numero positivo.';
+      return { success: false, error: err, message: err };
+    }
+  }
+
+  db.ensure();
+  try {
+    const botState = botManager.createBot({
+      name: name.trim(),
+      coin: normalizedCoin,
+      network: network || 'testnet',
+      masterAddress: master_address || 'paper_hermes',
+      config: parsedConfig,
+      linked_agent_id: actor_id || 'hermes_agent_01',
+      max_allocation_usd: max_allocation_usd != null ? Number(max_allocation_usd) : (parsedConfig.maxPositionUsd ? Number(parsedConfig.maxPositionUsd) : null),
+      actor_label: actor_label || 'Hermes',
+      actor_id: actor_id || 'hermes_agent_01',
+      is_managed_by_agent: is_managed_by_agent !== false
+    });
+
+    let finalState = botState;
+    if (auto_start === true) {
+      finalState = botManager.startBot(botState.id);
+    }
+
+    if (botManager.io) {
+      botManager.io.emit('perps:botCreate', finalState);
+      botManager.io.emit('perps:dashboardRefresh', { reason: 'register_bot', botId: finalState.id });
+    }
+
+    const resPayload = {
+      bot_id: finalState.id,
+      name: finalState.name,
+      coin: finalState.coin,
+      status: finalState.status,
+      actor_label: finalState.actor_label || actor_label || 'Hermes',
+      is_managed_by_agent: finalState.is_managed_by_agent,
+      config: finalState.config,
+      warning: finalState.warning || null
+    };
+
+    logMcpAudit('register_bot', { ...resPayload, success: true });
+
+    return {
+      success: true,
+      message: `Bot '${finalState.name}' (${finalState.coin}) registrato con successo (id: ${finalState.id}, status: ${finalState.status}).`,
+      data: resPayload
+    };
+  } catch (err) {
+    const msg = `Errore registrazione bot: ${err.message}`;
+    logMcpAudit('register_bot', { name, coin: normalizedCoin, error: msg, success: false });
+    return { success: false, message: msg };
+  }
+}
+
+/**
+ * 7. DELETE BOT
+ * Rimuove un bot dal DB e dal runtime con conferma a due stadi.
+ */
+export async function handleDeleteBot({ bot_id, confirmation_token = null }) {
+  if (!bot_id) {
+    return { success: false, message: 'Parametro bot_id obbligatorio.' };
+  }
+
+  db.ensure();
+  const botRow = db.getBot(bot_id);
+  if (!botRow) {
+    const msg = `Bot non trovato (id: ${bot_id})`;
+    logMcpAudit('delete_bot', { bot_id, error: msg, success: false });
+    return { success: false, message: msg };
+  }
+
+  // Two-stage confirmation requirement
+  if (!confirmation_token) {
+    const prompt = requestTwoStageConfirmation({
+      action: 'delete_bot',
+      botId: bot_id,
+      payload: { bot_id },
+      summary: `Eliminazione definitiva del bot '${botRow.name}' (${bot_id}) dal DB e dal runtime.`
+    });
+    logMcpAudit('delete_bot', { bot_id, status: 'confirmation_required', success: false });
+    return {
+      success: false,
+      ...prompt
+    };
+  }
+
+  const validation = validateAndConsumeConfirmation({
+    confirmation_token,
+    action: 'delete_bot',
+    botId: bot_id
+  });
+  if (!validation.ok) {
+    logMcpAudit('delete_bot', { bot_id, confirmation_token, error: validation.error, success: false });
+    return { success: false, error: validation.error, message: validation.error };
+  }
+
+  try {
+    botManager.deleteBot(bot_id);
+
+    if (botManager.io) {
+      botManager.io.emit('perps:botDelete', { id: bot_id });
+      botManager.io.emit('perps:dashboardRefresh', { reason: 'delete_bot', botId: bot_id });
+    }
+
+    logMcpAudit('delete_bot', { bot_id, name: botRow.name, success: true });
+
+    return {
+      success: true,
+      message: `Bot '${botRow.name}' (${bot_id}) eliminato con successo.`,
+      data: { bot_id, name: botRow.name }
+    };
+  } catch (err) {
+    const msg = `Errore eliminazione bot: ${err.message}`;
+    logMcpAudit('delete_bot', { bot_id, error: msg, success: false });
+    return { success: false, message: msg };
+  }
+}

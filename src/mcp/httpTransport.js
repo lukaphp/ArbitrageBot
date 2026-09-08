@@ -11,7 +11,9 @@ import {
   handlePlaceOrderPaper,
   handleGetSystemSnapshot,
   handleEmergencyShutdown,
-  handleUpdateStrategyParams
+  handleUpdateStrategyParams,
+  handleRegisterBot,
+  handleDeleteBot
 } from './tools.js';
 
 export const MCP_TOOLS_DEFINITIONS = [
@@ -74,6 +76,37 @@ export const MCP_TOOLS_DEFINITIONS = [
       },
       required: ['bot_id', 'params']
     }
+  },
+  {
+    name: 'register_bot',
+    description: 'Registra e crea un nuovo bot di trading nel DB e in memoria, validando parametri, leverage <= 5x e blacklist.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Nome descrittivo del bot (es. "Trend Rider SOL")' },
+        coin: { type: 'string', description: 'Simbolo del perpetual market (es. "SOL" o "SOL-PERP")' },
+        config: { type: 'object', description: 'Configurazione opzionale della strategia' },
+        network: { type: 'string', description: 'Rete ("testnet" o "mainnet", default: testnet)' },
+        master_address: { type: 'string', description: 'Master address o wallet associato' },
+        actor_label: { type: 'string', description: 'Label identità in UI (default: "Hermes")' },
+        actor_id: { type: 'string', description: 'ID agente (default: "hermes_agent_01")' },
+        is_managed_by_agent: { type: 'boolean', description: 'Se true, inibisce modifiche manuali da UI' },
+        auto_start: { type: 'boolean', description: 'Se true, avvia immediatamente il bot' }
+      },
+      required: ['name', 'coin']
+    }
+  },
+  {
+    name: 'delete_bot',
+    description: 'Elimina definitivamente un bot dal DB e dalla memoria runtime con conferma a due stadi (60s TTL).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bot_id: { type: 'string', description: 'UUID del bot da eliminare' },
+        confirmation_token: { type: 'string', description: 'Token di conferma ricevuto allo stadio 1' }
+      },
+      required: ['bot_id']
+    }
   }
 ];
 
@@ -89,6 +122,10 @@ export async function executeMcpTool(toolName, args = {}) {
       return await handleEmergencyShutdown(args);
     case 'update_strategy_params':
       return await handleUpdateStrategyParams(args);
+    case 'register_bot':
+      return await handleRegisterBot(args);
+    case 'delete_bot':
+      return await handleDeleteBot(args);
     default:
       return { success: false, message: `Tool sconosciuto: '${toolName}'` };
   }

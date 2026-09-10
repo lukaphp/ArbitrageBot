@@ -641,7 +641,7 @@ export async function handleRegisterBot({
       name: name.trim(),
       coin: normalizedCoin,
       network: network || 'testnet',
-      masterAddress: master_address || 'paper_hermes',
+      masterAddress: (master_address && master_address.startsWith('0x')) ? master_address : '0x55dde41417dd529e51b173916b7fafef86573e72',
       config: parsedConfig,
       linked_agent_id: actor_id || 'hermes_agent_01',
       max_allocation_usd: max_allocation_usd != null ? Number(max_allocation_usd) : (parsedConfig.maxPositionUsd ? Number(parsedConfig.maxPositionUsd) : null),

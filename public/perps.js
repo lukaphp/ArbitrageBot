@@ -2922,13 +2922,97 @@ class PerpsApp {
     list.innerHTML = this.bots.map(b => this._botCardHtml(b)).join('');
   }
 
+  /**
+   * Traduce una singola entryRule JSON grezza in una stringa descrittiva.
+   * Supporta: indicator (rsi, bollinger, ema, sma, price), funding, price_action.
+   * Usato dalla card per mostrare la strategia configurata senza dover chiamare
+   * l'endpoint /monitor (che richiede candele live).
+   */
+  _describeRule(r) {
+    if (!r || !r.type) return '?';
+    const ind = (r.indicator || '').toLowerCase();
+    const p   = r.period || r.params?.period || '';
+    const op  = r.op || '';
+    const val = r.value != null ? r.value : '';
+    const sig = r.signal ? `[${r.signal.toUpperCase()}]` : '';
+
+    if (r.type === 'indicator') {
+      switch (ind) {
+        case 'rsi': {
+          const threshold = val !== '' ? val : (r.signal === 'long' ? 30 : 70);
+          return `RSI(${p || 14}) ${op || (r.signal === 'long' ? '<' : '>')} ${threshold} ${sig}`;
+        }
+        case 'bollinger': {
+          const condMap = {
+            below_lower: 'sotto banda inf',
+            above_upper: 'sopra banda sup',
+            cross_lower: 'incrocio banda inf',
+            cross_upper: 'incrocio banda sup',
+          };
+          const cond = condMap[r.cond] || r.cond || '';
+          return `Bollinger ${cond} ${sig}`;
+        }
+        case 'ema':
+        case 'sma': {
+          const fn = ind.toUpperCase();
+          if (op && val !== '') return `Prezzo ${op} ${fn}(${p || 20}) ${sig}`;
+          return `${fn}(${p || 20}) ${op} ${val} ${sig}`;
+        }
+        case 'price':
+          return `Prezzo ${op} ${val} ${sig}`;
+        default:
+          if (op && val !== '') return `${ind.toUpperCase()}(${p}) ${op} ${val} ${sig}`;
+          return `${ind.toUpperCase()}(${p}) ${sig}`;
+      }
+    }
+    if (r.type === 'funding') {
+      return `Funding ${r.op || '>'} ${r.value ?? 0} ${sig}`;
+    }
+    if (r.type === 'price_action') {
+      return `Price action: ${r.pattern || '—'} ${sig}`;
+    }
+    return `${r.type} ${sig}`;
+  }
+
+  /**
+   * Costruisce la riga "Strategia" della card: pill per ogni regola configurata.
+   * Se non ci sono regole restituisce una stringa muted.
+   */
+  _describeEntryRules(b) {
+    const cfg = b.config || {};
+    const rules = cfg.entryRules || [];
+    if (!rules.length) return '<span class="muted">Nessuna regola configurata</span>';
+    const logic = cfg.logic === 'all' ? '&amp;' : '|';
+    const pills = rules.map(r => {
+      const sig = (r.signal || '').toLowerCase();
+      const cls = sig === 'short' ? 'short' : (sig === 'long' ? 'long' : '');
+      return `<span class="rule-pill ${cls}" title="${JSON.stringify(r).replace(/"/g,'&quot;')}">${this._describeRule(r)}</span>`;
+    });
+    const dir = cfg.direction ? `<span class="muted" style="font-size:.75em">${{ both:'↕', long:'↑', short:'↓' }[cfg.direction] || cfg.direction}</span>` : '';
+    const tf  = cfg.candleInterval ? `<span class="muted rule-pill">${cfg.candleInterval}</span>` : '';
+    return `${pills.join(`<span class="rule-logic">${logic}</span>`)} ${tf}${dir}`;
+  }
+
   _botCardHtml(b) {
     const running = b.status === 'running';
     const crashed = b.status === 'crashed';
     const pos = b.position
       ? `<span class="side-badge ${b.position.side}">${b.position.side.toUpperCase()} ${this.fmtNum(b.position.size)}</span>`
       : '<span class="muted">flat</span>';
-    const evalTxt = b.lastEval ? `${b.lastEval.action} · ${b.lastEval.reason || ''}` : '—';
+
+    // Traduzione action → icona + testo, evita di mostrare messaggi tecnici come
+    // "Nessuna regola d'ingresso configurata" (emesso durante il warmup iniziale).
+    const le = b.lastEval || {};
+    const actionIcon = { open_long: '📈', open_short: '📉', close: '🔒', hold: '⏳' }[le.action] || '—';
+    const evalReason = (() => {
+      if (!le.action) return '—';
+      // Se il motivo è il messaggio di warmup/placeholder, mostriamo solo l'azione
+      if (!le.reason || le.reason === "Nessuna regola d'ingresso configurata") {
+        return le.action === 'hold' ? '⏳ In attesa candele warmup' : actionIcon;
+      }
+      return `${actionIcon} ${le.reason}`;
+    })();
+
     const pnlClass = (b.dailyPnl || 0) >= 0 ? 'profit-positive' : 'profit-negative';
     let statsLine = '';
     if (b.stats && b.stats.trades > 0) {
@@ -2974,6 +3058,9 @@ class PerpsApp {
       ? `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Bot gestito da Agente (${actorLabel}): richiede sblocco">🔒 ✏️</button>`
       : `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Modifica bot">✏️</button>`;
 
+    // Riga strategia: traduzione human-readable delle entryRules dal config
+    const stratRules = this._describeEntryRules(b);
+
     return `<div class="bot-card ${running ? 'running' : ''} ${crashed ? 'bot-crashed' : ''}" id="bot-${b.id}">
       <div class="bot-card-head">
         <div>
@@ -2986,8 +3073,9 @@ class PerpsApp {
       </div>
       <div class="bot-card-body">
         ${stratBadge}
+        <div class="bot-meta"><span class="label">Strategia</span> <span class="rule-pills">${stratRules}</span></div>
         <div class="bot-meta"><span class="label">Posizione</span> ${pos}</div>
-        <div class="bot-meta"><span class="label">Ultima valutazione</span> <span class="eval">${evalTxt}</span></div>
+        <div class="bot-meta"><span class="label">Valutazione</span> <span class="eval">${evalReason}</span></div>
         ${statsLine}
         ${crashed ? `<div class="bot-error bot-crash-reason">🐕 Watchdog: ${b.crashReason || 'nessun tick rilevato'}</div>` : ''}
         ${!crashed && b.lastError ? `<div class="bot-error">⚠️ ${b.lastError}</div>` : ''}

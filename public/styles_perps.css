@@ -137,6 +137,24 @@
 .bot-error { color: #c53030; font-size: 0.78rem; margin-top: 6px; }
 .bot-card-actions { display: flex; gap: 8px; }
 
+/* --- Rule pills nella card bot (riga Strategia) --- */
+.rule-pills { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: flex-end; }
+.rule-pill {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: #edf2f7;
+  color: #4a5568;
+  white-space: nowrap;
+  cursor: default;
+}
+.rule-pill.long  { background: rgba(56, 161, 105, 0.13); color: #276749; border: 1px solid rgba(56,161,105,0.3); }
+.rule-pill.short { background: rgba(229, 62,  62,  0.11); color: #9b2c2c; border: 1px solid rgba(229,62,62,0.28); }
+.rule-logic { font-size: 0.68rem; color: #a0aec0; padding: 0 2px; font-weight: 700; }
+
+
 /* --- Modal largo + rule builder --- */
 .modal-wide { max-width: 760px; width: 92%; }
 .rules-section {

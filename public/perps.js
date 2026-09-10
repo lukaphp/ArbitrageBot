@@ -319,7 +319,10 @@ class PerpsApp {
     if (!this.socket) this._initSocket();
     await this.initWallet();
     this._initCockpitDashboard();
-    this.switchCockpitTab(this.cockpitTab || 'dashboard');
+    // Ripristina l'ultimo tab dal hash dell'URL (primo), poi da localStorage (fallback)
+    const hashTab = location.hash?.replace('#tab-', '').replace('#', '') || '';
+    const savedTab = hashTab || localStorage.getItem('perps_active_tab') || 'dashboard';
+    this.switchCockpitTab(savedTab);
     await this.loadNetwork();
     await this.loadFxRate();
     await this.loadMarkets();
@@ -357,9 +360,31 @@ class PerpsApp {
     this.socket.on('perps:position', () => { this.refreshAccount(); this.refreshRiskSnapshot(); if (this.posTab === 'history') this.loadFills(); });
     this.socket.on('perps:fill', () => { this.refreshAccount(); this.refreshRiskSnapshot(); if (this.posTab === 'history') this.loadFills(); });
 
+    // --- Live bot sync da sessioni esterne (MCP, altri browser, API) ---
+    // Aggiunge una card istantaneamente quando un bot viene creato altrove.
+    this.socket.on('perps:botCreate', (state) => {
+      if (!this.bots) this.bots = [];
+      if (!this.bots.find(b => b.id === state.id)) {
+        this.bots.push(state);
+        this._renderBots();
+        this._refreshCockpitDashboard();
+      }
+    });
+    // Rimuove la card istantaneamente quando un bot viene eliminato altrove.
+    this.socket.on('perps:botDelete', ({ id }) => {
+      if (!this.bots) return;
+      this.bots = this.bots.filter(b => b.id !== id);
+      const el = document.getElementById('bot-' + id);
+      if (el) el.remove();
+      if (!this.bots.length) document.getElementById('noBots')?.classList.remove('hidden');
+      this._refreshCockpitDashboard();
+    });
+
     // --- Feature 1: Live Dashboard Refresh ---
     // Il server emette questo evento dopo ogni operazione che cambia lo stato
-    // (fill, chiusura posizione, kill switch, watchdog crash/recovery).
+    // (fill, chiusura posizione, kill switch, watchdog crash/recovery, MCP reload).
+    // Si aggiorna SEMPRE, qualunque tab sia attivo, per ricevere aggiornamenti
+    // da sessioni esterne (altri browser, Hermes MCP, API).
     // Throttle 800ms per evitare reload multipli in burst.
     let _refreshPending = false;
     this.socket.on('perps:dashboardRefresh', (d) => {
@@ -378,6 +403,12 @@ class PerpsApp {
     // Mostra un banner rosso sticky sopra la lista bot con possibilità di dismiss.
     this.socket.on('perps:botCrash', (data) => {
       this._showCrashBanner(data);
+    });
+
+    // Naviga al tab corretto quando l'utente usa Back/Forward del browser
+    window.addEventListener('popstate', () => {
+      const hashTab = location.hash?.replace('#tab-', '').replace('#', '') || '';
+      if (hashTab) this.switchCockpitTab(hashTab);
     });
   }
 
@@ -511,6 +542,14 @@ class PerpsApp {
     const validTabs = ['dashboard', 'execution', 'positions', 'performance', 'risk', 'system'];
     const nextTab = validTabs.includes(tab) ? tab : 'dashboard';
     this.cockpitTab = nextTab;
+
+    // Persiste il tab nell'URL (hash) e in localStorage per sopravvivere al refresh
+    const newHash = `#tab-${nextTab}`;
+    if (location.hash !== newHash) {
+      history.replaceState(null, '', newHash);
+    }
+    try { localStorage.setItem('perps_active_tab', nextTab); } catch {}
+
     document.querySelectorAll('.cockpit-tab').forEach((button) => {
       const isActive = button.id === `cockpit-tab-${nextTab}`;
       button.setAttribute('aria-selected', String(isActive));

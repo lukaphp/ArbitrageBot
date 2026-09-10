@@ -37,6 +37,41 @@ export function logMcpAudit(toolName, detail = {}) {
 }
 
 /**
+ * Notifica il processo Express HTTP di sincronizzare botManager dal DB.
+ *
+ * Necessario quando il tool MCP gira in un processo Stdio separato (es. Hermes
+ * invoca `docker exec ... node src/mcp/server.js`): le modifiche al DB
+ * non aggiornano automaticamente la Map in-memory del processo Express.
+ * Questo endpoint loopback è protetto a livello IP (solo 127.x / 172.x).
+ *
+ * Non-blocking: il fallimento non deve interrompere la risposta MCP.
+ */
+async function notifyExpressReload() {
+  try {
+    const http = await import('http');
+    return new Promise((resolve) => {
+      const options = {
+        hostname: '127.0.0.1',
+        port: 3000,
+        path: '/internal/mcp/reload',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': 0 },
+        timeout: 3000,
+      };
+      const req = http.default.request(options, (res) => {
+        res.resume();
+        resolve();
+      });
+      req.on('error', () => resolve()); // silenzioso: Stdio funziona anche senza Express
+      req.on('timeout', () => { req.destroy(); resolve(); });
+      req.end();
+    });
+  } catch {
+    // import dinamico fallito o altro: non blocca nulla
+  }
+}
+
+/**
  * Helper per estrarre e parsare in sicurezza la configurazione di un bot da DB.
  */
 export function extractBotConfig(botRow) {
@@ -119,6 +154,9 @@ export async function handleBotControl({ bot_id, action }) {
     }
 
     logMcpAudit('bot_control', { bot_id, action, result: 'success', status: state?.status, success: true });
+
+    // Notifica il processo Express di sincronizzare botManager dal DB
+    notifyExpressReload().catch(() => {});
 
     return {
       success: true,
@@ -673,6 +711,9 @@ export async function handleRegisterBot({
 
     logMcpAudit('register_bot', { ...resPayload, success: true });
 
+    // Notifica il processo Express di sincronizzare botManager dal DB
+    notifyExpressReload().catch(() => {});
+
     return {
       success: true,
       message: `Bot '${finalState.name}' (${finalState.coin}) registrato con successo (id: ${finalState.id}, status: ${finalState.status}).`,
@@ -736,6 +777,9 @@ export async function handleDeleteBot({ bot_id, confirmation_token = null }) {
     }
 
     logMcpAudit('delete_bot', { bot_id, name: botRow.name, success: true });
+
+    // Notifica il processo Express di sincronizzare botManager dal DB
+    notifyExpressReload().catch(() => {});
 
     return {
       success: true,

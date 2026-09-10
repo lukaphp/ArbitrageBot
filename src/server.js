@@ -201,12 +201,16 @@ class ArbitrageBotServer {
     });
 
     // --- Gate di autenticazione: protegge tutte le /api/* tranne login/logout/status ---
+    // /internal/* è riservato a chiamate loopback (processo MCP Stdio) — nessun cookie.
     const publicApi = new Set(['/api/login', '/api/logout', '/api/auth/status']);
     this.app.use((req, res, next) => {
       if (!req.path.startsWith('/api/')) return next();  // statici, /, /health → pubblici
       if (publicApi.has(req.path)) return next();
       return auth.requireAuth(req, res, next);
     });
+    // Percorsi /internal/* non passano per il gate di autenticazione
+    // (accessibili solo in loopback all'interno del container Docker).
+    this.app.use('/internal', (req, res, next) => next());
   }
 
   /** Rate-limiter stretto per il login (anti brute-force). */
@@ -1661,6 +1665,61 @@ class ArbitrageBotServer {
     app.post('/api/mcp/tools/:toolName', async (req, res) => {
       const result = await executeMcpTool(req.params.toolName, req.body || {});
       res.json(result);
+    });
+
+    /**
+     * INTERNAL RELOAD — endpoint loopback per sincronizzare botManager dal DB.
+     *
+     * Chiamato dal processo MCP Stdio (Hermes) dopo operazioni mutanti
+     * (register_bot, delete_bot, bot_control). Garantisce che la UI e le API
+     * HTTP riflettano immediatamente lo stato del DB senza riavvio del container.
+     *
+     * Sicurezza: nessun cookie richiesto, ma accettato SOLO da loopback (127.x)
+     * o dalla rete Docker interna (172.x). Qualsiasi altro IP riceve 403.
+     */
+    app.post('/internal/mcp/reload', async (req, res) => {
+      const ip = req.ip || req.socket?.remoteAddress || '';
+      const allowed = ip === '127.0.0.1' || ip === '::1' || ip.startsWith('::ffff:127.') || ip.startsWith('172.');
+      if (!allowed) {
+        logger.warn(`/internal/mcp/reload rifiutato da IP non loopback: ${ip}`);
+        return res.status(403).json({ success: false, error: 'Accesso non consentito' });
+      }
+      try {
+        const { PerpsBot } = await import('./perps/bot.js');
+        const dbBots = db.listBots();
+        let added = 0, removed = 0;
+        const dbIds = new Set(dbBots.map(r => r.id));
+
+        // Rimuovi dalla Map i bot eliminati dal DB
+        for (const [id] of botManager.bots) {
+          if (!dbIds.has(id)) {
+            botManager.bots.get(id)?.stop?.();
+            botManager.bots.delete(id);
+            removed++;
+          }
+        }
+
+        // Aggiungi bot presenti nel DB ma non in-memory
+        for (const row of dbBots) {
+          if (!botManager.bots.has(row.id)) {
+            const bot = new PerpsBot(row, botManager._onUpdate.bind(botManager));
+            botManager.bots.set(bot.id, bot);
+            if (row.status === 'running') bot.start();
+            added++;
+          }
+        }
+
+        logger.info(`🔄 MCP reload: +${added} bot aggiunti, -${removed} rimossi dalla Map runtime`);
+
+        if (botManager.io) {
+          botManager.io.emit('perps:dashboardRefresh', { reason: 'mcp_reload' });
+        }
+
+        return res.json({ success: true, added, removed, total: botManager.bots.size });
+      } catch (err) {
+        logger.error('Errore /internal/mcp/reload:', err.message);
+        return res.status(500).json({ success: false, error: err.message });
+      }
     });
 
     /**

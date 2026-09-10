@@ -1687,35 +1687,67 @@ class ArbitrageBotServer {
       try {
         const { PerpsBot } = await import('./perps/bot.js');
         const dbBots = db.listBots();
-        let added = 0, removed = 0;
+        let added = 0, removed = 0, updated = 0;
         const dbIds = new Set(dbBots.map(r => r.id));
+        const dbById = new Map(dbBots.map(r => [r.id, r]));
 
-        // Rimuovi dalla Map i bot eliminati dal DB
+        // 1. Rimuovi dalla Map i bot eliminati dal DB
         for (const [id] of botManager.bots) {
           if (!dbIds.has(id)) {
             botManager.bots.get(id)?.stop?.();
             botManager.bots.delete(id);
+            if (botManager.io) botManager.io.emit('perps:botDelete', { id });
             removed++;
           }
         }
 
-        // Aggiungi bot presenti nel DB ma non in-memory
+        // 2. Aggiungi bot presenti nel DB ma non in-memory
         for (const row of dbBots) {
           if (!botManager.bots.has(row.id)) {
             const bot = new PerpsBot(row, botManager._onUpdate.bind(botManager));
             botManager.bots.set(bot.id, bot);
             if (row.status === 'running') bot.start();
+            // Notifica il client della nuova card
+            if (botManager.io) botManager.io.emit('perps:botCreate', bot.getState());
             added++;
           }
         }
 
-        logger.info(`🔄 MCP reload: +${added} bot aggiunti, -${removed} rimossi dalla Map runtime`);
+        // 3. Reconcilia lo status dei bot già in-memory con il DB
+        //    (es. MCP Stdio ha cambiato status=running/stopped sul DB
+        //    ma Express non l'ha ancora avviato/fermato in memoria)
+        for (const [id, bot] of botManager.bots) {
+          const row = dbById.get(id);
+          if (!row) continue;
+          const inMemStatus = bot.status;
+          const dbStatus   = row.status;
+          if (inMemStatus === dbStatus) continue; // già allineato
 
+          if (dbStatus === 'running' && inMemStatus !== 'running') {
+            // Il DB dice running ma Express ha il bot fermo: avvialo
+            try { bot.start(); updated++; } catch {}
+          } else if (dbStatus === 'stopped' && inMemStatus === 'running') {
+            // Il DB dice stopped ma Express lo ha ancora in run: fermalo
+            try { bot.stop(); updated++; } catch {}
+          }
+
+          // Notifica il client dello stato aggiornato con i dati freschi
+          if (botManager.io) {
+            setTimeout(() => {
+              const state = bot.getState();
+              botManager.io.emit('perps:botUpdate', state);
+            }, 50); // piccola attesa perché start() è asincrono
+          }
+        }
+
+        logger.info(`🔄 MCP reload: +${added} aggiunti, -${removed} rimossi, ~${updated} status reconciliati`);
+
+        // Emetti dashboardRefresh per aggiornamento completo
         if (botManager.io) {
           botManager.io.emit('perps:dashboardRefresh', { reason: 'mcp_reload' });
         }
 
-        return res.json({ success: true, added, removed, total: botManager.bots.size });
+        return res.json({ success: true, added, removed, updated, total: botManager.bots.size });
       } catch (err) {
         logger.error('Errore /internal/mcp/reload:', err.message);
         return res.status(500).json({ success: false, error: err.message });

@@ -385,17 +385,31 @@ class PerpsApp {
     // (fill, chiusura posizione, kill switch, watchdog crash/recovery, MCP reload).
     // Si aggiorna SEMPRE, qualunque tab sia attivo, per ricevere aggiornamenti
     // da sessioni esterne (altri browser, Hermes MCP, API).
-    // Throttle 800ms per evitare reload multipli in burst.
-    let _refreshPending = false;
-    this.socket.on('perps:dashboardRefresh', (d) => {
-      if (_refreshPending) return;
-      _refreshPending = true;
-      setTimeout(async () => {
-        _refreshPending = false;
-        await this.loadBots();
-        this.refreshAccount();
-        this.refreshRiskSnapshot();
-      }, 800);
+    // Throttle 150ms: risposta rapida ma protetta da burst multipli.
+    // Se un secondo evento arriva durante il cooldown, viene comunque schedulato
+    // (queued) anziché scartato silenziosamente.
+    let _refreshTimer = null;
+    let _refreshQueued = false;
+    const _doRefresh = async () => {
+      _refreshTimer = null;
+      _refreshQueued = false;
+      await this.loadBots();
+      this.refreshAccount();
+      this.refreshRiskSnapshot();
+    };
+    this.socket.on('perps:dashboardRefresh', () => {
+      if (_refreshTimer) {
+        // Timer già in corso: segna che va rifatto dopo
+        _refreshQueued = true;
+        return;
+      }
+      _refreshTimer = setTimeout(async () => {
+        await _doRefresh();
+        if (_refreshQueued) {
+          // Esegui il refresh in coda
+          _refreshTimer = setTimeout(_doRefresh, 150);
+        }
+      }, 150);
     });
 
     // --- Feature 3: Watchdog Crash Alert ---
@@ -2989,11 +3003,18 @@ class PerpsApp {
 
 
   _updateBotCard(state) {
-    const idx = this.bots.findIndex(b => b.id === state.id);
-    if (idx >= 0) this.bots[idx] = state; else this.bots.push(state);
+    // Merge con il bot già in cache per non perdere i campi arricchiti
+    // (actorLabel, actorIcon, actorColor, stats, ecc.) che arrivano dall'API HTTP
+    // ma non dai WebSocket events grezzi del botManager.
+    const idx = this.bots ? this.bots.findIndex(b => b.id === state.id) : -1;
+    const merged = idx >= 0 ? { ...this.bots[idx], ...state } : state;
+    if (!this.bots) this.bots = [];
+    if (idx >= 0) this.bots[idx] = merged; else this.bots.push(merged);
     const el = document.getElementById('bot-' + state.id);
-    if (el) el.outerHTML = this._botCardHtml(state);
+    if (el) el.outerHTML = this._botCardHtml(merged);
     else this._renderBots();
+    // Aggiorna anche il cockpit dashboard (metriche aggregate)
+    this._refreshCockpitDashboard();
   }
 
   async startBot(id) {

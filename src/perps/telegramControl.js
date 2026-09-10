@@ -112,6 +112,10 @@ class TelegramControl {
 
   /** Avvia/riavvia il polling in base alla config Telegram corrente. */
   refresh() {
+    if (process.env.TELEGRAM_POLLING_DISABLED === 'true' || process.env.TELEGRAM_CONTROL_ENABLED === 'false') {
+      if (this.running) this.stop();
+      return;
+    }
     const cfg = notifier.getConfig();
     const shouldRun = cfg.enabled && cfg.token && cfg.chatId;
     if (shouldRun && (!this.running || this.token !== cfg.token || this.chatId !== cfg.chatId)) {

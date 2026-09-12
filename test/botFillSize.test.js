@@ -60,12 +60,21 @@ const BASE_CONFIG = {
  */
 function brokerWithFill(filledSz) {
   const broker = Object.create(paperBroker); // eredita stato e resto dell'interfaccia
+  // Ordini passati da QUESTO broker. Ogni fase del test installa un'istanza
+  // nuova, quindi `broker.placed` identifica l'ordine di quella fase tramite il
+  // suo `oid` — l'unico modo stabile di ritrovarne il trade in DB, vedi il caso
+  // del fill parziale più sotto.
+  broker.placed = [];
   broker.placeMarketOrder = async (params, network) => {
     if (filledSz == null || filledSz <= 0) {
-      return { oid: null, avgPx: null, totalSz: filledSz, error: null, paper: true };
+      const vuoto = { oid: null, avgPx: null, totalSz: filledSz, error: null, paper: true };
+      broker.placed.push(vuoto);
+      return vuoto;
     }
     const real = await paperBroker.placeMarketOrder({ ...params, size: filledSz }, network);
-    return { ...real, totalSz: filledSz };
+    const res = { ...real, totalSz: filledSz };
+    broker.placed.push(res);
+    return res;
   };
   return broker;
 }
@@ -122,8 +131,13 @@ test('fill parziale: posizione, riga DB e TP/SL usano totalSz, non plan.size', a
   assert.equal(tpsOf(orders)[0].sz, 0.4, 'TP dimensionato sul fill reale');
   assert.equal(slsOf(orders)[0].sz, 0.4, 'SL dimensionato sul fill reale');
 
-  const trade = db.listTrades(1)[0];
-  assert.equal(trade.sz, 0.4, 'il trade registra la size eseguita');
+  // `listTrades(1)` leggeva l'ultimo trade dell'INTERO DB, non di questo bot:
+  // con il trade del test precedente nello stesso millisecondo l'ordinamento per
+  // `ts` si invertiva e qui arrivava una size 1. Stessa classe del flake sul
+  // fill parziale DCA, latente invece che osservata: si filtra per bot.
+  const trades = db.listTradesBy({ botId: bot.id });
+  assert.equal(trades.length, 1, 'una sola apertura, un solo trade per questo bot');
+  assert.equal(trades[0].sz, 0.4, 'il trade registra la size eseguita');
 
   const partial = notified.find(t => /parzial/i.test(t));
   assert.ok(partial, 'un fill parziale non passa in silenzio: notificato');
@@ -164,7 +178,8 @@ test('DCA con fill parziale: entry medio e TP/SL sulla size davvero aggiunta', a
   // Prezzo contro del 3% (soglia step 1 = 2%): il DCA scatta con addSize 1,
   // ma l'exchange riempie solo 0.5.
   MID = 97;
-  bot.broker = brokerWithFill(0.5);
+  const dcaBroker = brokerWithFill(0.5);
+  bot.broker = dcaBroker;
   notified.length = 0;
   await bot._maybeDca({ price: MID, candles: [] });
 
@@ -172,7 +187,16 @@ test('DCA con fill parziale: entry medio e TP/SL sulla size davvero aggiunta', a
   assert.equal(bot.position.size, 1.5, 'size totale = 1 + 0.5 riempita (non 1 + 1 pianificata)');
   assert.ok(bot.position.entryPx < entryBefore, 'entry medio abbassato dal fill a prezzo inferiore');
   // Media ponderata sulla size REALE: (entryBefore*1 + fillPx*0.5) / 1.5
-  const fillPx = db.listTradesBy({ botId: bot.id, limit: 1 })[0].px;
+  //
+  // Il trade dell'aggiunta va ritrovato per `hl_oid`, non per posizione: ingresso
+  // e aggiunta cadono nello stesso millisecondo e `listTradesBy` ordina
+  // `ORDER BY ts DESC`, quindi un `{limit: 1}[0]` restituiva a caso l'uno o
+  // l'altro — rosso intermittente (~1 run su 8) con un px 100 al posto di 97.
+  const dcaOid = dcaBroker.placed[0].oid;
+  const dcaTrade = db.listTradesBy({ botId: bot.id }).find(t => t.hl_oid === dcaOid);
+  assert.ok(dcaTrade, `il trade dell'aggiunta DCA (oid ${dcaOid}) è registrato in DB`);
+  assert.equal(dcaTrade.sz, 0.5, 'ed è quello della size riempita, non dell\'ingresso');
+  const fillPx = dcaTrade.px;
   assert.ok(Math.abs(bot.position.entryPx - (entryBefore * 1 + fillPx * 0.5) / 1.5) < 1e-9,
     'entry medio calcolato sulla size aggiunta reale');
 

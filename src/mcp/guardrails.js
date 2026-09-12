@@ -4,7 +4,7 @@
  *
  * Layer di sicurezza e pre-flight validation mandatorio per tutti i comandi MCP.
  * Nessun comando diretto a un bot raggiunge il database SQLite, il runtime in memoria
- * o l'exchange Hyperliquid senza superare questi 4 cancelli deterministici:
+ * o l'exchange Hyperliquid senza superare questi 5 cancelli deterministici:
  *
  * 1. RISK CEILING HARD-GATE:
  *    - Max Account Leverage <= 5x
@@ -20,11 +20,20 @@
  * 4. CONFIRM EXECUTION MODE:
  *    - Conferma temporizzata a due stadi (token a 60 secondi) per azioni critiche
  *      (emergency_shutdown, update_strategy_params).
+ *
+ * 5. POSITION UNIQUENESS GATE:
+ *    - Un solo ingresso per bot+coin+verso: con una posizione già aperta, un nuovo
+ *      ordine nello STESSO verso è rifiutato (hold forzato); il verso opposto —
+ *      la via d'uscita — resta sempre permesso.
+ *    - Due livelli con sorgenti diverse: riga `open` in `positions` (fail-fast,
+ *      copre le posizioni tracciate) e posizioni dell'account exchange/paper
+ *      (copre il bot fermo, dove nessuna riga viene mai scritta).
  */
 
 import crypto from 'crypto';
 import db from '../db/database.js';
 import logger from '../utils/logger.js';
+import notifier from '../perps/notifier.js';
 
 export const GUARDRAILS_CONFIG = {
   MAX_ACCOUNT_LEVERAGE: 5,
@@ -410,6 +419,218 @@ export function validateAndConsumeConfirmation({ confirmation_token, action, bot
   };
 }
 
+/**
+ * ============================================================================
+ * 5. POSITION UNIQUENESS GATE
+ * ============================================================================
+ */
+
+/**
+ * PERCHÉ ESISTE QUESTO CANCELLO. Il loop autonomo del bot è già protetto per
+ * costruzione (`bot._runTick`: se `this.position` è valorizzato il tick chiama
+ * solo `_manageOpen`, mai `_openPosition`). Il percorso MCP usato dall'agente
+ * esterno non lo era: un segnale PERSISTENTE (es. MACD ribassista che resta
+ * valido per più candele) fa richiamare `place_order_paper` a ogni candela e gli
+ * altri cancelli non se ne accorgono — l'Order Velocity Gate guarda solo
+ * l'orologio (cooldown 10s, non lo stato della posizione) e il Risk Ceiling si
+ * accorge del problema solo quando l'esposizione accumulata sfonda
+ * `maxPositionUsd`. Nel mezzo, la posizione viene raddoppiata/triplicata senza
+ * che nessuno l'abbia deciso. Davanti a un segnale già agito la risposta
+ * corretta è "hold".
+ *
+ * IL VERSO OPPOSTO PASSA SEMPRE. Un ordine contrario alla posizione aperta è una
+ * riduzione o una chiusura: è la via d'uscita (TP/SL/trailing/manuale). Bloccarlo
+ * trasformerebbe la posizione in una trappola, che è un danno peggiore del
+ * duplicato che stiamo prevenendo.
+ *
+ * DUE LIVELLI, DUE SORGENTI DI VERITÀ DIVERSE, e servono entrambi:
+ *
+ *  - `checkPositionUniqueness` legge la riga `open` in `positions` (stesso
+ *    predicato bot+coin di `insertPositionIfNoneOpen`, SEC-08). È sincrono e
+ *    senza I/O, quindi sta prima di qualunque chiamata a mercato: fail-fast.
+ *    Copre però SOLO le posizioni tracciate in DB — cioè quelle aperte da
+ *    `bot._openPosition` o adottate da `bot._reconcile`.
+ *  - `checkPositionUniquenessLive` legge le posizioni dell'ACCOUNT (exchange /
+ *    paper broker). Serve perché `handlePlaceOrderPaper` NON scrive nessuna riga
+ *    `positions`: registra un trade e muove il broker. Su un bot FERMO, pilotato
+ *    solo dall'agente, la riga in DB non esiste mai e il primo livello non
+ *    scatterebbe — misurato: tre ordini SHORT identici passavano tutti e tre,
+ *    accumulando una posizione paper di size 3 con 0 righe in DB. Su un bot
+ *    running la riga compare al tick successivo (adozione), quindi lì il primo
+ *    livello basta già: questo secondo chiude la finestra di quel tick e il caso
+ *    del bot fermo.
+ *
+ * Il secondo livello NON sostituisce il primo: il DB è la sorgente che costa
+ * meno (nessun fetch) e blocca prima di pagare prezzo e stato account.
+ */
+
+/** Verso richiesto normalizzato, o `null` se non è un verso valido. */
+function normalizeSide(side) {
+  const s = String(side || '').toLowerCase();
+  return (s === 'long' || s === 'short') ? s : null;
+}
+
+/**
+ * Stesso mercato, a prescindere dal suffisso.
+ *
+ * Necessario perché le due sorgenti del cancello non usano la stessa forma:
+ * `botRow.coin` è 'SOL-PERP', mentre le posizioni dell'account possono arrivare
+ * come 'SOL' (è la ragione per cui anche `bot._reconcile` confronta
+ * `p.coin === this.coin || `${p.coin}-PERP` === this.coin`). Un confronto
+ * letterale farebbe passare per "mercato diverso" la stessa posizione, cioè
+ * renderebbe il cancello inerte proprio quando deve scattare.
+ */
+function isSameCoin(a, b) {
+  const norm = (c) => String(c || '').toUpperCase().trim().replace(/-PERP$/, '');
+  const na = norm(a);
+  return !!na && na === norm(b);
+}
+
+/**
+ * True se l'ordine richiesto è un INGRESSO nello stesso verso della posizione
+ * già aperta (quindi da bloccare). False se i versi sono opposti (riduzione o
+ * chiusura, sempre permessa) o se uno dei due non è un verso leggibile.
+ *
+ * Funzione pura ed esportata di proposito: è il predicato che decide, ed è
+ * condiviso dai due livelli del cancello perché due copie potrebbero divergere.
+ */
+export function isSameSideEntry(existingSide, requestedSide) {
+  const a = normalizeSide(existingSide);
+  const b = normalizeSide(requestedSide);
+  return !!a && !!b && a === b;
+}
+
+/**
+ * Messaggio unico per entrambi i livelli: l'agente non deve poter distinguere
+ * (e trattare diversamente) due rifiuti che hanno la stessa causa. `reference`
+ * è l'unica parte che cambia, e dice da QUALE sorgente è stata vista la
+ * posizione — informazione che serve in diagnosi, non nella decisione.
+ */
+function positionUniquenessError({ coin, existingSide, reference }) {
+  return `GUARDRAIL_VIOLATION: Position Uniqueness — esiste già una posizione ${String(existingSide).toUpperCase()} aperta su ${coin} (${reference}). Un nuovo ingresso nello stesso verso non è consentito: il segnale è già stato agito, l'azione corretta è HOLD. La posizione si gestisce con i suoi TP/SL o con un ordine di verso opposto.`;
+}
+
+/**
+ * Stato non verificabile. Su un percorso che muove denaro non si ignora e non si
+ * tratta come "via libera": senza sapere cosa è già aperto, eseguire l'ordine
+ * rischia di raddoppiare l'esposizione. Si blocca (fail-closed), si logga come
+ * errore e si notifica — le posizioni già aperte restano comunque protette dai
+ * trigger TP/SL vivi sull'exchange, che non dipendono da questo cancello.
+ */
+function positionUniquenessUnverifiable({ coin, botId, side, source, detail }) {
+  logger.error(`🛡️ Guardrail Position Uniqueness: stato posizione ${coin} (bot ${botId}) non verificabile da ${source} — ordine ${side} bloccato in via precauzionale: ${detail}`);
+  notifier.notify(`⚠️ <b>Guardrail</b>: stato posizione ${coin} non verificabile (bot <code>${botId}</code>, sorgente ${source}) — ordine <b>${String(side).toUpperCase()}</b> via MCP <b>bloccato</b> in via precauzionale. Verificare lo stato del bot prima di riprovare.`, { urgent: true });
+  return {
+    ok: false,
+    error: `GUARDRAIL_VIOLATION: Position Uniqueness non verificabile — impossibile leggere lo stato della posizione su ${coin} da ${source} (${detail}). Ordine bloccato in via precauzionale.`
+  };
+}
+
+/**
+ * LIVELLO 1 — posizione TRACCIATA in DB (riga `open` per bot+coin).
+ *
+ * @param {object}  p
+ * @param {string}  p.botId  id del bot proprietario dell'ordine
+ * @param {string}  p.coin   mercato del bot (`botRow.coin`, es. 'ETH-PERP')
+ * @param {string}  p.side   verso richiesto ('long' | 'short')
+ * @returns {{ok: boolean, error?: string, data?: object}}
+ */
+export function checkPositionUniqueness({ botId, coin, side } = {}) {
+  // Senza bot o senza mercato non c'è una posizione da confrontare: il cancello
+  // non si applica (gli altri controlli di `handlePlaceOrderPaper` rifiutano già
+  // le richieste malformate).
+  if (!botId || !coin) return { ok: true };
+
+  const normalizedSide = normalizeSide(side);
+  if (!normalizedSide) return { ok: true };
+
+  let existing;
+  try {
+    db.ensure();
+    existing = db.getOpenPositionByBotCoin(botId, coin);
+  } catch (err) {
+    return positionUniquenessUnverifiable({
+      coin, botId, side: normalizedSide, source: 'database', detail: err.message
+    });
+  }
+
+  if (!existing) return { ok: true };
+
+  const existingSide = String(existing.side || '').toLowerCase();
+
+  if (!isSameSideEntry(existingSide, normalizedSide)) {
+    // Riduzione/chiusura: sempre permessa.
+    return { ok: true, data: { reducing: true, source: 'db', existingPositionId: existing.id, existingSide } };
+  }
+
+  // Nessuna notifica qui: con un segnale persistente questo ramo scatta a ogni
+  // candela ed è il funzionamento ATTESO del cancello, non un incidente. Resta a
+  // log (e nell'audit MCP del chiamante), una riga per tentativo.
+  logger.info(`🛡️ Guardrail Position Uniqueness [db]: ordine ${normalizedSide} su ${coin} (bot ${botId}) ignorato — posizione ${existingSide} già aperta (riga #${existing.id})`);
+
+  return {
+    ok: false,
+    error: positionUniquenessError({
+      coin, existingSide, reference: `riga #${existing.id}, size ${existing.size}`
+    }),
+    data: { source: 'db', existingPositionId: existing.id, existingSide, existingSize: existing.size }
+  };
+}
+
+/**
+ * LIVELLO 2 — posizione presente sull'ACCOUNT (exchange / paper broker), anche
+ * se nessuna riga `positions` la traccia. È il caso del bot fermo pilotato solo
+ * dall'agente.
+ *
+ * Funzione PURA: le posizioni arrivano già lette dal chiamante (che le ha in
+ * mano per il Risk Ceiling), qui non si fa I/O. `accountPositions` va passato
+ * GREZZO, senza `|| []` di comodo: "lista assente" e "nessuna posizione" sono
+ * due stati diversi e solo il secondo autorizza l'ordine.
+ *
+ * @param {object}   p
+ * @param {string}   p.botId
+ * @param {string}   p.coin              mercato del bot (`botRow.coin`)
+ * @param {string}   p.side              verso richiesto ('long' | 'short')
+ * @param {Array}    p.accountPositions  posizioni dell'account, come da `getAccount()`
+ * @returns {{ok: boolean, error?: string, data?: object}}
+ */
+export function checkPositionUniquenessLive({ botId, coin, side, accountPositions } = {}) {
+  if (!coin) return { ok: true };
+
+  const normalizedSide = normalizeSide(side);
+  if (!normalizedSide) return { ok: true };
+
+  if (!Array.isArray(accountPositions)) {
+    return positionUniquenessUnverifiable({
+      coin, botId, side: normalizedSide, source: 'account',
+      detail: `lista posizioni assente o non valida (${typeof accountPositions})`
+    });
+  }
+
+  // Size a 0 = posizione chiusa che l'account può ancora riportare: non è una
+  // posizione aperta e non deve bloccare un ingresso.
+  const existing = accountPositions.find(p =>
+    isSameCoin(p?.coin, coin) && Math.abs(Number(p?.size || 0)) > 0
+  );
+  if (!existing) return { ok: true };
+
+  const existingSide = String(existing.side || '').toLowerCase();
+
+  if (!isSameSideEntry(existingSide, normalizedSide)) {
+    return { ok: true, data: { reducing: true, source: 'account', existingSide, existingSize: existing.size } };
+  }
+
+  logger.info(`🛡️ Guardrail Position Uniqueness [account]: ordine ${normalizedSide} su ${coin} (bot ${botId}) ignorato — posizione ${existingSide} size ${existing.size} già aperta sull'account, nessuna riga in DB la traccia`);
+
+  return {
+    ok: false,
+    error: positionUniquenessError({
+      coin, existingSide, reference: `size ${existing.size}, rilevata sull'account`
+    }),
+    data: { source: 'account', existingSide, existingSize: existing.size }
+  };
+}
+
 export default {
   GUARDRAILS_CONFIG,
   getBlacklistedAssets,
@@ -422,5 +643,8 @@ export default {
   resetOrderVelocity,
   validateRiskCeiling,
   requestTwoStageConfirmation,
-  validateAndConsumeConfirmation
+  validateAndConsumeConfirmation,
+  isSameSideEntry,
+  checkPositionUniqueness,
+  checkPositionUniquenessLive
 };

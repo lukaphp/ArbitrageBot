@@ -31,7 +31,7 @@ export const MCP_TOOLS_DEFINITIONS = [
   },
   {
     name: 'place_order_paper',
-    description: 'Piazza un ordine di trading paper validando i guardrail di rischio (leva <= 5x, account exposure, blacklist, cooldown, daily loss limit).',
+    description: "Piazza un ordine di trading paper validando i guardrail di rischio (leva <= 5x, account exposure, blacklist, cooldown, daily loss limit). Un ingresso nello STESSO verso di una posizione già aperta sul mercato del bot è rifiutato: se il segnale è già stato agito l'azione corretta è HOLD, non un nuovo ordine. Un ordine di verso opposto è sempre accettato (riduzione/chiusura).",
     inputSchema: {
       type: 'object',
       properties: {

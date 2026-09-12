@@ -19,6 +19,8 @@ import {
   checkOrderVelocity,
   recordOrderExecution,
   validateRiskCeiling,
+  checkPositionUniqueness,
+  checkPositionUniquenessLive,
   requestTwoStageConfirmation,
   validateAndConsumeConfirmation,
   GUARDRAILS_CONFIG
@@ -280,6 +282,8 @@ export async function handleBotControl({ bot_id, action }) {
  * Esegue un ordine paper con Protocollo Guardrails Pre-Flight:
  * - Instruction Override (Blacklist check)
  * - Order Velocity Gate (Cooldown anti-loop)
+ * - Position Uniqueness Gate (no doppio ingresso nello stesso verso su bot+coin),
+ *   su due sorgenti: riga `positions` in DB e posizioni dell'account paper
  * - Risk Ceiling Hard-Gate (Max Leverage <= 5x, Account Exposure <= maxPositionUsd, Daily Loss Limit)
  */
 export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = null, leverage = null }) {
@@ -329,6 +333,19 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
     return { success: false, error: velocityCheck.error, message: velocityCheck.error };
   }
 
+  // GUARDRAIL 3: POSITION UNIQUENESS GATE — LIVELLO 1 (posizione tracciata in DB)
+  // Prima del prezzo e del Risk Ceiling: è una lettura sincrona in DB e non serve
+  // nessun dato di mercato per sapere che il segnale è già stato agito — fail-fast,
+  // stesso principio del Budget Ceiling in bot.js. Il verso opposto (riduzione o
+  // chiusura) passa e prosegue normalmente. Il livello 2 (stato dell'account) è
+  // più sotto, appena le posizioni sono disponibili: qui non lo si può anticipare
+  // senza pagare un fetch che questo livello spesso rende inutile.
+  const uniquenessCheck = checkPositionUniqueness({ botId: bot_id, coin, side: normalizedSide });
+  if (!uniquenessCheck.ok) {
+    logMcpAudit('place_order_paper', { bot_id, coin, side, size, error: uniquenessCheck.error, guardrail: 'position_uniqueness', success: false });
+    return { success: false, error: uniquenessCheck.error, message: uniquenessCheck.error };
+  }
+
   try {
     // Ottiene il prezzo di mercato corrente o usa entry_price fornito
     let px = parseFloat(entry_price);
@@ -341,7 +358,11 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
       return { success: false, message: msg };
     }
 
-    // Recupera lo stato paper e il daily PnL del bot/account
+    // Recupera lo stato paper e il daily PnL del bot/account.
+    // Nessun `.catch()` qui di proposito: se la lettura dell'account fallisce,
+    // l'eccezione arriva al catch in fondo e l'ordine NON viene eseguito. È il
+    // fail-closed che serve al guardrail qui sotto — con lo stato dell'account
+    // ignoto non si apre niente.
     const paperAccount = await paperBroker.getAccount(masterAddress, network);
     const today = new Date().toISOString().split('T')[0];
     const botInstance = botManager.bots.get(bot_id);
@@ -349,7 +370,26 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
       ? botInstance.dailyPnl
       : db.getDailyPnl(bot_id, today);
 
-    // GUARDRAIL 3: RISK CEILING HARD-GATE
+    // GUARDRAIL 4: POSITION UNIQUENESS GATE — LIVELLO 2 (stato dell'account)
+    // Il livello 1 legge la riga `positions`, che questo percorso NON scrive: su
+    // un bot fermo, pilotato solo dall'agente, quella riga non esiste mai e il
+    // duplicato passerebbe. Qui la sorgente è l'account (fonte di verità sulla
+    // posizione, lo stesso criterio di `bot._reconcile`). Le posizioni si passano
+    // GREZZE: se la lista è assente il cancello blocca invece di dedurre "nessuna
+    // posizione" (vedi checkPositionUniquenessLive).
+    const liveUniquenessCheck = checkPositionUniquenessLive({
+      botId: bot_id,
+      coin,
+      side: normalizedSide,
+      accountPositions: paperAccount.positions
+    });
+
+    if (!liveUniquenessCheck.ok) {
+      logMcpAudit('place_order_paper', { bot_id, coin, side, size, error: liveUniquenessCheck.error, guardrail: 'position_uniqueness', success: false });
+      return { success: false, error: liveUniquenessCheck.error, message: liveUniquenessCheck.error };
+    }
+
+    // GUARDRAIL 5: RISK CEILING HARD-GATE
     // (Max Leverage <= 5x, Account Exposure <= maxPositionUsd, Daily Loss Limit)
     const riskCeilingCheck = validateRiskCeiling({
       botRow,

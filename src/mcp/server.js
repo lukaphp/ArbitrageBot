@@ -60,7 +60,7 @@ export function createArbitrageBotMcpServer() {
   // 2. Tool: place_order_paper
   server.tool(
     'place_order_paper',
-    'Piazza un ordine di trading paper validando i guardrail di rischio (leva <= 5x, account exposure, blacklist, cooldown, daily loss limit).',
+    "Piazza un ordine di trading paper validando i guardrail di rischio (leva <= 5x, account exposure, blacklist, cooldown, daily loss limit). Un ingresso nello STESSO verso di una posizione già aperta sul mercato del bot è rifiutato: se il segnale è già stato agito l'azione corretta è HOLD, non un nuovo ordine. Un ordine di verso opposto è sempre accettato (riduzione/chiusura).",
     {
       bot_id: z.string().describe('UUID del bot che invia l\'ordine'),
       side: z.enum(['long', 'short']).describe("Direzione dell'operazione: 'long' o 'short'"),

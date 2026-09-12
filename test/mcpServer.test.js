@@ -2,7 +2,7 @@
  * UNIT TESTS: ARBITRAGEBOT MCP SERVER & PROTOCOLLO GUARDRAILS
  * ==========================================================
  *
- * Valida i 5 tools del Server MCP e i 4 cancelli di pre-flight validation del Protocollo Guardrails:
+ * Valida i 5 tools del Server MCP e i 5 cancelli di pre-flight validation del Protocollo Guardrails:
  * 1. bot_control (start, stop, restart, crash safeguard)
  * 2. place_order_paper (Risk Ceiling, Order Velocity, Blacklist)
  * 3. get_system_snapshot (aggregated totals, bot list, open positions, alerts)
@@ -11,6 +11,8 @@
  * 6. Guardrail Hard-Gates (Max Leverage <= 5x, Account Exposure, Daily Loss Limit)
  * 7. Guardrail Order Velocity Gate (Cooldown anti-loop)
  * 8. Guardrail Instruction Override (Blacklist check)
+ * 8-bis. Guardrail Position Uniqueness Gate, due livelli (riga `positions` in DB e stato dell'account
+ *        paper): no doppio ingresso nello stesso verso, il verso opposto passa sempre
  * 9. Audit logging con actor 'hermes_mcp_call'
  * 10. JSON-RPC 2.0 transport (initialize, tools/list, tools/call)
  */
@@ -25,6 +27,7 @@ import db from '../src/db/database.js';
 import botManager from '../src/perps/botManager.js';
 import riskAgent from '../src/agents/riskAgent.js';
 import client from '../src/perps/hyperliquidClient.js';
+import paperBroker from '../src/perps/paperBroker.js';
 import {
   handleBotControl,
   handlePlaceOrderPaper,
@@ -257,16 +260,190 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     // Rimuove da blacklist
     removeBlacklistedAsset('SOL-PERP');
 
+    // L'ordine di controllo è SHORT, non LONG come prima, e il motivo va detto:
+    // il subtest 3 ha lasciato una posizione paper LONG su questo bot+coin,
+    // quindi un secondo LONG oggi viene respinto — correttamente — dal Position
+    // Uniqueness Gate. Verificando il verso opposto si esercita ancora la
+    // rimozione dalla blacklist (che è ciò che questo subtest misura, ed è
+    // indifferente al verso) senza intersecare un altro cancello e senza
+    // dipendere da quanto ha lasciato dietro il subtest precedente.
     resetOrderVelocity(testBotId);
     const allowedOrder = await handlePlaceOrderPaper({
       bot_id: testBotId,
-      side: 'long',
+      side: 'short',
       size: 1.0,
       entry_price: 50.0
     });
-    if (!allowedOrder.success) console.error('SUBTEST 4 ALLOWED ORDER ERROR:', allowedOrder);
-    assert.equal(allowedOrder.success, true);
+    assert.equal(allowedOrder.success, true, allowedOrder.message);
+
+    // Contro-prova che il verde qui sopra dipenda davvero dalla blacklist e non
+    // dal verso: rimesso l'asset in blacklist, lo stesso ordine torna a cadere
+    // sul cancello della blacklist.
+    addBlacklistedAsset('SOL-PERP');
     resetOrderVelocity(testBotId);
+    const blacklistedAgain = await handlePlaceOrderPaper({
+      bot_id: testBotId,
+      side: 'short',
+      size: 1.0,
+      entry_price: 50.0
+    });
+    assert.equal(blacklistedAgain.success, false);
+    assert.match(blacklistedAgain.message, /GUARDRAIL_VIOLATION: Asset Blacklisted/i);
+    removeBlacklistedAsset('SOL-PERP');
+
+    resetOrderVelocity(testBotId);
+  });
+
+  /**
+   * POSITION UNIQUENESS GATE.
+   *
+   * Il loop interno del bot è già protetto (`_runTick`: se `this.position` è
+   * valorizzato il tick fa solo `_manageOpen`, mai `_openPosition`). Il percorso
+   * MCP no: con un segnale PERSISTENTE (es. MACD ribassista che resta valido per
+   * più candele) l'agente esterno richiama `place_order_paper` a ogni nuova
+   * candela, l'Order Velocity Gate — che guarda solo l'orologio, cooldown 10s —
+   * lascia passare, e l'esposizione si accumula fino al tetto di `maxPositionUsd`
+   * invece di fermarsi alla prima apertura.
+   *
+   * Il verso OPPOSTO deve restare permesso: è la via d'uscita (riduzione /
+   * chiusura manuale). Un cancello che bloccasse anche quello trasformerebbe una
+   * posizione in una trappola.
+   *
+   * I DUE LIVELLI SONO TESTATI SEPARATAMENTE, con bot e indirizzi paper dedicati.
+   * Sul bot condiviso della suite non si potrebbe: arriva qui con una posizione
+   * paper lasciata dai subtest precedenti, quindi un rifiuto sarebbe attribuibile
+   * indifferentemente al livello DB o al livello account — il test sarebbe verde
+   * senza dire quale dei due funziona. Ogni asserzione controlla anche la
+   * SORGENTE citata nel messaggio ('riga #' = DB, 'rilevata sull'account' =
+   * stato del broker), che è l'unico modo di distinguerli dall'esterno.
+   */
+  await t.test('4-bis. Position Uniqueness Gate — livello 1: posizione tracciata in DB', async () => {
+    const dbLevelBotId = 'test-mcp-uniq-db-' + Date.now();
+    db.insertBot({
+      id: dbLevelBotId,
+      name: 'MCP Uniqueness DB Bot',
+      coin: 'SOL-PERP',
+      network: 'testnet',
+      masterAddress: '0x0000000000000000000000000000000000000a11',
+      config: { leverage: 2, maxPositionUsd: 5000, maxDailyLossUsd: 200 },
+      status: 'stopped'
+    });
+    botManager.loadFromDb();
+    resetOrderVelocity(dbLevelBotId);
+
+    // Stato di partenza: posizione SHORT aperta e TRACCIATA in DB (è la riga che
+    // scrivono `bot._openPosition` / `bot._reconcile`). L'account paper di questo
+    // indirizzo è invece vuoto, quindi qui può rispondere solo il livello 1.
+    const openPosId = db.insertPosition({
+      botId: dbLevelBotId, coin: 'SOL-PERP', side: 'short',
+      size: 1.0, entryPx: 50.0, leverage: 2
+    });
+
+    const tradesBefore = db.listTrades(500).filter(tr => tr.bot_id === dbLevelBotId).length;
+
+    // 4-bis.1 Secondo ingresso nello STESSO verso: rifiutato (hold forzato).
+    const duplicateEntry = await handlePlaceOrderPaper({
+      bot_id: dbLevelBotId, side: 'short', size: 1.0, entry_price: 50.0
+    });
+    assert.equal(duplicateEntry.success, false);
+    assert.match(duplicateEntry.message, /GUARDRAIL_VIOLATION: Position Uniqueness/i);
+    assert.match(duplicateEntry.message, new RegExp(`riga #${openPosId}`), 'il rifiuto deve venire dal livello DB, citando la riga');
+
+    // Il rifiuto è fail-fast: nessun ordine eseguito, quindi nessun trade
+    // registrato. Senza questo controllo il test passerebbe anche se il
+    // guardrail bloccasse la RISPOSTA dopo aver già mandato l'ordine al broker.
+    const tradesAfter = db.listTrades(500).filter(tr => tr.bot_id === dbLevelBotId).length;
+    assert.equal(tradesAfter, tradesBefore, 'un ordine bloccato non deve lasciare trade in DB');
+
+    // 4-bis.2 Verso OPPOSTO: permesso (riduzione/chiusura).
+    // Passa anche il velocity gate: l'ordine rifiutato sopra non ha consumato il
+    // cooldown, proprio perché non è mai stato eseguito.
+    const closingOrder = await handlePlaceOrderPaper({
+      bot_id: dbLevelBotId, side: 'long', size: 1.0, entry_price: 50.0
+    });
+    assert.equal(closingOrder.success, true, closingOrder.message);
+
+    // 4-bis.3 PASSAGGIO DI CONSEGNE FRA I DUE LIVELLI. La riga in DB è chiusa,
+    // quindi il livello 1 non vede più niente — ma l'ordine appena eseguito ha
+    // lasciato una posizione LONG sull'account, e un secondo LONG deve comunque
+    // essere rifiutato. Prima della (a) questo ordine passava.
+    db.updatePosition(openPosId, { status: 'closed', closed_at: Date.now() });
+    resetOrderVelocity(dbLevelBotId);
+    const duplicateAfterDbClose = await handlePlaceOrderPaper({
+      bot_id: dbLevelBotId, side: 'long', size: 1.0, entry_price: 50.0
+    });
+    assert.equal(duplicateAfterDbClose.success, false);
+    assert.match(duplicateAfterDbClose.message, /GUARDRAIL_VIOLATION: Position Uniqueness/i);
+    assert.match(duplicateAfterDbClose.message, /rilevata sull'account/, 'senza riga in DB il rifiuto deve venire dal livello account');
+
+    resetOrderVelocity(dbLevelBotId);
+    try { db.deleteBot(dbLevelBotId); } catch { /* cleanup best-effort */ }
+  });
+
+  /**
+   * LIVELLO 2 — lo scenario esatto segnalato dall'utente, riprodotto: bot FERMO
+   * pilotato solo dall'agente via MCP. Qui non esiste NESSUNA riga `positions`
+   * (questo percorso registra un trade e muove il broker, non scrive posizioni),
+   * quindi il livello 1 non può scattare: se il duplicato viene respinto è per
+   * forza il livello account. La verifica sul numero di righe in `positions` è
+   * ciò che rende il test onesto — senza, un verde qui non distinguerebbe i due
+   * livelli e potrebbe passare per il motivo sbagliato.
+   */
+  await t.test('4-ter. Position Uniqueness Gate — livello 2: bot fermo, posizione solo sul broker', async () => {
+    const liveBotId = 'test-mcp-uniq-live-' + Date.now();
+    const liveMaster = '0x0000000000000000000000000000000000000a12';
+    db.insertBot({
+      id: liveBotId,
+      name: 'MCP Uniqueness Live Bot',
+      coin: 'ETH-PERP',
+      network: 'testnet',
+      masterAddress: liveMaster,
+      config: { leverage: 2, maxPositionUsd: 500000, maxDailyLossUsd: 10000 },
+      status: 'stopped'
+    });
+    botManager.loadFromDb();
+
+    // Tre ordini SHORT identici, con il cooldown azzerato tra l'uno e l'altro:
+    // è il segnale persistente che si ripresenta a ogni candela, ben oltre i 10s
+    // dell'Order Velocity Gate. Il tetto di esposizione è alto di proposito, così
+    // un eventuale rifiuto non può venire dal Risk Ceiling.
+    const outcomes = [];
+    for (let i = 0; i < 3; i++) {
+      resetOrderVelocity(liveBotId);
+      const res = await handlePlaceOrderPaper({
+        bot_id: liveBotId, side: 'short', size: 1.0, entry_price: 50.0
+      });
+      outcomes.push(res);
+    }
+
+    assert.equal(outcomes[0].success, true, outcomes[0].message);
+    for (const res of outcomes.slice(1)) {
+      assert.equal(res.success, false);
+      assert.match(res.message, /GUARDRAIL_VIOLATION: Position Uniqueness/i);
+      assert.match(res.message, /rilevata sull'account/);
+    }
+
+    // Nessuna riga in `positions`: conferma che il livello 1 non c'entra nulla
+    // con i due rifiuti qui sopra.
+    const rows = db.listPositions(500).filter(p => p.bot_id === liveBotId);
+    assert.equal(rows.length, 0, 'il percorso MCP non scrive righe positions: i rifiuti vengono dal livello account');
+
+    // La posizione NON si è accumulata: è la grandezza che il bug faceva crescere
+    // (size 3 invece di 1). Questa è l'asserzione che misura il sintomo.
+    const acc = await paperBroker.getAccount(liveMaster, 'testnet');
+    const pos = (acc.positions || []).find(p => p.coin === 'ETH-PERP' || p.coin === 'ETH');
+    assert.ok(pos, 'il primo ordine deve aver aperto una posizione');
+    assert.equal(Math.abs(Number(pos.size)), 1.0, 'la posizione deve restare quella del primo ordine, non accumularsi');
+
+    // Il verso opposto resta la via d'uscita anche a questo livello.
+    resetOrderVelocity(liveBotId);
+    const exitOrder = await handlePlaceOrderPaper({
+      bot_id: liveBotId, side: 'long', size: 1.0, entry_price: 50.0
+    });
+    assert.equal(exitOrder.success, true, exitOrder.message);
+
+    resetOrderVelocity(liveBotId);
+    try { db.deleteBot(liveBotId); } catch { /* cleanup best-effort */ }
   });
 
   await t.test('5. get_system_snapshot - Restituisce snapshot consolidato', async () => {

@@ -71,7 +71,7 @@ export const MCP_TOOLS_DEFINITIONS = [
       type: 'object',
       properties: {
         bot_id: { type: 'string', description: 'UUID del bot da riconfigurare' },
-        params: { type: 'object', description: 'Dizionario chiave-valore con i nuovi parametri' },
+        params: { type: 'object', description: 'Dizionario chiave-valore con i nuovi parametri. I blocchi annidati (risk, sizing, tp, sl, trailing, dca) vengono FUSI un livello in profondità: i campi non nominati restano invariati. Per sostituire o azzerare un blocco intero passa un valore non-oggetto (es. risk: null).' },
         confirmation_token: { type: 'string', description: 'Token di conferma ricevuto allo stadio 1 (obbligatorio per confermare ed applicare le modifiche)' }
       },
       required: ['bot_id', 'params']

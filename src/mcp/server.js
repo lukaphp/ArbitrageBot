@@ -115,7 +115,7 @@ export function createArbitrageBotMcpServer() {
     'Modifica i parametri di strategia del bot nel DB SQLite con conferma a due stadi (60s) e ricarica della cache runtime.',
     {
       bot_id: z.string().describe('UUID del bot da riconfigurare'),
-      params: z.record(z.any()).describe('Dizionario chiave-valore con i nuovi parametri (es. { leverage: 5, maxPositionUsd: 1000, takeProfitPct: 0.02 })'),
+      params: z.record(z.any()).describe('Dizionario chiave-valore con i nuovi parametri (es. { leverage: 5, maxPositionUsd: 1000, takeProfitPct: 0.02 }). I blocchi annidati (risk, sizing, tp, sl, trailing, dca) vengono FUSI un livello in profondità: i campi non nominati restano invariati. Per sostituire o azzerare un blocco intero passa un valore non-oggetto (es. risk: null).'),
       confirmation_token: z.string().optional().describe('Token di conferma ricevuto allo stadio 1 (obbligatorio per confermare ed applicare le modifiche entro 60s)')
     },
     async ({ bot_id, params, confirmation_token }) => {

@@ -27,7 +27,8 @@ import {
   handleEmergencyShutdown,
   handleUpdateStrategyParams,
   handleRegisterBot,
-  handleDeleteBot
+  handleDeleteBot,
+  mergeStrategyConfig
 } from '../src/mcp/tools.js';
 import {
   resetOrderVelocity,
@@ -334,6 +335,65 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     assert.equal(okDynamic.status, 'confirmation_required');
   });
 
+  await t.test('7-bis. update_strategy_params: un blocco annidato parziale non cancella i campi che non nomina', async () => {
+    // Il merge era shallow: `params.risk = { useDynamicSizing: true }` sostituiva
+    // l'INTERO oggetto risk e portava via maxPositionUsd/maxLeverage, cioè il
+    // tetto di rischio PER BOT, in silenzio. Restava solo il cap globale.
+    const nestedBotId = 'test-mcp-nested-' + Date.now();
+    db.insertBot({
+      id: nestedBotId,
+      name: 'MCP Nested Merge Bot',
+      coin: 'SOL-PERP',
+      network: 'testnet',
+      masterAddress: '0x000000000000000000000000000000000000dEaD',
+      config: {
+        leverage: 2,
+        risk: { maxPositionUsd: 500, maxLeverage: 3, useDynamicSizing: false },
+        sizing: { mode: 'percent', value: 10 },
+        entryRules: [{ type: 'price', op: '>', value: 1 }]
+      },
+      status: 'stopped',
+      linked_agent_id: 'hermes_agent_01',
+      actor_label: 'Hermes',
+      actor_id: 'hermes_agent_01',
+      is_managed_by_agent: 1
+    });
+    botManager.loadFromDb();
+
+    const params = { risk: { useDynamicSizing: true, riskPerTradePct: 1.5 } };
+    const prompt = await handleUpdateStrategyParams({ bot_id: nestedBotId, params });
+    assert.equal(prompt.status, 'confirmation_required');
+
+    const res = await handleUpdateStrategyParams({
+      bot_id: nestedBotId, params, confirmation_token: prompt.confirmation_token
+    });
+    assert.equal(res.success, true);
+
+    const risk = res.data.current_config.risk;
+    assert.equal(risk.maxPositionUsd, 500, 'il tetto per-bot non deve sparire perché non è stato nominato');
+    assert.equal(risk.maxLeverage, 3);
+    assert.equal(risk.useDynamicSizing, true, 'il campo aggiornato vale il nuovo valore');
+    assert.equal(risk.riskPerTradePct, 1.5, 'il campo nuovo è presente');
+    // Gli altri blocchi restano intatti, e la verifica è sul DB, non solo sulla
+    // risposta: è la config persistita quella con cui il bot opera domani.
+    assert.deepEqual(res.data.current_config.sizing, { mode: 'percent', value: 10 });
+    const persisted = JSON.parse(db.getBot(nestedBotId).config_json);
+    assert.equal(persisted.risk.maxPositionUsd, 500);
+    assert.equal(persisted.risk.riskPerTradePct, 1.5);
+
+    // Sostituire un blocco per intero resta possibile: `risk: null` è il modo
+    // legittimo di azzerarlo, e non deve diventare un merge.
+    const p2 = { risk: null };
+    const prompt2 = await handleUpdateStrategyParams({ bot_id: nestedBotId, params: p2 });
+    const res2 = await handleUpdateStrategyParams({
+      bot_id: nestedBotId, params: p2, confirmation_token: prompt2.confirmation_token
+    });
+    assert.equal(res2.success, true);
+    assert.equal(res2.data.current_config.risk, null, 'un valore non-oggetto sostituisce, non fonde');
+
+    try { db.deleteBot(nestedBotId); } catch {}
+  });
+
   await t.test('8. Audit Logging - Registrazione chiamate con actor hermes_mcp_call', async () => {
     const audits = db.listAudit(30);
     const hermesCalls = audits.filter(a => a.actor === 'hermes_mcp_call');
@@ -439,4 +499,69 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     await handleBotControl({ bot_id: testBotId, action: 'stop' });
     db.deleteBot(testBotId);
   } catch {}
+});
+
+/**
+ * Merge della config di strategia — funzione pura, testata in isolamento
+ * (passare dalle due conferme MCP per verificare l'aritmetica di un merge
+ * sarebbe un test lento che fallisce per dieci motivi diversi da quello che
+ * dichiara). Il contratto è: UN livello di profondità, oggetto su oggetto.
+ */
+test('mergeStrategyConfig: oggetto su oggetto fonde, tutto il resto sostituisce', () => {
+  const current = {
+    leverage: 2,
+    risk: { maxPositionUsd: 500, maxLeverage: 3, useDynamicSizing: false },
+    sizing: { mode: 'percent', value: 10 },
+    entryRules: [{ type: 'price', op: '>', value: 1 }],
+    dca: { steps: 2, stepPercent: 1 }
+  };
+
+  // Oggetto su oggetto: i campi non nominati sopravvivono.
+  const fuso = mergeStrategyConfig(current, { risk: { useDynamicSizing: true, riskPerTradePct: 1.5 } });
+  assert.deepEqual(fuso.risk, {
+    maxPositionUsd: 500, maxLeverage: 3, useDynamicSizing: true, riskPerTradePct: 1.5
+  });
+  assert.deepEqual(fuso.sizing, current.sizing, 'i blocchi non nominati restano identici');
+  assert.equal(fuso.leverage, 2);
+
+  // Primitivi: sostituiscono, come già oggi.
+  assert.equal(mergeStrategyConfig(current, { leverage: 5 }).leverage, 5);
+
+  // Array: sostituiscono in blocco, mai elemento per elemento — un entryRules
+  // fuso a metà sarebbe una strategia che nessuno ha scritto.
+  const nuoveRegole = [{ type: 'funding', op: '<', value: 0 }];
+  assert.deepEqual(mergeStrategyConfig(current, { entryRules: nuoveRegole }).entryRules, nuoveRegole);
+
+  // Valore non-oggetto su un blocco: sostituisce (è il modo di azzerarlo).
+  assert.equal(mergeStrategyConfig(current, { risk: null }).risk, null);
+  assert.equal(mergeStrategyConfig(current, { dca: 0 }).dca, 0);
+
+  // Oggetto su un valore che oggetto non è: sostituisce, niente merge inventato.
+  assert.deepEqual(mergeStrategyConfig({ tp: 'percent' }, { tp: { enabled: true } }), { tp: { enabled: true } });
+
+  // Chiavi nuove entrano normalmente.
+  assert.deepEqual(mergeStrategyConfig({}, { trailing: { enabled: true } }).trailing, { enabled: true });
+
+  // UN livello, dichiarato: il secondo livello sostituisce, non si fonde.
+  const annidato = mergeStrategyConfig(
+    { tp: { enabled: true, ladder: { a: 1 } } },
+    { tp: { ladder: { b: 2 } } }
+  );
+  assert.deepEqual(annidato.tp, { enabled: true, ladder: { b: 2 } });
+});
+
+test('mergeStrategyConfig: non muta né la config esistente né i parametri', () => {
+  const current = { risk: { maxPositionUsd: 500 } };
+  const params = { risk: { riskPerTradePct: 1 } };
+  const out = mergeStrategyConfig(current, params);
+  assert.deepEqual(current, { risk: { maxPositionUsd: 500 } }, 'la config di partenza resta intatta');
+  assert.deepEqual(params, { risk: { riskPerTradePct: 1 } });
+  out.risk.maxPositionUsd = 1;
+  assert.equal(current.risk.maxPositionUsd, 500, 'il blocco fuso è una copia, non un alias');
+});
+
+test('mergeStrategyConfig: params assente o non oggetto lascia la config com\'è', () => {
+  const current = { leverage: 2, risk: { maxPositionUsd: 500 } };
+  assert.deepEqual(mergeStrategyConfig(current, null), current);
+  assert.deepEqual(mergeStrategyConfig(current, undefined), current);
 });

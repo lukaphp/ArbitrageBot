@@ -24,6 +24,51 @@ import {
   GUARDRAILS_CONFIG
 } from './guardrails.js';
 
+/** Oggetto "semplice": né null, né array, né istanza esotica. */
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * Fonde i parametri di `update_strategy_params` nella config esistente,
+ * scendendo di UN livello sui blocchi annidati.
+ *
+ * Perché non basta lo spread. La config di strategia è fatta di blocchi
+ * (`risk`, `sizing`, `tp`, `sl`, `trailing`, `dca`) e uno spread shallow li
+ * sostituisce interi: `params.risk = { useDynamicSizing: true }` cancellava
+ * `maxPositionUsd`/`maxLeverage`/`maxDailyLossUsd` di quel bot, cioè il tetto
+ * di rischio PER BOT, senza dirlo a nessuno. Restava in piedi il solo cap
+ * globale di HYPERLIQUID_CONFIG, quindi non una posizione senza limiti — ma un
+ * limite che l'operatore credeva di avere e non aveva più. Un agente che
+ * aggiorna un singolo campo non sta chiedendo di azzerare gli altri.
+ *
+ * Un livello e non ricorsivo, di proposito: la profondità serve ai blocchi di
+ * primo livello, e una fusione ricorsiva renderebbe impossibile sostituire un
+ * sotto-oggetto per intero senza prima svuotarlo campo per campo.
+ *
+ * Restano SOSTITUZIONI integrali, perché sono richieste esplicite e non
+ * aggiornamenti parziali:
+ *  - un valore non-oggetto (`risk: null`) — è il modo legittimo di azzerare un
+ *    blocco, e interpretarlo come merge toglierebbe all'agente il solo modo di
+ *    cancellarlo;
+ *  - gli array (`entryRules`) — una lista di regole fusa elemento per elemento
+ *    sarebbe una strategia che nessuno ha scritto;
+ *  - il caso in cui la config attuale NON ha un oggetto su quella chiave.
+ *
+ * Funzione pura, esportata: si verifica in isolamento, senza passare dalle due
+ * conferme MCP.
+ */
+export function mergeStrategyConfig(currentConfig, params) {
+  const base = isPlainObject(currentConfig) ? currentConfig : {};
+  if (!isPlainObject(params)) return { ...base };
+
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(params)) {
+    merged[key] = (isPlainObject(base[key]) && isPlainObject(value))
+      ? { ...base[key], ...value }
+      : value;
+  }
+  return merged;
+}
+
 /**
  * Registra una chiamata MCP nell'audit log del database.
  */
@@ -57,9 +102,8 @@ export function logMcpAudit(toolName, detail = {}) {
  * @returns stringa `GUARDRAIL_VIOLATION: …` se qualcosa non va, altrimenti null
  */
 export function validateDynamicSizingParams(source) {
-  const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-  if (!isObj(source)) return null;
-  const nested = isObj(source.risk) ? source.risk : {};
+  if (!isPlainObject(source)) return null;
+  const nested = isPlainObject(source.risk) ? source.risk : {};
   const pick = (key) => (nested[key] !== undefined ? nested[key] : source[key]);
 
   const useDynamicSizing = pick('useDynamicSizing');
@@ -641,10 +685,10 @@ export async function handleUpdateStrategyParams({ bot_id, params, confirmation_
   try {
     const currentConfig = extractBotConfig(botRow);
 
-    const mergedConfig = {
-      ...currentConfig,
-      ...params
-    };
+    // Merge profondo di UN livello: aggiornare un campo dentro `risk` (o
+    // `sizing`/`tp`/`sl`/`trailing`/`dca`) non deve cancellare gli altri campi
+    // dello stesso blocco. Vedi `mergeStrategyConfig`.
+    const mergedConfig = mergeStrategyConfig(currentConfig, params);
 
     // Aggiornamento atomico nel DB e ricaricamento runtime tramite botManager.updateBot
     const updatedState = await botManager.updateBot(bot_id, {

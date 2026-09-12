@@ -1288,7 +1288,18 @@ export class PerpsBot {
   _diagRule(rule, ctx) {
     const { price, candles, funding } = ctx;
     const num = n => (n == null || isNaN(n)) ? null : n;
-    const fmt = n => n == null ? '—' : (Math.abs(n) >= 1000 ? n.toFixed(0) : n.toFixed(2));
+    // `fmt` deve reggere gli stessi input di `num`: i valori che gli arrivano non
+    // sono solo indicatori già filtrati, ma anche gap calcolati al volo come
+    // `Math.abs(cur - target)`. Con una regola priva di soglia quel gap è `NaN`, e
+    // `NaN == null` è `false`: senza il guard su isNaN si finiva su `NaN.toFixed(2)`
+    // e la card Monitor mostrava "deve scendere di NaN pt". Stesso segnaposto '—'
+    // già usato altrove in questo metodo per "valore non disponibile".
+    const fmt = n => (n == null || isNaN(n)) ? '—' : (Math.abs(n) >= 1000 ? n.toFixed(0) : n.toFixed(2));
+    // Soglia mostrata COM'È configurata, senza arrotondare. Serve al funding, che
+    // si legge sulla quarta cifra decimale (0.0001 = 0.01%): passarlo da `fmt` lo
+    // ridurrebbe a "0.00" e la pill direbbe una cosa falsa. Stesso guard di
+    // `fmt`/`num`, così una soglia mancante dà '—' e non la stringa "undefined".
+    const thr = v => (v == null || isNaN(v)) ? '—' : v;
     const cmp = (a, op, b) => {
       if (a == null || isNaN(a)) return null;
       return op === '<' ? a < b : op === '>' ? a > b : op === '<=' ? a <= b : op === '>=' ? a >= b : op === '==' ? a === b : null;
@@ -1308,7 +1319,7 @@ export class PerpsBot {
     }
     if (rule.type === 'funding') {
       const met = cmp(funding, rule.op, rule.value);
-      return { ...base, label: 'Funding', current: funding == null ? '—' : (funding * 100).toFixed(4) + '%', target: `${rule.op} ${rule.value}`, met: !!met, hint: gapHint(funding, rule.op, rule.value) };
+      return { ...base, label: 'Funding', current: (funding == null || isNaN(funding)) ? '—' : (funding * 100).toFixed(4) + '%', target: `${rule.op} ${thr(rule.value)}`, met: !!met, hint: gapHint(funding, rule.op, rule.value) };
     }
     if (rule.type === 'external') {
       // La coda dei segnali è ora leggibile senza consumarla (QUAL-01 item 1):
@@ -1328,12 +1339,12 @@ export class PerpsBot {
         case 'rsi': {
           const v = num(ind.rsi(candles, p || 14));
           const met = cmp(v, rule.op, rule.value);
-          return { ...base, label: `RSI(${p || 14})`, current: fmt(v), target: `${rule.op} ${rule.value}`, met: !!met, hint: gapHint(v, rule.op, rule.value, ' pt') };
+          return { ...base, label: `RSI(${p || 14})`, current: fmt(v), target: `${rule.op} ${fmt(rule.value)}`, met: !!met, hint: gapHint(v, rule.op, rule.value, ' pt') };
         }
         case 'adx': {
           const v = num(ind.adx(candles, p || 14));
           const met = cmp(v, rule.op, rule.value);
-          return { ...base, label: `ADX(${p || 14})`, current: fmt(v), target: `${rule.op} ${rule.value}`, met: !!met, hint: gapHint(v, rule.op, rule.value, ' pt') };
+          return { ...base, label: `ADX(${p || 14})`, current: fmt(v), target: `${rule.op} ${fmt(rule.value)}`, met: !!met, hint: gapHint(v, rule.op, rule.value, ' pt') };
         }
         case 'ema':
         case 'sma': {

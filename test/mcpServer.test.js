@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import db from '../src/db/database.js';
 import botManager from '../src/perps/botManager.js';
 import riskAgent from '../src/agents/riskAgent.js';
+import client from '../src/perps/hyperliquidClient.js';
 import {
   handleBotControl,
   handlePlaceOrderPaper,
@@ -40,6 +41,20 @@ import {
   executeMcpTool,
   MCP_TOOLS_DEFINITIONS
 } from '../src/mcp/httpTransport.js';
+
+// ROOT CAUSE (CI-02): `paperBroker.placeMarketOrder` chiama SEMPRE
+// `client.getMid` per il prezzo di fill, anche quando chi chiama ha già un
+// `entry_price` (usato solo per il guardrail di rischio, mai passato
+// all'esecuzione). In locale quella chiamata esce sul vero endpoint
+// Hyperliquid e funziona; in CI l'egress allowlist di harden-runner blocca
+// `api.hyperliquid*.xyz` (non è tra i domini elencati in .github/workflows/*
+// .yml) e la richiesta fallisce con "No response received from the server"
+// dopo i retry — deterministico, non un flake di rete generico. Riprodotto e
+// verificato in isolamento simulando il blocco prima di questo fix.
+// Stesso identico problema già risolto in test/paperBroker.test.js con lo
+// stesso mock: nessun ordine che arriva a `placeMarketOrder` deve dipendere
+// da una rete esterna raggiungibile.
+client.getMid = async () => 50.0;
 
 test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes', async (t) => {
   db.ensure();

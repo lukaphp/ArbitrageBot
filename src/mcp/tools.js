@@ -37,6 +37,67 @@ export function logMcpAudit(toolName, detail = {}) {
 }
 
 /**
+ * Guardrail applicativo sui parametri del SIZING DINAMICO ATR
+ * (`config.risk.useDynamicSizing` e compagni).
+ *
+ * Perché serve qui e non basta lo schema di strategia: `register_bot` e
+ * `update_strategy_params` dichiarano la config come `z.record(z.any())`, cioè
+ * un agente può scriverci dentro qualunque cosa. Un `riskPerTradePct: 500`
+ * accettato in silenzio non è un errore di battitura innocuo — è una posizione
+ * dimensionata cinque volte l'equity; un `atrMultiplier: 0` è una divisione per
+ * zero che a valle diventa un NaN. `riskManager.sizePosition` degrada al sizing
+ * statico invece di lanciare (il warmup delle candele è un caso normale),
+ * quindi senza questo cancello il valore assurdo resterebbe nella config a
+ * tempo indeterminato, segnalato solo da un warn per tick.
+ *
+ * Legge i campi da `source.risk` (la forma vera della config) e, in subordine,
+ * dallo stesso livello di `leverage`/`maxPositionUsd`, che gli altri guardrail
+ * di questo file leggono già piatti.
+ *
+ * @returns stringa `GUARDRAIL_VIOLATION: …` se qualcosa non va, altrimenti null
+ */
+export function validateDynamicSizingParams(source) {
+  const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  if (!isObj(source)) return null;
+  const nested = isObj(source.risk) ? source.risk : {};
+  const pick = (key) => (nested[key] !== undefined ? nested[key] : source[key]);
+
+  const useDynamicSizing = pick('useDynamicSizing');
+  if (useDynamicSizing !== undefined && typeof useDynamicSizing !== 'boolean') {
+    return `GUARDRAIL_VIOLATION: useDynamicSizing deve essere true o false (ricevuto: ${JSON.stringify(useDynamicSizing)}).`;
+  }
+
+  const riskPerTradePct = pick('riskPerTradePct');
+  if (riskPerTradePct != null) {
+    const v = Number(riskPerTradePct);
+    if (!Number.isFinite(v) || v <= 0 || v > 100) {
+      return `GUARDRAIL_VIOLATION: riskPerTradePct non valido: ${riskPerTradePct}. Deve essere un numero > 0 e <= 100 (percentuale di equity a rischio per trade).`;
+    }
+  }
+
+  const atrMultiplier = pick('atrMultiplier');
+  if (atrMultiplier != null) {
+    const v = Number(atrMultiplier);
+    if (!Number.isFinite(v) || v <= 0) {
+      return `GUARDRAIL_VIOLATION: atrMultiplier non valido: ${atrMultiplier}. Deve essere un numero > 0.`;
+    }
+  }
+
+  // `atrPeriod` si legge SOLO da `risk`: al livello superiore `config.atrPeriod`
+  // è un campo preesistente e diverso (il periodo ATR di TP/SL/trailing), e non
+  // è questa la storia in cui iniziare a rifiutarlo.
+  const atrPeriod = nested.atrPeriod;
+  if (atrPeriod != null) {
+    const v = Number(atrPeriod);
+    if (!Number.isInteger(v) || v < 2) {
+      return `GUARDRAIL_VIOLATION: atrPeriod non valido: ${atrPeriod}. Deve essere un intero >= 2.`;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Notifica il processo Express HTTP di sincronizzare botManager dal DB.
  *
  * Necessario quando il tool MCP gira in un processo Stdio separato (es. Hermes
@@ -545,6 +606,11 @@ export async function handleUpdateStrategyParams({ bot_id, params, confirmation_
       return { success: false, error: err, message: err };
     }
   }
+  const dynamicSizingErr = validateDynamicSizingParams(params);
+  if (dynamicSizingErr) {
+    logMcpAudit('update_strategy_params', { bot_id, params, error: dynamicSizingErr, guardrail: 'dynamic_sizing', success: false });
+    return { success: false, error: dynamicSizingErr, message: dynamicSizingErr };
+  }
 
   // Se non viene fornito il token di conferma (Stadio 1)
   if (!confirmation_token) {
@@ -671,6 +737,13 @@ export async function handleRegisterBot({
       const err = 'GUARDRAIL_VIOLATION: maxPositionUsd deve essere un numero positivo.';
       return { success: false, error: err, message: err };
     }
+  }
+
+  // Pre-flight Guardrail 3: parametri del sizing dinamico ATR
+  const dynamicSizingErr = validateDynamicSizingParams(parsedConfig);
+  if (dynamicSizingErr) {
+    logMcpAudit('register_bot', { name, coin: normalizedCoin, error: dynamicSizingErr, guardrail: 'dynamic_sizing', success: false });
+    return { success: false, error: dynamicSizingErr, message: dynamicSizingErr };
   }
 
   db.ensure();

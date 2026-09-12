@@ -210,6 +210,60 @@ test('validateStrategyConfig accetta una config con chiavi extra che non conosce
     'una config valida non deve essere rifiutata solo perché ha campi opzionali in più');
 });
 
+// ---------- config.risk: parametri del sizing dinamico ATR ----------
+//
+// Stessa disciplina del resto del file: si RIFIUTA, non si aggiusta. Un
+// riskPerTradePct di 500 importato in silenzio dimensionerebbe una posizione
+// cinque volte l'equity, e nessuno avrebbe chiesto quella strategia.
+
+test('config.risk valido (sizing dinamico) → accettato', () => {
+  const cfg = { ...goodConfig(), risk: { useDynamicSizing: true, riskPerTradePct: 1.5, atrMultiplier: 2, atrPeriod: 21 } };
+  assert.deepEqual(validateStrategyConfig(cfg), []);
+});
+
+test('config.risk non oggetto → rifiutato', () => {
+  assert.ok(validateStrategyConfig({ ...goodConfig(), risk: 'alto' }).length);
+});
+
+test('risk.useDynamicSizing non booleano → rifiutato', () => {
+  for (const v of ['true', 1, null]) {
+    assert.ok(validateStrategyConfig({ ...goodConfig(), risk: { useDynamicSizing: v } }).length,
+      `useDynamicSizing ${JSON.stringify(v)} deve essere rifiutato`);
+  }
+});
+
+test('risk.riskPerTradePct fuori da (0, 100] → rifiutato', () => {
+  for (const v of [0, -1, 100.1, 500, NaN, '2']) {
+    assert.ok(validateStrategyConfig({ ...goodConfig(), risk: { riskPerTradePct: v } }).length,
+      `riskPerTradePct ${String(v)} deve essere rifiutato`);
+  }
+  assert.deepEqual(validateStrategyConfig({ ...goodConfig(), risk: { riskPerTradePct: 100 } }), [],
+    '100% è il limite superiore incluso');
+});
+
+test('risk.atrMultiplier non positivo → rifiutato', () => {
+  for (const v of [0, -1.5, NaN, '1.5']) {
+    assert.ok(validateStrategyConfig({ ...goodConfig(), risk: { atrMultiplier: v } }).length,
+      `atrMultiplier ${String(v)} deve essere rifiutato`);
+  }
+});
+
+test('risk.atrPeriod non intero >= 2 → rifiutato', () => {
+  for (const v of [1, 0, -5, 14.5, '14']) {
+    assert.ok(validateStrategyConfig({ ...goodConfig(), risk: { atrPeriod: v } }).length,
+      `atrPeriod ${String(v)} deve essere rifiutato`);
+  }
+  assert.deepEqual(validateStrategyConfig({ ...goodConfig(), risk: { atrPeriod: 2 } }), []);
+});
+
+test('config.risk con i soli campi preesistenti resta accettato (nessuna regressione)', () => {
+  // maxPositionUsd/maxLeverage/maxDailyLossUsd sono letti da riskManager.checkLimits
+  // e non sono mai stati validati qui: il blocco nuovo non deve iniziare a
+  // rifiutare config che oggi passano.
+  const cfg = { ...goodConfig(), risk: { maxPositionUsd: 1500, maxLeverage: 5, maxDailyLossUsd: 200 } };
+  assert.deepEqual(validateStrategyConfig(cfg), []);
+});
+
 // ---------- lista nuda (quello che invia la UI) ----------
 
 test('lista nuda di items (forma inviata dalla UI): stessa validazione', () => {

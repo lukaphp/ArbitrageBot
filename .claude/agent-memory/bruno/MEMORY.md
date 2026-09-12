@@ -2,6 +2,7 @@
 
 - [Place-then-cancel, sempre](feedback_place-then-cancel.md) — il nuovo trigger prima della cancellazione del vecchio; pattern di SEC-01
 - [Stato posizione: immutabile vs corrente](feedback_stato-posizione-immutabile-vs-corrente.md) — ingresso originale ≠ prezzo medio, e `trailing_json` in merge mai in overwrite
+- [`npm test` non termina (arm64)](project_npm-test-non-termina.md) — rebuild nativo, `--test-force-exit`, e il baseline dei 4 rossi pre-esistenti
 - [Seam di test del repo](feedback_seam-di-test.md) — paperBroker, DB temporaneo, mock.timers, CLI a processo figlio; e verifica che il test falliresse col bug
 - [Nessun fallimento silenzioso sul money path](feedback_fallimenti-money-path-non-silenziosi.md) — log **e** notifica, una per episodio non per tentativo
 - [Invarianti nel DB, non nel chiamante](feedback_invarianti-nel-db-non-nel-chiamante.md) — "crea se non esiste" dentro un metodo sincrono; il pattern di SEC-08

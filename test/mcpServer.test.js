@@ -286,6 +286,52 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     });
     assert.equal(invalidLev.success, false);
     assert.match(invalidLev.message, /GUARDRAIL_VIOLATION: Leva non valida/i);
+
+    // Sizing dinamico ATR: parametri fuori range rifiutati PRIMA della conferma.
+    // Un riskPerTradePct di 500 non è un errore di battitura innocuo — è una
+    // posizione dimensionata cinque volte l'equity, e senza questo cancello
+    // arriverebbe nella config senza che nessuno l'abbia mai vista.
+    const badRiskPct = await handleUpdateStrategyParams({
+      bot_id: testBotId,
+      params: { risk: { useDynamicSizing: true, riskPerTradePct: 500 } }
+    });
+    assert.equal(badRiskPct.success, false);
+    assert.notEqual(badRiskPct.status, 'confirmation_required',
+      'un parametro invalido non deve nemmeno arrivare allo stadio di conferma');
+    assert.match(badRiskPct.message, /GUARDRAIL_VIOLATION/i);
+    assert.match(badRiskPct.message, /riskPerTradePct/i);
+
+    const badMultiplier = await handleUpdateStrategyParams({
+      bot_id: testBotId,
+      params: { risk: { atrMultiplier: 0 } }
+    });
+    assert.equal(badMultiplier.success, false);
+    assert.match(badMultiplier.message, /GUARDRAIL_VIOLATION/i);
+    assert.match(badMultiplier.message, /atrMultiplier/i);
+
+    const badPeriod = await handleUpdateStrategyParams({
+      bot_id: testBotId,
+      params: { risk: { atrPeriod: 1.5 } }
+    });
+    assert.equal(badPeriod.success, false);
+    assert.match(badPeriod.message, /GUARDRAIL_VIOLATION/i);
+    assert.match(badPeriod.message, /atrPeriod/i);
+
+    const badFlag = await handleUpdateStrategyParams({
+      bot_id: testBotId,
+      params: { risk: { useDynamicSizing: 'si' } }
+    });
+    assert.equal(badFlag.success, false);
+    assert.match(badFlag.message, /GUARDRAIL_VIOLATION/i);
+    assert.match(badFlag.message, /useDynamicSizing/i);
+
+    // Valori validi: il tool deve tornare a comportarsi normalmente (stadio 1),
+    // altrimenti il cancello starebbe bloccando anche l'uso legittimo.
+    const okDynamic = await handleUpdateStrategyParams({
+      bot_id: testBotId,
+      params: { risk: { useDynamicSizing: true, riskPerTradePct: 1.5, atrMultiplier: 2, atrPeriod: 21 } }
+    });
+    assert.equal(okDynamic.status, 'confirmation_required');
   });
 
   await t.test('8. Audit Logging - Registrazione chiamate con actor hermes_mcp_call', async () => {
@@ -329,6 +375,23 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     assert.equal(blacklisted.success, false);
     assert.match(blacklisted.message, /GUARDRAIL_VIOLATION: Asset Blacklisted/i);
     removeBlacklistedAsset('AVAX-PERP');
+
+    // 10.2-bis Sizing dinamico ATR con parametri fuori range: nessun bot creato.
+    for (const [label, risk] of [
+      ['riskPerTradePct', { useDynamicSizing: true, riskPerTradePct: 0 }],
+      ['atrMultiplier', { useDynamicSizing: true, atrMultiplier: -1 }],
+      ['atrPeriod', { useDynamicSizing: true, atrPeriod: 1 }],
+      ['useDynamicSizing', { useDynamicSizing: 'yes' }]
+    ]) {
+      const res = await handleRegisterBot({
+        name: `Dynamic Sizing Bot ${label}`,
+        coin: 'BTC-PERP',
+        config: { leverage: 2, risk }
+      });
+      assert.equal(res.success, false, `${label}: la registrazione doveva essere rifiutata`);
+      assert.match(res.message, /GUARDRAIL_VIOLATION/i);
+      assert.match(res.message, new RegExp(label, 'i'));
+    }
 
     // 10.3 Creazione valida
     const regRes = await handleRegisterBot({

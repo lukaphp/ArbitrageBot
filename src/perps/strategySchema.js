@@ -170,6 +170,32 @@ export function validateStrategyConfig(config, { prefix = '' } = {}) {
     if (blk.mode !== undefined && !['percent', 'absolute', 'atr'].includes(blk.mode)) at(`config.${key}.mode non riconosciuto: ${blk.mode}.`);
   }
 
+  // Parametri del SIZING DINAMICO ATR (config.risk). Volutamente NON si
+  // toccano `maxPositionUsd`/`maxLeverage`/`maxDailyLossUsd`, che vivono nello
+  // stesso oggetto ma non sono mai stati validati qui: iniziare a rifiutarli
+  // ora farebbe fallire import di file che oggi passano, e non è questa la
+  // storia. Stessa regola del resto del file: si rifiuta, non si aggiusta —
+  // un riskPerTradePct di 500 importato in silenzio dimensionerebbe una
+  // posizione cinque volte l'equity.
+  if (config.risk !== undefined) {
+    const r = config.risk;
+    if (!isPlainObject(r)) at('config.risk deve essere un oggetto.');
+    else {
+      if (r.useDynamicSizing !== undefined && typeof r.useDynamicSizing !== 'boolean') {
+        at(`risk.useDynamicSizing deve essere true o false: ${JSON.stringify(r.useDynamicSizing)}.`);
+      }
+      if (r.riskPerTradePct !== undefined && (!Number.isFinite(r.riskPerTradePct) || r.riskPerTradePct <= 0 || r.riskPerTradePct > 100)) {
+        at(`risk.riskPerTradePct non valido: ${r.riskPerTradePct} (atteso un numero > 0 e <= 100, è una percentuale dell'equity a rischio per trade).`);
+      }
+      if (r.atrMultiplier !== undefined && (!Number.isFinite(r.atrMultiplier) || r.atrMultiplier <= 0)) {
+        at(`risk.atrMultiplier non valido: ${r.atrMultiplier} (atteso un numero > 0).`);
+      }
+      if (r.atrPeriod !== undefined && (!Number.isInteger(r.atrPeriod) || r.atrPeriod < 2)) {
+        at(`risk.atrPeriod non valido: ${r.atrPeriod} (atteso un intero >= 2).`);
+      }
+    }
+  }
+
   if (config.dca !== undefined) {
     const d = config.dca;
     if (!isPlainObject(d)) at('config.dca deve essere un oggetto.');

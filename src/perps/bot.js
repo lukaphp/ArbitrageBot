@@ -17,7 +17,7 @@ import execQueue from './execQueue.js';
 import paperBroker from './paperBroker.js';
 import marketData from './marketData.js';
 import strategyEngine from './strategyEngine.js';
-import riskManager from './riskManager.js';
+import riskManager, { DYNAMIC_SIZING_DEFAULTS } from './riskManager.js';
 import portfolio from './portfolio.js';
 import notifier from './notifier.js';
 import predictor from './predictor.js';
@@ -329,7 +329,15 @@ export class PerpsBot {
     const leverage = this.config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage;
 
     const equity = account.equity ?? account.accountValue;
-    const plan = riskManager.sizePosition(this.config, equity, snapshot.price, szDecimals);
+    // Sizing dinamico ATR (opt-in): l'ATR si calcola qui — I/O e dati di
+    // mercato stanno nel bot, la formula in riskManager. Il periodo è quello
+    // del sizing, che può essere diverso da quello di TP/SL (vedi
+    // `_dynamicSizingAtrPeriod`). Con il flag spento non si calcola nulla e il
+    // comportamento resta identico a prima.
+    const atrForSizing = this.config.risk?.useDynamicSizing
+      ? ind.atr(snapshot.candles || [], this._dynamicSizingAtrPeriod())
+      : undefined;
+    const plan = riskManager.sizePosition(this.config, equity, snapshot.price, szDecimals, { atr: atrForSizing });
     plan.leverage = leverage;
 
     const check = riskManager.checkLimits(this.config, account, plan, this.dailyPnl);
@@ -525,6 +533,23 @@ export class PerpsBot {
   _usesAtr() {
     const c = this.config;
     return c.sl?.mode === 'atr' || c.tp?.mode === 'atr' || c.trailing?.mode === 'atr';
+  }
+
+  /**
+   * Periodo ATR usato dal SIZING dinamico. È deliberatamente separato da quello
+   * di TP/SL/trailing: `config.risk.atrPeriod` ha la precedenza e vale SOLO
+   * qui, così si può misurare la volatilità per dimensionare la posizione su
+   * una finestra diversa da quella su cui si mette lo stop, senza spostare
+   * l'una cambiando l'altra. Se non è valorizzato si ricade sul periodo
+   * generale della strategia, e infine sul default.
+   *
+   * Risolto in un metodo perché lo usano DUE percorsi (l'apertura e il calcolo
+   * del warmup): due risoluzioni copiate divergerebbero, e la conseguenza
+   * sarebbe un bot dichiarato "pronto" mentre il sizing ricade in silenzio su
+   * quello statico per mancanza di candele.
+   */
+  _dynamicSizingAtrPeriod() {
+    return this.config.risk?.atrPeriod || this.config.atrPeriod || DYNAMIC_SIZING_DEFAULTS.atrPeriod;
   }
 
   /**
@@ -1196,9 +1221,18 @@ export class PerpsBot {
     // nessuna regola risulta soddisfatta. `candlesNeed` include l'ATR quando la
     // strategia usa stop/trailing adattivi, che hanno lo stesso problema.
     const atrWarmup = this._usesAtr() ? (this.config.atrPeriod || 14) + 1 : 0;
+    // Il sizing dinamico ATR ha lo stesso problema di warmup, ma un periodo
+    // proprio: senza candele a sufficienza `sizePosition` ricade sul sizing
+    // statico (loggato, mai silenzioso) e il bot aprirebbe con una regola
+    // diversa da quella configurata. Contarlo qui fa sì che la diagnostica lo
+    // dica PRIMA, invece di lasciare il warn di riskManager come unico segnale.
+    // Check separato da `_usesAtr()` di proposito: quello decide se calcolare
+    // l'ATR per TP/SL, e allargarlo confonderebbe due domande diverse.
+    const sizingAtrWarmup = this.config.risk?.useDynamicSizing ? this._dynamicSizingAtrPeriod() + 1 : 0;
     const candlesNeed = Math.max(
       ind.warmupCandles(this.config.entryRules || [], this.config.exitRules || []),
-      atrWarmup
+      atrWarmup,
+      sizingAtrWarmup
     );
     const candlesHave = ctx.candles.length;
 

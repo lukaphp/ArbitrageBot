@@ -17,7 +17,7 @@ import execQueue from './execQueue.js';
 import paperBroker from './paperBroker.js';
 import marketData from './marketData.js';
 import strategyEngine from './strategyEngine.js';
-import riskManager from './riskManager.js';
+import riskManager, { DYNAMIC_SIZING_DEFAULTS } from './riskManager.js';
 import portfolio from './portfolio.js';
 import notifier from './notifier.js';
 import predictor from './predictor.js';
@@ -46,6 +46,19 @@ export class PerpsBot {
       ? JSON.parse(record.config_json)
       : (record.config || {});
     this.onUpdate = onUpdate || (() => {});
+
+    // AGENT-AWARE: chi controlla questo bot.
+    // Letto dalla riga DB (dopo migrazione v4 è sempre presente, default 'user_manual').
+    this.linked_agent_id = record.linked_agent_id || record.actor_id || 'user_manual';
+    this.actor_label = record.actor_label || null;
+    this.actor_id = record.actor_id || record.linked_agent_id || null;
+    this.is_managed_by_agent = Boolean(record.is_managed_by_agent || (this.linked_agent_id && this.linked_agent_id.toLowerCase().includes('hermes')));
+
+    // Budget Ceiling: limite massimo di notional USD per apertura. null = nessun limite.
+    // Il valore dal DB prevale; in alternativa può essere nel config (retrocompat).
+    this.maxAllocationUsd = record.max_allocation_usd != null
+      ? Number(record.max_allocation_usd)
+      : (this.config.max_allocation_usd != null ? Number(this.config.max_allocation_usd) : null);
 
     // Broker di esecuzione: reale (client) o simulato (paperBroker) se paper-mode.
     // I prezzi/segnali restano sempre reali e live; solo l'esecuzione è simulata.
@@ -249,7 +262,19 @@ export class PerpsBot {
       // Posizione non più sull'exchange: TP o SL scattati, oppure chiusura da
       // fuori. `null` = «deducilo dai fill», mentre gli oid dei trigger sono
       // ancora in memoria (vedi _registerClose/_classifyCloseFills).
-      await this._registerClose(null, this.position.lastUnrealized || 0);
+      const coin = this.coin;
+      const side = this.position.side;
+      const closeReason = await this._registerClose(null, this.position.lastUnrealized || 0);
+
+      // La deduzione non è riuscita: nessun fill spiega la sparizione (non
+      // ancora visibili, senza oid, o posizione senza trigger tracciati). In DB
+      // resta la stringa generica, ma nei log questa chiusura era finora
+      // indistinguibile da un TP riconosciuto — e sono due situazioni diverse:
+      // qui il bot NON sa cosa è successo ai suoi soldi. Il warn è l'unico posto
+      // in cui il dubbio è visibile mentre sta accadendo.
+      if (closeReason === CLOSE_REASON_UNRESOLVED) {
+        logger.warn(`Bot ${this.name}: chiusura NON spiegata di ${side} ${coin} — nessun fill riconducibile ai trigger del bot (${CLOSE_REASON_UNRESOLVED}). PnL registrato dall'ultimo unrealized noto, non dai fill.`);
+      }
     } else if (livePos && this.position) {
       this.position.size = livePos.size;
       this.position.lastUnrealized = livePos.unrealizedPnl;
@@ -316,7 +341,15 @@ export class PerpsBot {
     const leverage = this.config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage;
 
     const equity = account.equity ?? account.accountValue;
-    const plan = riskManager.sizePosition(this.config, equity, snapshot.price, szDecimals);
+    // Sizing dinamico ATR (opt-in): l'ATR si calcola qui — I/O e dati di
+    // mercato stanno nel bot, la formula in riskManager. Il periodo è quello
+    // del sizing, che può essere diverso da quello di TP/SL (vedi
+    // `_dynamicSizingAtrPeriod`). Con il flag spento non si calcola nulla e il
+    // comportamento resta identico a prima.
+    const atrForSizing = this.config.risk?.useDynamicSizing
+      ? ind.atr(snapshot.candles || [], this._dynamicSizingAtrPeriod())
+      : undefined;
+    const plan = riskManager.sizePosition(this.config, equity, snapshot.price, szDecimals, { atr: atrForSizing });
     plan.leverage = leverage;
 
     const check = riskManager.checkLimits(this.config, account, plan, this.dailyPnl);
@@ -365,6 +398,23 @@ export class PerpsBot {
         this._lastCooldownNotifyUntil = pf.cooldownUntil;
         notifier.notify(`⏸️ <b>${this.name}</b>: ${pf.reason}`);
       }
+      return;
+    }
+
+    // AGENT-AWARE — Budget Ceiling (CRIT-BUDGET).
+    // Fail-fast e senza effetti collaterali: eseguito PRIMA del lock di apertura
+    // (stessa filosofia di CRIT-03) così non lascia tracce in caso di blocco.
+    // `plan.notionalUsd` è il valore nozionale dell'apertura pianificata (size * prezzo).
+    if (this.maxAllocationUsd != null && plan.notionalUsd > this.maxAllocationUsd) {
+      logger.warn(
+        `Bot ${this.name}: apertura bloccata dal Budget Ceiling — ` +
+        `notional ${plan.notionalUsd.toFixed(2)} USD > limite ${this.maxAllocationUsd} USD`
+      );
+      this.lastEval = {
+        action: 'hold',
+        reason: `Budget Ceiling: notional ${plan.notionalUsd.toFixed(2)} USD supera il limite di ${this.maxAllocationUsd} USD`,
+        ts: Date.now()
+      };
       return;
     }
 
@@ -495,6 +545,23 @@ export class PerpsBot {
   _usesAtr() {
     const c = this.config;
     return c.sl?.mode === 'atr' || c.tp?.mode === 'atr' || c.trailing?.mode === 'atr';
+  }
+
+  /**
+   * Periodo ATR usato dal SIZING dinamico. È deliberatamente separato da quello
+   * di TP/SL/trailing: `config.risk.atrPeriod` ha la precedenza e vale SOLO
+   * qui, così si può misurare la volatilità per dimensionare la posizione su
+   * una finestra diversa da quella su cui si mette lo stop, senza spostare
+   * l'una cambiando l'altra. Se non è valorizzato si ricade sul periodo
+   * generale della strategia, e infine sul default.
+   *
+   * Risolto in un metodo perché lo usano DUE percorsi (l'apertura e il calcolo
+   * del warmup): due risoluzioni copiate divergerebbero, e la conseguenza
+   * sarebbe un bot dichiarato "pronto" mentre il sizing ricade in silenzio su
+   * quello statico per mancanza di candele.
+   */
+  _dynamicSizingAtrPeriod() {
+    return this.config.risk?.atrPeriod || this.config.atrPeriod || DYNAMIC_SIZING_DEFAULTS.atrPeriod;
   }
 
   /**
@@ -1070,6 +1137,11 @@ export class PerpsBot {
    *   mio controllo, deducila dai fill» — vedi `_classifyCloseFills`. La
    *   deduzione va fatta ORA, mentre gli oid dei trigger sono ancora in memoria:
    *   a posteriori, sullo storico già chiuso, il dato non è più ricostruibile.
+   *
+   * @returns il `close_reason` scritto in DB (`undefined` se non c'era una
+   *   posizione da chiudere). Serve al chiamante per distinguere una chiusura
+   *   riconosciuta da una rimasta irrisolta senza ricalcolare la deduzione —
+   *   vedi il warn in `_reconcile`.
    */
   async _registerClose(reason, fallbackPnl = 0) {
     if (!this.position) return;
@@ -1120,6 +1192,8 @@ export class PerpsBot {
       notifier.notify(`🛑 <b>${this.name}</b>: limite perdita giornaliera raggiunto, bot fermato.`, { urgent: true });
       this.stop();
     }
+
+    return closeReason;
   }
 
   getState() {
@@ -1128,6 +1202,11 @@ export class PerpsBot {
     return {
       id: this.id, name: this.name, coin: this.coin, network: this.network,
       status: this.status, inPosition: !!this.position, paper: this.paper,
+      linked_agent_id: this.linked_agent_id,
+      actor_label: this.actor_label,
+      actor_id: this.actor_id,
+      is_managed_by_agent: this.is_managed_by_agent,
+      max_allocation_usd: this.maxAllocationUsd,
       position: this.position, dailyPnl: this.dailyPnl,
       lastEval: this.lastEval, lastError: this.lastError, config: this.config,
       lastTickAt: this.lastTickAt, tickErrors: this.tickErrors,
@@ -1161,9 +1240,18 @@ export class PerpsBot {
     // nessuna regola risulta soddisfatta. `candlesNeed` include l'ATR quando la
     // strategia usa stop/trailing adattivi, che hanno lo stesso problema.
     const atrWarmup = this._usesAtr() ? (this.config.atrPeriod || 14) + 1 : 0;
+    // Il sizing dinamico ATR ha lo stesso problema di warmup, ma un periodo
+    // proprio: senza candele a sufficienza `sizePosition` ricade sul sizing
+    // statico (loggato, mai silenzioso) e il bot aprirebbe con una regola
+    // diversa da quella configurata. Contarlo qui fa sì che la diagnostica lo
+    // dica PRIMA, invece di lasciare il warn di riskManager come unico segnale.
+    // Check separato da `_usesAtr()` di proposito: quello decide se calcolare
+    // l'ATR per TP/SL, e allargarlo confonderebbe due domande diverse.
+    const sizingAtrWarmup = this.config.risk?.useDynamicSizing ? this._dynamicSizingAtrPeriod() + 1 : 0;
     const candlesNeed = Math.max(
       ind.warmupCandles(this.config.entryRules || [], this.config.exitRules || []),
-      atrWarmup
+      atrWarmup,
+      sizingAtrWarmup
     );
     const candlesHave = ctx.candles.length;
 

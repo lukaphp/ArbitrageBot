@@ -66,6 +66,18 @@ export function composeEquity({ accountValue = 0, spotTotal = 0, spotHold = 0 } 
   };
 }
 
+/**
+ * Default del sizing dinamico ATR. Esportati perché il valore è un contratto
+ * condiviso: `bot.js` risolve lo stesso periodo per il warmup delle candele, e
+ * la UI/gli agenti devono poter mostrare cosa succede quando il campo è omesso,
+ * invece di ricopiare i numeri a mano in tre posti.
+ */
+export const DYNAMIC_SIZING_DEFAULTS = {
+  riskPerTradePct: 1.0,
+  atrMultiplier: 1.5,
+  atrPeriod: 14
+};
+
 class RiskManager {
   /** Arrotonda la size al numero di decimali consentito dal mercato. */
   roundSize(size, szDecimals = 3) {
@@ -93,9 +105,30 @@ class RiskManager {
    * scatterebbe MAI perché ogni confronto con NaN è falso: l'ordine
    * verrebbe comunque respinto dall'exchange, ma senza nessun segnale
    * chiaro nei log fino a quel punto. Meglio fallire rumorosamente qui.
+   *
+   * SIZING DINAMICO (ATR-based), opt-in per bot con `config.risk.useDynamicSizing`.
+   * Risponde a una domanda diversa da quella statica: non «quanta parte
+   * dell'equity impegno» ma «quanto perdo se il prezzo si muove contro di me
+   * quanto si muove normalmente». Il rischio in USD (`equity ×
+   * riskPerTradePct%`) diviso per la distanza di stop (`atr × atrMultiplier`)
+   * dà direttamente le unità di coin — quindi in regime volatile la posizione
+   * si riduce da sola, a parità di rischio accettato.
+   *
+   * Due proprietà volute, che il ramo statico non ha: la leva NON entra nella
+   * size (incide solo sul margine impegnato), e il cap `maxPositionUsd` resta
+   * sovrano identico per entrambi i rami — è l'ultimo controllo, non uno dei due.
+   *
+   * L'ATR arriva dal chiamante (`bot.js`) e non viene calcolato qui: questa
+   * funzione resta pura e condivisa col backtester. Se non è disponibile —
+   * caso ATTESO, il warmup delle candele — si degrada al sizing statico con un
+   * `logger.warn`: mai un'eccezione, ma nemmeno un silenzio, perché la
+   * posizione finirebbe dimensionata con una regola diversa da quella
+   * configurata senza che nulla lo dica.
+   *
+   * @param opts.atr ATR corrente sul periodo risolto dal chiamante (opzionale)
    * @returns { size, notionalUsd, marginUsd }
    */
-  sizePosition(config, equity, price, szDecimals = 3) {
+  sizePosition(config, equity, price, szDecimals = 3, { atr } = {}) {
     if (!Number.isFinite(equity) || equity <= 0) {
       throw new Error(`sizePosition: equity non valido (${equity}) — deve essere l'account value totale (depositi + PnL non realizzato), non il margine libero`);
     }
@@ -105,14 +138,33 @@ class RiskManager {
     const leverage = Math.max(1, config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage);
     const sizing = config.sizing || { mode: 'percent', value: 10 };
 
-    let marginUsd;
-    if (sizing.mode === 'fixed') {
-      marginUsd = sizing.value;                       // margine fisso in USD
-    } else {
-      marginUsd = equity * (sizing.value / 100);      // % dell'equity
+    let notionalUsd = null;
+    if (config.risk?.useDynamicSizing === true) {
+      const riskPct = config.risk.riskPerTradePct ?? DYNAMIC_SIZING_DEFAULTS.riskPerTradePct;
+      const atrMult = config.risk.atrMultiplier ?? DYNAMIC_SIZING_DEFAULTS.atrMultiplier;
+      const atrVal = Number(atr);
+      const motivo = !Number.isFinite(atrVal) || atrVal <= 0
+        ? `ATR non disponibile (${atr}) — probabile warmup candele insufficiente`
+        : (!Number.isFinite(riskPct) || riskPct <= 0
+          ? `riskPerTradePct non valido (${config.risk.riskPerTradePct})`
+          : (!Number.isFinite(atrMult) || atrMult <= 0
+            ? `atrMultiplier non valido (${config.risk.atrMultiplier})`
+            : null));
+
+      if (motivo) {
+        logger.warn(`sizePosition: dynamic sizing richiesto ma non applicabile — ${motivo}. Fallback al sizing statico (${sizing.mode} ${sizing.value}).`);
+      } else {
+        // Rischio in USD accettato su questo trade / distanza di stop = coin.
+        notionalUsd = (equity * (riskPct / 100) / (atrVal * atrMult)) * price;
+      }
     }
 
-    let notionalUsd = marginUsd * leverage;
+    if (notionalUsd === null) {
+      const marginUsd = sizing.mode === 'fixed'
+        ? sizing.value                    // margine fisso in USD
+        : equity * (sizing.value / 100);  // % dell'equity
+      notionalUsd = marginUsd * leverage;
+    }
 
     // Cap di sicurezza
     const maxPos = Math.min(

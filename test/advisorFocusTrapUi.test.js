@@ -164,7 +164,12 @@ function loadDrawer({ withPerps = false, available = true, sessions = [] } = {})
       return { ok: true, status: 200, json: async () => body };
     },
     alert: () => {}, confirm: () => true,
-    setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {}
+    setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {},
+    // CI-03: switchCockpitTab() persiste il tab nell'URL (location.hash +
+    // history.replaceState, vedi b54285a) — senza questi due globali il
+    // metodo lancia ReferenceError non appena viene chiamato.
+    location: { hash: '' },
+    history: { replaceState: () => {} }
   };
   sandbox.window.shell = { showToast: () => {} };
   sandbox.globalThis = sandbox;

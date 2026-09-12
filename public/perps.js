@@ -135,6 +135,8 @@ class PerpsApp {
     this.perfMlAccuracySeries = null;
     this.perfMlBaselineSeries = null;
     this.perfMlCoin = null;
+    this.dashboardEquityRange = 'all';
+    this.perfEquityRange = 'all';
     // Stato del wallet MetaMask (ex app.isConnected / app.walletAddress)
     this.walletAddress = null;
     this.isConnected = false;
@@ -317,7 +319,10 @@ class PerpsApp {
     if (!this.socket) this._initSocket();
     await this.initWallet();
     this._initCockpitDashboard();
-    this.switchCockpitTab(this.cockpitTab || 'dashboard');
+    // Ripristina l'ultimo tab dal hash dell'URL (primo), poi da localStorage (fallback)
+    const hashTab = location.hash?.replace('#tab-', '').replace('#', '') || '';
+    const savedTab = hashTab || localStorage.getItem('perps_active_tab') || 'dashboard';
+    this.switchCockpitTab(savedTab);
     await this.loadNetwork();
     await this.loadFxRate();
     await this.loadMarkets();
@@ -327,6 +332,7 @@ class PerpsApp {
     await this.loadNotifications();
     await this.loadAgents();
     await this.refreshRiskSnapshot();
+    await this.loadFills();
     if (!this.accountTimer) {
       this.accountTimer = setInterval(() => {
         if (!document.getElementById('view-perps').classList.contains('hidden')) {
@@ -353,7 +359,115 @@ class PerpsApp {
     this.socket.on('perps:agentStatus', () => { this.refreshAccount(); this.refreshRiskSnapshot(); });
     this.socket.on('perps:position', () => { this.refreshAccount(); this.refreshRiskSnapshot(); if (this.posTab === 'history') this.loadFills(); });
     this.socket.on('perps:fill', () => { this.refreshAccount(); this.refreshRiskSnapshot(); if (this.posTab === 'history') this.loadFills(); });
+
+    // --- Live bot sync da sessioni esterne (MCP, altri browser, API) ---
+    // Aggiunge una card istantaneamente quando un bot viene creato altrove.
+    this.socket.on('perps:botCreate', (state) => {
+      if (!this.bots) this.bots = [];
+      if (!this.bots.find(b => b.id === state.id)) {
+        this.bots.push(state);
+        this._renderBots();
+        this._refreshCockpitDashboard();
+      }
+    });
+    // Rimuove la card istantaneamente quando un bot viene eliminato altrove.
+    this.socket.on('perps:botDelete', ({ id }) => {
+      if (!this.bots) return;
+      this.bots = this.bots.filter(b => b.id !== id);
+      const el = document.getElementById('bot-' + id);
+      if (el) el.remove();
+      if (!this.bots.length) document.getElementById('noBots')?.classList.remove('hidden');
+      this._refreshCockpitDashboard();
+    });
+
+    // --- Feature 1: Live Dashboard Refresh ---
+    // Il server emette questo evento dopo ogni operazione che cambia lo stato
+    // (fill, chiusura posizione, kill switch, watchdog crash/recovery, MCP reload).
+    // Si aggiorna SEMPRE, qualunque tab sia attivo, per ricevere aggiornamenti
+    // da sessioni esterne (altri browser, Hermes MCP, API).
+    // Throttle 150ms: risposta rapida ma protetta da burst multipli.
+    // Se un secondo evento arriva durante il cooldown, viene comunque schedulato
+    // (queued) anziché scartato silenziosamente.
+    let _refreshTimer = null;
+    let _refreshQueued = false;
+    const _doRefresh = async () => {
+      _refreshTimer = null;
+      _refreshQueued = false;
+      await this.loadBots();
+      this.refreshAccount();
+      this.refreshRiskSnapshot();
+    };
+    this.socket.on('perps:dashboardRefresh', () => {
+      if (_refreshTimer) {
+        // Timer già in corso: segna che va rifatto dopo
+        _refreshQueued = true;
+        return;
+      }
+      _refreshTimer = setTimeout(async () => {
+        await _doRefresh();
+        if (_refreshQueued) {
+          // Esegui il refresh in coda
+          _refreshTimer = setTimeout(_doRefresh, 150);
+        }
+      }, 150);
+    });
+
+    // --- Feature 3: Watchdog Crash Alert ---
+    // Il Watchdog server emette questo quando un bot non trocka da troppo tempo.
+    // Mostra un banner rosso sticky sopra la lista bot con possibilità di dismiss.
+    this.socket.on('perps:botCrash', (data) => {
+      this._showCrashBanner(data);
+    });
+
+    // Naviga al tab corretto quando l'utente usa Back/Forward del browser
+    window.addEventListener('popstate', () => {
+      const hashTab = location.hash?.replace('#tab-', '').replace('#', '') || '';
+      if (hashTab) this.switchCockpitTab(hashTab);
+    });
   }
+
+  /**
+   * WATCHDOG UI: mostra un banner rosso nella sezione bot quando il server
+   * rileva che un bot in 'running' non ha aggiornato lastTickAt da oltre soglia.
+   * Auto-dismiss dopo 5 minuti. Max 1 banner per botId (sostituisce il precedente).
+   */
+  _showCrashBanner(data) {
+    const containerId = 'perps-crash-banners';
+    let container = document.getElementById(containerId);
+    if (!container) {
+      // Inserisce il container banner prima della lista bot
+      const botsSection = document.getElementById('bots-list') || document.querySelector('.bots-section');
+      if (!botsSection) return;
+      container = document.createElement('div');
+      container.id = containerId;
+      botsSection.parentNode.insertBefore(container, botsSection);
+    }
+
+    // Rimuove il banner precedente per questo bot (se esiste)
+    const existing = document.getElementById(`crash-banner-${data.botId}`);
+    if (existing) existing.remove();
+
+    const secs = Math.round((data.silentSinceMs || 0) / 1000);
+    const agentLabel = data.linked_agent_id === 'hermes' ? '🤖 Hermes' : '👤 Manuale';
+    const banner = document.createElement('div');
+    banner.id = `crash-banner-${data.botId}`;
+    banner.className = 'crash-alert-banner';
+    banner.innerHTML = `
+      <span class="crash-alert-icon">⚠️</span>
+      <span class="crash-alert-body">
+        <strong>Bot in crash rilevato:</strong> <b>${data.botName}</b> (${data.coin}) 
+        [${agentLabel}] — nessun tick da <b>${secs}s</b>. 
+        Verifica connettività o riavvia il bot.
+      </span>
+      <button class="crash-alert-dismiss" onclick="this.parentElement.remove()" title="Chiudi">✕</button>
+    `;
+    container.appendChild(banner);
+
+    // Auto-dismiss dopo 5 minuti
+    setTimeout(() => banner.remove(), 5 * 60 * 1000);
+  }
+
+
 
   // ---- Cockpit dashboard ----
   _initCockpitDashboard() {
@@ -442,6 +556,14 @@ class PerpsApp {
     const validTabs = ['dashboard', 'execution', 'positions', 'performance', 'risk', 'system'];
     const nextTab = validTabs.includes(tab) ? tab : 'dashboard';
     this.cockpitTab = nextTab;
+
+    // Persiste il tab nell'URL (hash) e in localStorage per sopravvivere al refresh
+    const newHash = `#tab-${nextTab}`;
+    if (location.hash !== newHash) {
+      history.replaceState(null, '', newHash);
+    }
+    try { localStorage.setItem('perps_active_tab', nextTab); } catch {}
+
     document.querySelectorAll('.cockpit-tab').forEach((button) => {
       const isActive = button.id === `cockpit-tab-${nextTab}`;
       button.setAttribute('aria-selected', String(isActive));
@@ -722,21 +844,70 @@ class PerpsApp {
     }
   }
 
+  _filterEquityPointsByRange(points, range = 'all') {
+    if (!Array.isArray(points) || !points.length) return [];
+    if (!range || range === 'all') return points;
+    const rangeSeconds = {
+      '1d': 86400,
+      '7d': 7 * 86400,
+      '30d': 30 * 86400,
+      '90d': 90 * 86400,
+      '365d': 365 * 86400,
+      '1y': 365 * 86400
+    }[range];
+    if (!rangeSeconds) return points;
+    const latestTime = points[points.length - 1]?.time || Math.floor(Date.now() / 1000);
+    const cutoff = latestTime - rangeSeconds;
+    const filtered = points.filter(p => p.time >= cutoff);
+    return filtered.length > 0 ? filtered : [points[points.length - 1]];
+  }
+
+  setDashboardEquityRange(range = 'all') {
+    this.dashboardEquityRange = range;
+    const container = document.getElementById('dashboardEquityRanges');
+    if (container) {
+      container.querySelectorAll('.cockpit-range-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.range === range);
+      });
+    }
+    const note = document.getElementById('dashboardEquityNote');
+    if (note) {
+      const labels = {
+        '1d': '1D · 24 ORE',
+        '7d': '7D · 1 SETTIMANA',
+        '30d': '30D · 1 MESE',
+        '90d': '90D · 3 MESI',
+        '365d': '1A · 1 ANNO',
+        'all': 'TUTTO · STORICO'
+      };
+      note.textContent = `${labels[range] || range.toUpperCase()} · EQUITY CURVE`;
+    }
+    if (this.dashboardSeries) {
+      const data = this._dashboardEquityData();
+      this.dashboardSeries.setData(data);
+      if (data.length) this.dashboardChart?.timeScale().fitContent();
+    }
+  }
+
   _dashboardEquityData() {
+    let points = [];
     const liveHistory = this.riskSnapshot?.equityHistory || [];
-    if (liveHistory.length) return liveHistory.map((point) => ({ time: point.time, value: Number(point.value) }));
-    if (this.riskSnapshot?.account) {
+    if (liveHistory.length) {
+      points = liveHistory.map((point) => ({
+        time: this._toChartTime(point?.time ?? point?.ts),
+        value: Number(point?.value ?? point?.equity)
+      }));
+    } else if (this.riskSnapshot?.account) {
       const value = Number(this.riskSnapshot.account.equity ?? this.riskSnapshot.account.accountValue);
-      if (Number.isFinite(value)) return [{ time: Math.floor((this.riskSnapshot.generatedAt || Date.now()) / 1000), value }];
+      if (Number.isFinite(value)) points = [{ time: Math.floor((this.riskSnapshot.generatedAt || Date.now()) / 1000), value }];
+    } else {
+      const value = Number(this.account?.equity ?? this.account?.accountValue);
+      if (Number.isFinite(value)) {
+        points = [{ time: Math.floor(Date.now() / 1000), value }];
+      }
     }
-    // Senza storico reale il grafico resta VUOTO. In precedenza veniva
-    // sintetizzata una curva in salita da una serie di offset fissi: sembrava
-    // un andamento storico autentico ed era interamente inventata.
-    const value = Number(this.account?.equity ?? this.account?.accountValue);
-    if (Number.isFinite(value)) {
-      return [{ time: Math.floor(Date.now() / 1000), value }];
-    }
-    return [];
+    const sanitized = this._chartSeries(points);
+    return this._filterEquityPointsByRange(sanitized, this.dashboardEquityRange || 'all');
   }
 
   _refreshCockpitDashboard() {
@@ -862,7 +1033,7 @@ class PerpsApp {
     this.perfLoading = true;
     this._setPerfNotice(this.perfData && !force ? null : 'Caricamento dati storici…', 'info');
     try {
-      const data = await this.api('/api/perps/performance');
+      const data = await this.api('/api/perps/performance?limit=5000');
       this.perfData = {
         bots: Array.isArray(data?.bots) ? data.bots : [],
         equityHistory: Array.isArray(data?.equityHistory) ? data.equityHistory : [],
@@ -888,6 +1059,17 @@ class PerpsApp {
     el.textContent = text || '';
     el.hidden = !text;
     el.className = `cockpit-perf-notice cockpit-perf-notice-${kind}`;
+  }
+
+  setPerfEquityRange(range = 'all') {
+    this.perfEquityRange = range;
+    const container = document.getElementById('perfEquityRanges');
+    if (container) {
+      container.querySelectorAll('.cockpit-range-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.range === range);
+      });
+    }
+    this._renderPerformanceEquity();
   }
 
   /**
@@ -922,14 +1104,25 @@ class PerpsApp {
 
   _renderPerformanceEquity() {
     const empty = document.getElementById('perfEquityEmpty');
-    const range = document.getElementById('perfEquityRange');
-    const points = this._chartSeries((this.perfData?.equityHistory || []).map((p) => ({
+    const rangeEl = document.getElementById('perfEquityRange');
+    const rawPoints = this._chartSeries((this.perfData?.equityHistory || []).map((p) => ({
       time: this._toChartTime(p?.time ?? p?.ts), value: Number(p?.value ?? p?.equity)
     })));
+    const points = this._filterEquityPointsByRange(rawPoints, this.perfEquityRange || 'all');
+
     if (empty) empty.hidden = points.length > 0;
-    if (range) {
-      range.textContent = points.length
-        ? `${points.length} campioni · dal ${new Date(points[0].time * 1000).toLocaleDateString('it-IT')}`
+    if (rangeEl) {
+      const rangeLabels = {
+        '1d': 'ultime 24h',
+        '7d': 'ultimi 7gg',
+        '30d': 'ultimi 30gg',
+        '90d': 'ultimi 90gg',
+        '365d': 'ultimo anno',
+        'all': 'tutto lo storico'
+      };
+      const currentRange = rangeLabels[this.perfEquityRange] || this.perfEquityRange || 'tutto lo storico';
+      rangeEl.textContent = points.length
+        ? `${points.length} campioni · ${currentRange} (dal ${new Date(points[0].time * 1000).toLocaleDateString('it-IT')})`
         : '—';
     }
     const el = document.getElementById('perfEquityChart');
@@ -947,6 +1140,13 @@ class PerpsApp {
         lineColor: '#26d07c', topColor: 'rgba(38, 208, 124, 0.24)', bottomColor: 'rgba(38, 208, 124, 0.02)',
         lineWidth: 2, priceLineVisible: false
       });
+      if (window.ResizeObserver) {
+        this.perfResizeObserver = new ResizeObserver(() => {
+          if (!this.perfChart || !el.clientWidth) return;
+          this.perfChart.resize(el.clientWidth, Math.max(el.clientHeight, 214));
+        });
+        this.perfResizeObserver.observe(el);
+      }
     }
     this.perfEquitySeries?.setData(points);
     if (points.length) this.perfChart?.timeScale?.().fitContent();
@@ -956,14 +1156,29 @@ class PerpsApp {
    * Breakdown dei motivi di chiusura. Le chiavi sconosciute vengono mostrate come
    * arrivano (escapate): meglio una etichetta grezza che nascondere trade veri
    * perché il backend ha aggiunto un motivo che questa mappa non conosce.
+   *
+   * Un bucket è però trattato diversamente dagli altri: quello delle posizioni
+   * chiuse dalla riconciliazione DB↔Hyperliquid (bot fermo, posizione sparita
+   * dall'exchange senza che nessun trigger del bot l'abbia chiusa). Non è un
+   * esito di trading come TP o SL — è il segnale che il DB e l'exchange si erano
+   * disallineati, e va letto come un avviso, non come una riga di statistica.
+   * Perciò riceve lo stesso trattamento visivo del badge `⚠️ CRASH` sulla card
+   * del bot (`.bot-status-crashed-badge`), unico avviso già presente in questa UI.
+   *
+   * Il nome del bucket lo decide il backend (`closeReasonBucket()` in
+   * `src/db/database.js`): sta in una costante sola perché rinominarlo resti una
+   * riga da cambiare, non una caccia nel file.
    */
   _renderCloseReasons() {
     const target = document.getElementById('perfCloseReasons');
     if (!target) return;
+    const RECONCILIATION_BUCKET = 'reconciliation_mismatch';
+    const RECONCILIATION_HINT = 'Posizione chiusa dalla riconciliazione: risultava aperta nel database ma non su Hyperliquid. Nessun trigger del bot l\'ha chiusa.';
     const labels = {
       tp: 'Take profit', sl: 'Stop loss', manual: 'Chiusura manuale', dca: 'DCA',
       trailing: 'Trailing stop', liquidation: 'Liquidazione', signal: 'Segnale di uscita',
-      killswitch: 'Kill-switch', unknown: 'Non registrato', other: 'Altro'
+      killswitch: 'Kill-switch', unknown: 'Non registrato', other: 'Altro',
+      [RECONCILIATION_BUCKET]: '⚠️ Disallineato con Hyperliquid'
     };
     const totals = new Map();
     for (const bot of this.perfData?.bots || []) {
@@ -982,7 +1197,10 @@ class PerpsApp {
     target.innerHTML = rows.map(([reason, count]) => {
       const label = labels[reason] || reason;
       const pct = total > 0 ? Math.round((count / total) * 100) : 0;
-      return `<div class="cockpit-metric-row"><span>${this._escapeHtml(label)}</span><strong>${count} · ${pct}%</strong></div>`;
+      const isMismatch = reason === RECONCILIATION_BUCKET;
+      const rowClass = isMismatch ? 'cockpit-metric-row close-reason-mismatch' : 'cockpit-metric-row';
+      const hint = isMismatch ? ` title="${this._escapeHtml(RECONCILIATION_HINT)}"` : '';
+      return `<div class="${rowClass}"${hint}><span>${this._escapeHtml(label)}</span><strong>${count} · ${pct}%</strong></div>`;
     }).join('');
   }
 
@@ -2568,13 +2786,16 @@ class PerpsApp {
   }
 
   async loadFills() {
-    if (!this.connected) return;
     try {
-      const fills = await this.api('/api/perps/fills?address=' + this.address);
+      const url = this.address ? `/api/perps/fills?address=${encodeURIComponent(this.address)}` : '/api/perps/fills';
+      const fills = await this.api(url);
       this._allFills = fills || [];
       this._populateHistBotFilter();
       this.applyHistoryFilter();
-    } catch (e) { this._allFills = []; this._renderFills([]); }
+    } catch {
+      this._allFills = [];
+      this._renderFills([]);
+    }
   }
 
   /** Popola il menu dei bot nel filtro storico (dai nomi presenti nei fill). */
@@ -2637,24 +2858,25 @@ class PerpsApp {
     empty?.classList.add('hidden');
     tbody.innerHTML = fills.map(f => {
       const date = new Date(f.time).toLocaleString('it-IT');
-      const isLong = /Long/i.test(f.dir);
+      const isLong = /Long/i.test(f.dir) || f.side === 'B' || f.side === 'buy';
       const dirClass = isLong ? 'side-badge long' : 'side-badge short';
       const pnl = f.closedPnl;
-      const pnlCell = pnl ? `<span class="${pnl >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(pnl)}</span>` : '—';
+      const pnlCell = pnl != null ? `<span class="${pnl >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(pnl)}</span>` : '—';
       const txLink = f.hash && f.hash !== '0x0000000000000000000000000000000000000000000000000000000000000000'
         ? `<a href="${this._explorerTxUrl(f.hash)}" target="_blank" rel="noopener">🔗</a>` : '—';
       const botCell = f.botName
         ? `<span class="hist-bot">${f.botName === 'Manuale' ? '✋ Manuale' : '🤖 ' + f.botName}</span>`
-        : '<span class="muted">—</span>';
+        : (f.botId ? `<span class="hist-bot">🤖 Bot #${String(f.botId).slice(0, 4)}</span>` : '<span class="muted">—</span>');
+      const paperBadge = f.isPaper ? ' <span class="testnet-badge" style="font-size:.6em;padding:1px 4px;vertical-align:middle">PAPER</span>' : '';
       return `<tr>
         <td>${date}</td>
         <td>${botCell}</td>
-        <td>${f.coin}</td>
-        <td><span class="${dirClass}">${f.dir || (f.side === 'buy' ? 'Buy' : 'Sell')}</span></td>
+        <td>${f.coin}${paperBadge}</td>
+        <td><span class="${dirClass}">${f.dir || (isLong ? 'Buy' : 'Sell')}</span></td>
         <td>${this.fmtNum(f.sz)}</td>
         <td>${this.fmtUsd(f.px)}</td>
         <td>${pnlCell}</td>
-        <td class="muted">${this.fmtUsd(f.fee)}</td>
+        <td class="muted">${this.fmtUsd(f.fee || 0)}</td>
         <td>${txLink}</td>
       </tr>`;
     }).join('');
@@ -2685,7 +2907,10 @@ class PerpsApp {
   // ---- Bots ----
   async loadBots() {
     try {
-      this.bots = await this.api('/api/perps/bots');
+      // AGENT-AWARE: applica il filtro per agent_id se selezionato
+      const agentFilter = this._agentFilter || '';
+      const url = agentFilter ? `/api/perps/bots?agent_id=${encodeURIComponent(agentFilter)}` : '/api/perps/bots';
+      this.bots = await this.api(url);
       // Mappa bot -> strategia AI d'origine (per mostrare da quale proposta nasce)
       try {
         const hist = await this.api('/api/agents/strategy-history');
@@ -2694,6 +2919,12 @@ class PerpsApp {
       } catch { this._botStrategy = this._botStrategy || {}; }
       this._renderBots();
     } catch (e) { /* ignore */ }
+  }
+
+  /** Cambia il filtro agent e ricarica la lista bot. */
+  setAgentFilter(value) {
+    this._agentFilter = value || '';
+    this.loadBots();
   }
 
   _renderBots() {
@@ -2709,12 +2940,97 @@ class PerpsApp {
     list.innerHTML = this.bots.map(b => this._botCardHtml(b)).join('');
   }
 
+  /**
+   * Traduce una singola entryRule JSON grezza in una stringa descrittiva.
+   * Supporta: indicator (rsi, bollinger, ema, sma, price), funding, price_action.
+   * Usato dalla card per mostrare la strategia configurata senza dover chiamare
+   * l'endpoint /monitor (che richiede candele live).
+   */
+  _describeRule(r) {
+    if (!r || !r.type) return '?';
+    const ind = (r.indicator || '').toLowerCase();
+    const p   = r.period || r.params?.period || '';
+    const op  = r.op || '';
+    const val = r.value != null ? r.value : '';
+    const sig = r.signal ? `[${r.signal.toUpperCase()}]` : '';
+
+    if (r.type === 'indicator') {
+      switch (ind) {
+        case 'rsi': {
+          const threshold = val !== '' ? val : (r.signal === 'long' ? 30 : 70);
+          return `RSI(${p || 14}) ${op || (r.signal === 'long' ? '<' : '>')} ${threshold} ${sig}`;
+        }
+        case 'bollinger': {
+          const condMap = {
+            below_lower: 'sotto banda inf',
+            above_upper: 'sopra banda sup',
+            cross_lower: 'incrocio banda inf',
+            cross_upper: 'incrocio banda sup',
+          };
+          const cond = condMap[r.cond] || r.cond || '';
+          return `Bollinger ${cond} ${sig}`;
+        }
+        case 'ema':
+        case 'sma': {
+          const fn = ind.toUpperCase();
+          if (op && val !== '') return `Prezzo ${op} ${fn}(${p || 20}) ${sig}`;
+          return `${fn}(${p || 20}) ${op} ${val} ${sig}`;
+        }
+        case 'price':
+          return `Prezzo ${op} ${val} ${sig}`;
+        default:
+          if (op && val !== '') return `${ind.toUpperCase()}(${p}) ${op} ${val} ${sig}`;
+          return `${ind.toUpperCase()}(${p}) ${sig}`;
+      }
+    }
+    if (r.type === 'funding') {
+      return `Funding ${r.op || '>'} ${r.value ?? 0} ${sig}`;
+    }
+    if (r.type === 'price_action') {
+      return `Price action: ${r.pattern || '—'} ${sig}`;
+    }
+    return `${r.type} ${sig}`;
+  }
+
+  /**
+   * Costruisce la riga "Strategia" della card: pill per ogni regola configurata.
+   * Se non ci sono regole restituisce una stringa muted.
+   */
+  _describeEntryRules(b) {
+    const cfg = b.config || {};
+    const rules = cfg.entryRules || [];
+    if (!rules.length) return '<span class="muted">Nessuna regola configurata</span>';
+    const logic = cfg.logic === 'all' ? '&amp;' : '|';
+    const pills = rules.map(r => {
+      const sig = (r.signal || '').toLowerCase();
+      const cls = sig === 'short' ? 'short' : (sig === 'long' ? 'long' : '');
+      return `<span class="rule-pill ${cls}" title="${JSON.stringify(r).replace(/"/g,'&quot;')}">${this._describeRule(r)}</span>`;
+    });
+    const dir = cfg.direction ? `<span class="muted" style="font-size:.75em">${{ both:'↕', long:'↑', short:'↓' }[cfg.direction] || cfg.direction}</span>` : '';
+    const tf  = cfg.candleInterval ? `<span class="muted rule-pill">${cfg.candleInterval}</span>` : '';
+    return `${pills.join(`<span class="rule-logic">${logic}</span>`)} ${tf}${dir}`;
+  }
+
   _botCardHtml(b) {
     const running = b.status === 'running';
+    const crashed = b.status === 'crashed';
     const pos = b.position
       ? `<span class="side-badge ${b.position.side}">${b.position.side.toUpperCase()} ${this.fmtNum(b.position.size)}</span>`
       : '<span class="muted">flat</span>';
-    const evalTxt = b.lastEval ? `${b.lastEval.action} · ${b.lastEval.reason || ''}` : '—';
+
+    // Traduzione action → icona + testo, evita di mostrare messaggi tecnici come
+    // "Nessuna regola d'ingresso configurata" (emesso durante il warmup iniziale).
+    const le = b.lastEval || {};
+    const actionIcon = { open_long: '📈', open_short: '📉', close: '🔒', hold: '⏳' }[le.action] || '—';
+    const evalReason = (() => {
+      if (!le.action) return '—';
+      // Se il motivo è il messaggio di warmup/placeholder, mostriamo solo l'azione
+      if (!le.reason || le.reason === "Nessuna regola d'ingresso configurata") {
+        return le.action === 'hold' ? '⏳ In attesa candele warmup' : actionIcon;
+      }
+      return `${actionIcon} ${le.reason}`;
+    })();
+
     const pnlClass = (b.dailyPnl || 0) >= 0 ? 'profit-positive' : 'profit-negative';
     let statsLine = '';
     if (b.stats && b.stats.trades > 0) {
@@ -2727,39 +3043,84 @@ class PerpsApp {
     const stratBadge = strat
       ? `<div class="bot-strategy-badge" title="${(strat.rationale || '').replace(/"/g, '&quot;')}">🧠 da strategia AI${strat.decidedAt ? ' · ' + new Date(strat.decidedAt).toLocaleDateString('it-IT') : ''}</div>`
       : '';
-    return `<div class="bot-card ${running ? 'running' : ''}" id="bot-${b.id}">
+
+    // AGENT-AWARE: badge actor — usa i campi arricchiti dall'API admin view se disponibili
+    const agentId = b.actor_id || b.linked_agent_id || 'user_manual';
+    const isHermes = b.actor === 'hermes' || String(agentId).toLowerCase().includes('hermes') || Boolean(b.is_managed_by_agent);
+    const actorIcon = b.actorIcon || (isHermes ? '🤖' : '👤');
+    const actorLabel = b.actorLabel || (isHermes ? 'Hermes' : 'Manuale');
+    const agentBadgeClass = b.actorColor || (isHermes ? 'agent-badge-hermes' : 'agent-badge-manual');
+    const agentBadge = `<span class="agent-badge ${agentBadgeClass}" title="Controllato da: ${actorLabel} (${agentId})">${actorIcon} ${actorLabel}</span>`;
+
+    // Budget Ceiling info
+    const budgetInfo = b.max_allocation_usd != null
+      ? `<span class="muted" title="Budget Ceiling"> · max ${this.fmtUsd(b.max_allocation_usd)}</span>`
+      : '';
+
+    // Watchdog Crash badge
+    const crashBadge = crashed
+      ? `<span class="bot-status-crashed-badge" title="${b.crashReason || 'Nessun tick rilevato'}">⚠️ CRASH</span>`
+      : '';
+
+    // Stato dot: verde = running, rosso-pulse = crashed, grigio = stopped
+    const dotClass = crashed ? 'crashed' : (running ? 'online' : 'offline');
+
+    // Azione principale: se crashed → "↩️ Riavvia", se running → "⏹️ Stop", else → "▶️ Avvia"
+    const mainAction = crashed || !running
+      ? `<button class="btn btn-sm btn-long" onclick="perps.startBot('${b.id}')">${crashed ? '↩️ Riavvia' : '▶️ Avvia'}</button>`
+      : `<button class="btn btn-sm btn-secondary" onclick="perps.stopBot('${b.id}')">⏹️ Stop</button>`;
+
+    // Sicurezza: se il bot è gestito da agente, mostra l'icona lock sul pulsante edit
+    const isManaged = Boolean(b.is_managed_by_agent || isHermes);
+    const editBtn = isManaged
+      ? `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Bot gestito da Agente (${actorLabel}): richiede sblocco">🔒 ✏️</button>`
+      : `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Modifica bot">✏️</button>`;
+
+    // Riga strategia: traduzione human-readable delle entryRules dal config
+    const stratRules = this._describeEntryRules(b);
+
+    return `<div class="bot-card ${running ? 'running' : ''} ${crashed ? 'bot-crashed' : ''}" id="bot-${b.id}">
       <div class="bot-card-head">
         <div>
-          <span class="bot-status-dot ${running ? 'online' : 'offline'}"></span>
+          <span class="bot-status-dot ${dotClass}"></span>
           <strong>${b.name}</strong> <span class="muted">· ${b.coin}</span>
           ${b.paper ? '<span class="testnet-badge" style="font-size:.6em;vertical-align:middle" title="Forward-test: esecuzione simulata su prezzi reali">PAPER</span>' : ''}
+          ${agentBadge}${budgetInfo}${crashBadge}
         </div>
         <span class="bot-pnl ${pnlClass}">${this.fmtUsd(b.dailyPnl || 0)}</span>
       </div>
       <div class="bot-card-body">
         ${stratBadge}
+        <div class="bot-meta"><span class="label">Strategia</span> <span class="rule-pills">${stratRules}</span></div>
         <div class="bot-meta"><span class="label">Posizione</span> ${pos}</div>
-        <div class="bot-meta"><span class="label">Ultima valutazione</span> <span class="eval">${evalTxt}</span></div>
+        <div class="bot-meta"><span class="label">Valutazione</span> <span class="eval">${evalReason}</span></div>
         ${statsLine}
-        ${b.lastError ? `<div class="bot-error">⚠️ ${b.lastError}</div>` : ''}
+        ${crashed ? `<div class="bot-error bot-crash-reason">🐕 Watchdog: ${b.crashReason || 'nessun tick rilevato'}</div>` : ''}
+        ${!crashed && b.lastError ? `<div class="bot-error">⚠️ ${b.lastError}</div>` : ''}
       </div>
       <div class="bot-card-actions">
-        ${running
-          ? `<button class="btn btn-sm btn-secondary" onclick="perps.stopBot('${b.id}')">⏹️ Stop</button>`
-          : `<button class="btn btn-sm btn-long" onclick="perps.startBot('${b.id}')">▶️ Avvia</button>`}
+        ${mainAction}
         <button class="btn btn-sm btn-outline" onclick="perps.openBotMonitor('${b.id}')">📡 Monitor</button>
-        <button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')">✏️</button>
+        ${editBtn}
         <button class="btn btn-sm btn-danger" onclick="perps.deleteBot('${b.id}')">🗑️</button>
       </div>
     </div>`;
   }
 
+
   _updateBotCard(state) {
-    const idx = this.bots.findIndex(b => b.id === state.id);
-    if (idx >= 0) this.bots[idx] = state; else this.bots.push(state);
+    // Merge con il bot già in cache per non perdere i campi arricchiti
+    // (actorLabel, actorIcon, actorColor, stats, ecc.) che arrivano dall'API HTTP
+    // ma non dai WebSocket events grezzi del botManager.
+    const idx = this.bots ? this.bots.findIndex(b => b.id === state.id) : -1;
+    const merged = idx >= 0 ? { ...this.bots[idx], ...state } : state;
+    if (!this.bots) this.bots = [];
+    if (idx >= 0) this.bots[idx] = merged; else this.bots.push(merged);
     const el = document.getElementById('bot-' + state.id);
-    if (el) el.outerHTML = this._botCardHtml(state);
+    if (el) el.outerHTML = this._botCardHtml(merged);
     else this._renderBots();
+    // Aggiorna anche il cockpit dashboard (metriche aggregate)
+    this._refreshCockpitDashboard();
   }
 
   async startBot(id) {
@@ -2783,6 +3144,86 @@ class PerpsApp {
       await this.loadBots();
     } catch (e) { this.toast(e.message, 'error'); }
   }
+
+  /** AGENT-AWARE: Kill Switch — ferma tutti i bot dell'agente selezionato nel filtro. */
+  /**
+   * AGENT-AWARE: Kill Switch "Safe-Exit"
+   *
+   * Ferma SEMPRE tutti i bot dell'agente (nessuna nuova apertura).
+   * Chiude le posizioni via market order SOLO se il loro notional supera la soglia.
+   * Le posizioni piccole restano aperte per gestione manuale ponderata.
+   */
+  async killSwitchAgent() {
+    const agentFilter = this._agentFilter || '';
+    const agentLabel = agentFilter === 'hermes' ? 'Hermes'
+      : agentFilter === 'user_manual' ? 'Manuali'
+      : 'tutti gli agenti';
+
+    // Step 1 — Conferma azione
+    const confirmed = confirm(
+      `🛑 Kill Switch Safe-Exit [${agentLabel}]\n\n` +
+      `• I bot${agentFilter ? ` di "${agentLabel}"` : ''} verranno FERMATI immediatamente.\n` +
+      `• Le posizioni con notional > soglia verranno chiuse via market order.\n` +
+      `• Le posizioni piccole (sotto soglia) rimarranno aperte per gestione manuale.\n\n` +
+      `Continuare?`
+    );
+    if (!confirmed) return;
+
+    // Step 2 — Soglia size (prompt con default 500 USD)
+    const thresholdInput = window.prompt(
+      '💰 Soglia Safe-Exit (USD)\n\n' +
+      'Le posizioni con notional SUPERIORE a questa soglia verranno chiuse con market order.\n' +
+      'Le posizioni inferiori rimarranno aperte per gestione manuale.\n\n' +
+      'Inserisci la soglia in USD (es. 500):\n' +
+      '(Inserisci 0 per chiudere TUTTE le posizioni indipendentemente dalla size)',
+      '500'
+    );
+    if (thresholdInput === null) return; // annullato
+    const threshold = parseFloat(thresholdInput);
+    if (isNaN(threshold) || threshold < 0) {
+      this.toast('Soglia non valida', 'error');
+      return;
+    }
+
+    // Step 3 — Conferma finale con riepilogo
+    const thresholdLabel = threshold === 0
+      ? 'TUTTE le posizioni verranno chiuse'
+      : `Solo posizioni > $${threshold.toFixed(0)} USD verranno chiuse`;
+    const finalOk = confirm(
+      `⚠️ Conferma Kill Switch Safe-Exit\n\n` +
+      `Agente: ${agentLabel}\n` +
+      `Soglia: ${thresholdLabel}\n\n` +
+      `Questa azione è irreversibile. Procedere?`
+    );
+    if (!finalOk) return;
+
+    try {
+      // Se filtro = '' (tutti), iteriamo per ogni agente noto
+      const agentIds = agentFilter ? [agentFilter] : ['user_manual', 'hermes'];
+      let totalStopped = 0;
+      let totalClosed = 0;
+      let totalSkipped = 0;
+
+      for (const aid of agentIds) {
+        const result = await this.api('/api/perps/kill-switch', {
+          method: 'POST',
+          body: JSON.stringify({ agent_id: aid, size_threshold_usd: threshold })
+        });
+        if (result) {
+          totalStopped += (result.stopped || []).length;
+          totalClosed += (result.closedPositions || []).length;
+          totalSkipped += (result.skippedPositions || []).length;
+        }
+      }
+
+      let msg = `🛑 Kill Switch: ${totalStopped} bot fermat${totalStopped === 1 ? 'o' : 'i'}`;
+      if (totalClosed) msg += `, ${totalClosed} posizion${totalClosed === 1 ? 'e chiusa' : 'i chiuse'} (> $${threshold})`;
+      if (totalSkipped) msg += ` · ${totalSkipped} lasciat${totalSkipped === 1 ? 'a aperta' : 'e aperte'} per gestione manuale`;
+      this.toast(msg, 'warning');
+      await this.loadBots();
+    } catch (e) { this.toast('Kill Switch fallito: ' + e.message, 'error'); }
+  }
+
 
   async deleteBot(id) {
     if (!confirm('Eliminare questo bot?')) return;
@@ -2859,7 +3300,20 @@ class PerpsApp {
 
   editBot(id) {
     const bot = this.bots.find(b => b.id === id);
-    if (bot) this.openBotModal(bot);
+    if (!bot) return;
+    const agentId = bot.actor_id || bot.linked_agent_id || 'user_manual';
+    const isManaged = Boolean(bot.is_managed_by_agent || bot.actor === 'hermes' || String(agentId).toLowerCase().includes('hermes'));
+    if (isManaged) {
+      const actorName = bot.actorLabel || 'Hermes';
+      const unlock = confirm(
+        `🤖 Sblocco Modifica Manuale [${actorName}]\n\n` +
+        `Questo bot è gestito autonomamente dall'Agente ${actorName} per i test in tempo reale.\n` +
+        `Modificare manualmente i parametri potrebbe interferire con i calcoli attivi dell'Agente.\n\n` +
+        `Vuoi sbloccare temporaneamente la modifica manuale e procedere?`
+      );
+      if (!unlock) return;
+    }
+    this.openBotModal(bot);
   }
 
   // ---- Modalità bot (semplificata / avanzata) ----

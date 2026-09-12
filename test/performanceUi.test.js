@@ -129,7 +129,12 @@ function loadPerfUi({ data = PERFORMANCE, fails = false, withCharts = true } = {
       return { ok: true, status: 200, json: async () => ({ success: true, data: {} }) };
     },
     alert: () => {}, confirm: () => true,
-    setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {}
+    setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {},
+    // CI-03: switchCockpitTab() persiste il tab nell'URL (location.hash +
+    // history.replaceState, vedi b54285a) — senza questi due globali il
+    // metodo lancia ReferenceError non appena viene chiamato.
+    location: { hash: '' },
+    history: { replaceState: () => {} }
   };
   if (withCharts) sandbox.window.LightweightCharts = chartStub(record);
   sandbox.LightweightCharts = sandbox.window.LightweightCharts;
@@ -227,6 +232,30 @@ test('un motivo di chiusura sconosciuto viene mostrato, non scartato', async () 
   // Meglio un'etichetta grezza che nascondere trade veri perché il backend ha
   // aggiunto un motivo che la mappa della UI non conosce.
   assert.match(ui.elements.perfCloseReasons.innerHTML, /funding_flip<\/span><strong>3 · 100%/);
+});
+
+test('le chiusure da riconciliazione DB↔Hyperliquid escono come avviso, non come una riga qualsiasi', async () => {
+  const ui = loadPerfUi({
+    data: {
+      ...PERFORMANCE,
+      bots: [{ botId: 'b1', name: 'X', trades: 4, closeReasons: { tp: 3, reconciliation_mismatch: 1 } }]
+    }
+  });
+  await ui.perps.loadPerformance();
+  const html = ui.elements.perfCloseReasons.innerHTML;
+
+  // 1) Etichetta leggibile, non la chiave grezza del bucket backend.
+  assert.match(html, /⚠️ Disallineato con Hyperliquid<\/span><strong>1 · 25%/);
+  assert.doesNotMatch(html, /reconciliation_mismatch/, 'la chiave grezza non deve arrivare a schermo');
+
+  // 2) Stile di allerta SOLO su quella riga: le altre restano righe normali.
+  const mismatchRow = html.split('<div ').find(chunk => chunk.includes('Disallineato'));
+  assert.match(mismatchRow, /class="cockpit-metric-row close-reason-mismatch"/);
+  assert.match(mismatchRow, /title="[^"]*riconciliazione[^"]*"/, 'il tooltip spiega perché la riga è un avviso');
+
+  const tpRow = html.split('<div ').find(chunk => chunk.includes('Take profit'));
+  assert.match(tpRow, /class="cockpit-metric-row"/);
+  assert.doesNotMatch(tpRow, /close-reason-mismatch/, 'le altre righe non ereditano lo stile di allerta');
 });
 
 test('confronto per bot: PnL, win rate ed expectancy con il segno e la classe giusta', async () => {

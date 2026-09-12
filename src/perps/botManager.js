@@ -27,7 +27,17 @@ class BotManager {
   }
 
   _onUpdate = (state) => {
-    if (this.io) this.io.emit('perps:botUpdate', state);
+    if (this.io) {
+      this.io.emit('perps:botUpdate', state);
+      // Emette dashboardRefresh istantaneo se l'azione di trading è operativa (open_long/open_short/close)
+      if (state.lastEval && (state.lastEval.action === 'open_long' || state.lastEval.action === 'open_short' || state.lastEval.action === 'close')) {
+        this.io.emit('perps:dashboardRefresh', {
+          reason: 'strategy_signal',
+          botId: state.id,
+          action: state.lastEval.action
+        });
+      }
+    }
   };
 
   /** Carica i bot dal DB e riavvia quelli che risultavano in esecuzione. */
@@ -95,8 +105,12 @@ class BotManager {
    * dire): la forma di `getState()` non cambia per nessun altro consumatore —
    * `listStates()`, le metriche e gli eventi socket non lo vedono nemmeno, perché
    * quelli ricostruiscono lo stato per conto loro.
+   *
+   * AGENT-AWARE:
+   *  - `linked_agent_id` : chi controlla il bot ('user_manual' | 'hermes' | ...)
+   *  - `max_allocation_usd` : Budget Ceiling — null = nessun limite aggiuntivo
    */
-  createBot({ name, coin, network, masterAddress, config }) {
+  createBot({ name, coin, network, masterAddress, config, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent }) {
     if (!name || !coin || !masterAddress) {
       throw new Error('name, coin e masterAddress sono obbligatori');
     }
@@ -104,12 +118,17 @@ class BotManager {
     const id = crypto.randomUUID();
     const record = {
       id, name, coin, network: network || 'testnet',
-      masterAddress, config: config || {}, status: 'stopped'
+      masterAddress, config: config || {}, status: 'stopped',
+      linked_agent_id: linked_agent_id || actor_id || 'user_manual',
+      max_allocation_usd: max_allocation_usd != null ? Number(max_allocation_usd) : null,
+      actor_label: actor_label || null,
+      actor_id: actor_id || linked_agent_id || null,
+      is_managed_by_agent: Boolean(is_managed_by_agent || (linked_agent_id && linked_agent_id.toLowerCase().includes('hermes')))
     };
     db.insertBot(record);
     const bot = new PerpsBot(db.getBot(id), this._onUpdate);
     this.bots.set(id, bot);
-    logger.info(`➕ Bot creato: ${name} (${coin})`, { id });
+    logger.info(`➕ Bot creato: ${name} (${coin}) [agent: ${record.linked_agent_id}]`, { id });
 
     let warning = null;
     if (overlap.length) {
@@ -139,15 +158,17 @@ class BotManager {
    *
    * Asincrono di conseguenza: chi chiama (`PATCH /api/perps/bots/:id`) deve
    * attendere, altrimenti risponderebbe con lo stato della vecchia istanza.
+   *
+   * AGENT-AWARE: accetta anche `linked_agent_id` e `max_allocation_usd`.
    */
-  async updateBot(id, { name, coin, config }) {
+  async updateBot(id, { name, coin, config, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent }) {
     const bot = this.bots.get(id);
     if (!bot) throw new Error('Bot non trovato');
     const wasRunning = bot.status === 'running';
     if (wasRunning) bot.stop();
     await bot.whenIdle();
 
-    db.updateBot(id, { name, coin, config });
+    db.updateBot(id, { name, coin, config, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent });
     const fresh = new PerpsBot(db.getBot(id), this._onUpdate);
     this.bots.set(id, fresh);
     if (wasRunning) fresh.start();
@@ -188,14 +209,26 @@ class BotManager {
     return bot.getMonitor();
   }
 
-  listStates() {
-    return [...this.bots.values()].map(b => b.getState());
+  /**
+   * Lista stati di tutti i bot, con filtro opzionale per agent_id.
+   * Agente non specificato = tutti i bot.
+   */
+  listStates(agentId = null) {
+    const all = [...this.bots.values()].map(b => b.getState());
+    if (!agentId) return all;
+    return all.filter(s => (s.linked_agent_id || 'user_manual') === agentId);
   }
 
   /**
    * WATCHDOG: controlla periodicamente che i bot in esecuzione stiano "ticcando".
    * Se un bot running non aggiorna lastTickAt da oltre la soglia (3× il suo loop,
-   * minimo 60s) invia un alert Telegram (throttle 10 min/bot).
+   * minimo 60s):
+   *  1. Notifica Telegram (throttle 10 min/bot)
+   *  2. Emette `perps:botCrash` via Socket.IO → banner rosso UI
+   *  3. Emette `perps:botUpdate` con status 'crashed' → aggiorna card bot
+   *  4. Emette `perps:dashboardRefresh` → UI ricarica bots/posizioni
+   *
+   * Il flag `bot._crashed` è in-memory: resettato automaticamente al riavvio server.
    */
   startWatchdog() {
     if (this.watchdogTimer) return;
@@ -207,13 +240,58 @@ class BotManager {
         if (bot.status !== 'running' || !bot.lastTickAt) continue;
         const loop = bot.config.loopInterval || HYPERLIQUID_CONFIG.botLoopInterval;
         const staleMs = Math.max(3 * loop, 60000);
-        if (now - bot.lastTickAt > staleMs) {
+        const isStale = now - bot.lastTickAt > staleMs;
+
+        if (isStale) {
           const last = this.lastWatchdogAlert.get(bot.id) || 0;
           if (now - last > ALERT_THROTTLE_MS) {
             this.lastWatchdogAlert.set(bot.id, now);
             const secs = Math.round((now - bot.lastTickAt) / 1000);
             logger.warn(`🐕 Watchdog: bot ${bot.name} fermo da ${secs}s`);
-            notifier.notify(`🐕 <b>Watchdog</b>: il bot <b>${bot.name}</b> (${bot.coin}) non aggiorna da ${secs}s. Controlla connettività/API.`);
+
+            // Telegram
+            notifier.notify(
+              `🐕 <b>Watchdog</b>: il bot <b>${bot.name}</b> (${bot.coin}) ` +
+              `non aggiorna da ${secs}s. Controlla connettività/API.`
+            );
+
+            // Segna il bot come crashed in-memory (status rimane 'running' nel DB
+            // per permettere il resume automatico al prossimo riavvio)
+            bot._crashed = true;
+
+            // Socket.IO — alert UI immediato
+            if (this.io) {
+              const crashState = {
+                ...bot.getState(),
+                status: 'crashed',
+                _crashedSinceMs: secs * 1000,
+                crashReason: `Nessun tick da ${secs}s (soglia: ${Math.round(staleMs / 1000)}s)`
+              };
+
+              // 1. Alert dedicato per il banner rosso
+              this.io.emit('perps:botCrash', {
+                botId: bot.id,
+                botName: bot.name,
+                coin: bot.coin,
+                linked_agent_id: bot.linked_agent_id || 'user_manual',
+                silentSinceMs: secs * 1000,
+                threshold: staleMs
+              });
+
+              // 2. Aggiorna la card del bot
+              this.io.emit('perps:botUpdate', crashState);
+
+              // 3. Refresh generale dashboard
+              this.io.emit('perps:dashboardRefresh', { reason: 'watchdog_crash', botId: bot.id });
+            }
+          }
+        } else if (bot._crashed) {
+          // Il bot ha ripreso a ticcolare → rimuovi il flag crashed e notifica recovery
+          bot._crashed = false;
+          logger.info(`🐕 Watchdog: bot ${bot.name} ha ripreso l'attività`);
+          if (this.io) {
+            this.io.emit('perps:botUpdate', bot.getState());
+            this.io.emit('perps:dashboardRefresh', { reason: 'watchdog_recovery', botId: bot.id });
           }
         }
       }
@@ -221,6 +299,7 @@ class BotManager {
     this.watchdogTimer.unref?.();
     logger.info('🐕 Watchdog bot avviato');
   }
+
 
   /** Shutdown del server: ferma i timer senza cambiare lo stato persistito. */
   stopAll() {

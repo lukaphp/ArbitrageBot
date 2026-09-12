@@ -2,10 +2,12 @@
 
 - [Place-then-cancel, sempre](feedback_place-then-cancel.md) — il nuovo trigger prima della cancellazione del vecchio; pattern di SEC-01
 - [Stato posizione: immutabile vs corrente](feedback_stato-posizione-immutabile-vs-corrente.md) — ingresso originale ≠ prezzo medio, e `trailing_json` in merge mai in overwrite
+- [`npm test` non termina (arm64)](project_npm-test-non-termina.md) — rebuild nativo, `--test-force-exit`, e i rossi flake da ri-eseguire prima di attribuirli
 - [Seam di test del repo](feedback_seam-di-test.md) — paperBroker, DB temporaneo, mock.timers, CLI a processo figlio; e verifica che il test falliresse col bug
 - [Nessun fallimento silenzioso sul money path](feedback_fallimenti-money-path-non-silenziosi.md) — log **e** notifica, una per episodio non per tentativo
 - [Invarianti nel DB, non nel chiamante](feedback_invarianti-nel-db-non-nel-chiamante.md) — "crea se non esiste" dentro un metodo sincrono; il pattern di SEC-08
 - [Contratto API: leggi il consumer](feedback_contratto-api-leggi-il-consumer.md) — due suite verdi e la UI rotta; segni firmati e chiavi aggiuntive invece di forme cambiate
+- [Un guardrail copre solo chi scrive lo stato che legge](feedback_guardrail-copre-solo-chi-scrive-lo-stato.md) — chi scrive la riga `positions`? verificalo eseguendo, non leggendo
 - [Purezza delle funzioni che sembrano query](feedback_purezza-funzioni-che-sembrano-query.md) — `canOpen` che scriveva stato: il finding più importante di Release 2 · Sprint 1
 - [Working tree condiviso: mai git stash](project_tree-condiviso-mai-git-stash.md) — il rosso-prima-del-fix si ottiene test-first o con un worktree separato, non stashando il lavoro dei colleghi
 - [TP vs SL si legge dall'oid del fill](project_close-reason-non-distingue-tp-da-sl.md) — fatto dal fix Sprint 4 in poi; lo storico precedente resta ambiguo e non si riclassifica

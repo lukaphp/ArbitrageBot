@@ -184,7 +184,12 @@ function loadAdvisor({ routes = {}, withPerps = false, confirmAnswer = true } = 
     },
     alert: (msg) => toasts.push({ msg, type: 'alert' }),
     confirm: (msg) => { confirms.push(msg); return confirmAnswer; },
-    setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {}
+    setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {},
+    // CI-03: switchCockpitTab() persiste il tab nell'URL (location.hash +
+    // history.replaceState, vedi b54285a) — senza questi due globali il
+    // metodo lancia ReferenceError non appena viene chiamato.
+    location: { hash: '' },
+    history: { replaceState: () => {} }
   };
   sandbox.window.shell = { showToast: (msg, type) => toasts.push({ msg, type }) };
   sandbox.globalThis = sandbox;

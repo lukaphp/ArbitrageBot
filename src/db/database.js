@@ -251,6 +251,27 @@ export class PerpsDatabase {
       // sarebbe indistinguibile da "eseguito esattamente al prezzo atteso".
       () => {
         this._addColumn('trades', 'slippage_pct', 'REAL');
+      },
+      // v4 (AGENT-AWARE) — segregazione operativa tra Utente e Agente (Hermes).
+      //
+      // `linked_agent_id` identifica CHI controlla il bot:
+      //   - 'user_manual' (default) : l'utente umano via UI
+      //   - 'hermes'                : l'agente Hermes (trading autonomo)
+      //   - altri futuri agenti     : qualsiasi stringa arbitraria
+      // Usato per filtrare dashboard, metriche e per il kill-switch per agente.
+      //
+      // `max_allocation_usd` è il Budget Ceiling: il bot non apre posizioni se
+      // la notional stimata supera questo limite. NULL = nessun limite aggiuntivo
+      // (si affida solo ai limiti del riskManager già esistenti).
+      () => {
+        this._addColumn('bots', 'linked_agent_id', "TEXT NOT NULL DEFAULT 'user_manual'");
+        this._addColumn('bots', 'max_allocation_usd', 'REAL');
+      },
+      // v5 (AGENT-METADATA) — colonne additive actor_label, actor_id, is_managed_by_agent
+      () => {
+        this._addColumn('bots', 'actor_label', 'TEXT');
+        this._addColumn('bots', 'actor_id', 'TEXT');
+        this._addColumn('bots', 'is_managed_by_agent', 'INTEGER DEFAULT 0');
       }
     ];
   }
@@ -321,8 +342,8 @@ export class PerpsDatabase {
   insertBot(bot) {
     const now = Date.now();
     this.db.prepare(`
-      INSERT INTO bots (id, name, coin, network, master_address, config_json, status, created_at, updated_at)
-      VALUES (@id, @name, @coin, @network, @masterAddress, @configJson, @status, @createdAt, @updatedAt)
+      INSERT INTO bots (id, name, coin, network, master_address, config_json, status, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent, created_at, updated_at)
+      VALUES (@id, @name, @coin, @network, @masterAddress, @configJson, @status, @linkedAgentId, @maxAllocationUsd, @actorLabel, @actorId, @isManagedByAgent, @createdAt, @updatedAt)
     `).run({
       id: bot.id,
       name: bot.name,
@@ -331,20 +352,40 @@ export class PerpsDatabase {
       masterAddress: bot.masterAddress.toLowerCase(),
       configJson: JSON.stringify(bot.config),
       status: bot.status || 'stopped',
+      linkedAgentId: bot.linked_agent_id || bot.linkedAgentId || bot.actor_id || 'user_manual',
+      maxAllocationUsd: bot.max_allocation_usd != null ? Number(bot.max_allocation_usd) : (bot.maxAllocationUsd != null ? Number(bot.maxAllocationUsd) : null),
+      actorLabel: bot.actor_label || bot.actorLabel || null,
+      actorId: bot.actor_id || bot.actorId || bot.linked_agent_id || null,
+      isManagedByAgent: bot.is_managed_by_agent ? 1 : 0,
       createdAt: now,
       updatedAt: now
     });
   }
 
-  updateBot(id, { config, status, name, coin }) {
+  updateBot(id, { config, status, name, coin, linked_agent_id, linkedAgentId, max_allocation_usd, maxAllocationUsd, actor_label, actorLabel, actor_id, actorId, is_managed_by_agent, isManagedByAgent }) {
     const existing = this.getBot(id);
     if (!existing) return null;
+    // Risolvi linked_agent_id da entrambe le forme (snake_case e camelCase)
+    const newLinkedAgentId = linked_agent_id ?? linkedAgentId;
+    // Risolvi max_allocation_usd da entrambe le forme
+    const newMaxAllocationUsd = max_allocation_usd !== undefined ? max_allocation_usd
+      : (maxAllocationUsd !== undefined ? maxAllocationUsd : undefined);
+    const newActorLabel = actor_label !== undefined ? actor_label : actorLabel;
+    const newActorId = actor_id !== undefined ? actor_id : actorId;
+    const newIsManaged = is_managed_by_agent !== undefined ? (is_managed_by_agent ? 1 : 0)
+      : (isManagedByAgent !== undefined ? (isManagedByAgent ? 1 : 0) : undefined);
+
     this.db.prepare(`
       UPDATE bots SET
         name = @name,
         coin = @coin,
         config_json = @configJson,
         status = @status,
+        linked_agent_id = @linkedAgentId,
+        max_allocation_usd = @maxAllocationUsd,
+        actor_label = @actorLabel,
+        actor_id = @actorId,
+        is_managed_by_agent = @isManagedByAgent,
         updated_at = @updatedAt
       WHERE id = @id
     `).run({
@@ -353,6 +394,13 @@ export class PerpsDatabase {
       coin: coin ?? existing.coin,
       configJson: JSON.stringify(config ?? JSON.parse(existing.config_json)),
       status: status ?? existing.status,
+      linkedAgentId: newLinkedAgentId ?? existing.linked_agent_id ?? 'user_manual',
+      maxAllocationUsd: newMaxAllocationUsd !== undefined
+        ? (newMaxAllocationUsd != null ? Number(newMaxAllocationUsd) : null)
+        : existing.max_allocation_usd,
+      actorLabel: newActorLabel !== undefined ? newActorLabel : existing.actor_label,
+      actorId: newActorId !== undefined ? newActorId : existing.actor_id,
+      isManagedByAgent: newIsManaged !== undefined ? newIsManaged : (existing.is_managed_by_agent || 0),
       updatedAt: Date.now()
     });
     return this.getBot(id);
@@ -457,8 +505,24 @@ export class PerpsDatabase {
     ).get(botId, coin);
   }
 
-  listPositions(limit = 100) {
-    return this.db.prepare(`SELECT * FROM positions ORDER BY opened_at DESC LIMIT ?`).all(limit);
+  /**
+   * Lista posizioni con filtro opzionale per agent_id.
+   * Se `agentId` è specificato, filtra via JOIN su `bots.linked_agent_id`.
+   * Le posizioni senza `bot_id` (aperte manualmente) non sono filtrate per agente:
+   * restano visibili nella vista "tutti" ma non compaiono in una vista per agente.
+   */
+  listPositions(limit = 100, agentId = null) {
+    this.ensure();
+    const n = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 100)));
+    if (agentId) {
+      return this.db.prepare(`
+        SELECT p.* FROM positions p
+        INNER JOIN bots b ON p.bot_id = b.id
+        WHERE b.linked_agent_id = ?
+        ORDER BY p.opened_at DESC LIMIT ?
+      `).all(agentId, n);
+    }
+    return this.db.prepare(`SELECT * FROM positions ORDER BY opened_at DESC LIMIT ?`).all(n);
   }
 
   /**
@@ -510,6 +574,15 @@ export class PerpsDatabase {
    *    non sono distinguibili tra loro, e fingere che lo siano sarebbe lo stesso
    *    errore che questo lavoro ha appena corretto;
    *  - `strategy` ← uscita per regola della strategia o segnale esterno;
+   *  - `reconciliation_mismatch` ← 'riconciliata (orfana, bot fermo)': la riga
+   *    era `open` in DB mentre sull'exchange la posizione non c'era più, e il
+   *    bot era FERMO (nessun tick che potesse accorgersene). Chiusa a posteriori
+   *    da `reconciler.js`. **Non è un trade con esito**: il PnL è `null` perché
+   *    non ricostruibile, quindi queste righe non dicono nulla su come è andata
+   *    — dicono che DB ed exchange erano disallineati. Sta PRIMA di
+   *    `trigger_or_external` per la stessa ragione per cui `safety` sta in cima:
+   *    perché la sua posizione nella ladder non dipenda dalle parole che il
+   *    testo contiene oggi;
    *  - `trigger_or_external` ← 'chiusa (TP/SL o esterna)', cioè i casi in cui NON
    *    si è potuto stabilire quale ordine abbia chiuso (fill non ancora visibili,
    *    fill senza oid, posizione aperta prima del tracciamento degli oid). Ci
@@ -530,6 +603,7 @@ export class PerpsDatabase {
     if (/stop loss/.test(text)) return 'sl';
     if (/manuale o esterna/.test(text)) return 'manual_or_external';
     if (/regola di uscita|segnale esterno/.test(text)) return 'strategy';
+    if (/riconciliata/.test(text)) return 'reconciliation_mismatch';
     if (/tp\/sl|più trigger|esterna/.test(text)) return 'trigger_or_external';
     return 'other';
   }
@@ -722,13 +796,30 @@ export class PerpsDatabase {
    * interessa può non comparire affatto, quindi il filtro va applicato in SQL e
    * non dopo il LIMIT.
    */
-  listTradesBy({ botId = null, coin = null, limit = 100 } = {}) {
+  listTradesBy({ botId = null, coin = null, agentId = null, limit = 100 } = {}) {
     this.ensure();
+    const n = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 100)));
+
+    // Se agentId è specificato, usiamo JOIN con bots per filtrare
+    if (agentId) {
+      const where = ['b.linked_agent_id = ?'];
+      const params = [agentId];
+      if (botId) { where.push('t.bot_id = ?'); params.push(botId); }
+      if (coin) { where.push('t.coin = ?'); params.push(coin); }
+      params.push(n);
+      return this.db.prepare(
+        `SELECT t.* FROM trades t
+         INNER JOIN bots b ON t.bot_id = b.id
+         WHERE ${where.join(' AND ')}
+         ORDER BY t.ts DESC LIMIT ?`
+      ).all(...params);
+    }
+
     const where = [];
     const params = [];
     if (botId) { where.push('bot_id = ?'); params.push(botId); }
     if (coin) { where.push('coin = ?'); params.push(coin); }
-    params.push(Math.max(1, Math.min(1000, Math.floor(Number(limit) || 100))));
+    params.push(n);
     return this.db.prepare(
       `SELECT * FROM trades ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY ts DESC LIMIT ?`
     ).all(...params);
@@ -761,7 +852,7 @@ export class PerpsDatabase {
   }
 
   /** Inserisce/aggiorna il campione equity per un account e una rete. */
-  insertRiskEquitySample(network, address, time, equity, limit = 180) {
+  insertRiskEquitySample(network, address, time, equity, limit = 10000) {
     this.ensure();
     const scope = this._riskScope(network, address);
     const ts = Math.floor(Number(time));
@@ -774,7 +865,7 @@ export class PerpsDatabase {
       ON CONFLICT(network, address, ts) DO UPDATE SET equity = excluded.equity
     `).run(scope.network, scope.address, ts, value);
 
-    const keep = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 180)));
+    const keep = Math.max(1, Math.min(50000, Math.floor(Number(limit) || 10000)));
     this.db.prepare(`
       DELETE FROM risk_equity_history
       WHERE network = ? AND address = ? AND ts NOT IN (
@@ -787,10 +878,10 @@ export class PerpsDatabase {
   }
 
   /** Ritorna i campioni più recenti in ordine cronologico per il cockpit. */
-  listRiskEquityHistory(network, address, limit = 180) {
+  listRiskEquityHistory(network, address, limit = 5000) {
     this.ensure();
     const scope = this._riskScope(network, address);
-    const keep = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 180)));
+    const keep = Math.max(1, Math.min(50000, Math.floor(Number(limit) || 5000)));
     return this.db.prepare(`
       SELECT ts AS time, equity AS value
       FROM risk_equity_history

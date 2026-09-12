@@ -110,8 +110,12 @@ class TelegramControl {
     return { running: this.running, configured: !!(this.token && this.chatId) };
   }
 
-  /** Avvia/riavvia il polling in base alla config Telegram corrente. */
+  /** Avvia/riavvia il polling in base alla config Telegram corrente (disattivato di default per non interferire con Hermes). */
   refresh() {
+    if (process.env.TELEGRAM_CONTROL_POLLING_ENABLED !== 'true') {
+      if (this.running) this.stop();
+      return;
+    }
     const cfg = notifier.getConfig();
     const shouldRun = cfg.enabled && cfg.token && cfg.chatId;
     if (shouldRun && (!this.running || this.token !== cfg.token || this.chatId !== cfg.chatId)) {

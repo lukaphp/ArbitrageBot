@@ -54,6 +54,7 @@ import predictor from './perps/predictor.js';
 import telegramControl from './perps/telegramControl.js';
 import strategySchema from './perps/strategySchema.js';
 import { runBacktest } from './perps/backtester.js';
+import { handleJsonRpcMcp, executeMcpTool, MCP_TOOLS_DEFINITIONS } from './mcp/httpTransport.js';
 
 // Polyfill globale per la serializzazione di BigInt in JSON (Express, Socket.IO, logger)
 if (typeof BigInt.prototype.toJSON !== 'function') {
@@ -74,6 +75,7 @@ import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk,
 // DEBT-03: la profondità della coda di esecuzione (WARN-02) è la sola fonte reale
 // per "Queue health" nella card EXECUTION STATUS della cockpit.
 import execQueue from './perps/execQueue.js';
+import { reconcileStalePositions } from './perps/reconciler.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -200,12 +202,16 @@ class ArbitrageBotServer {
     });
 
     // --- Gate di autenticazione: protegge tutte le /api/* tranne login/logout/status ---
+    // /internal/* è riservato a chiamate loopback (processo MCP Stdio) — nessun cookie.
     const publicApi = new Set(['/api/login', '/api/logout', '/api/auth/status']);
     this.app.use((req, res, next) => {
       if (!req.path.startsWith('/api/')) return next();  // statici, /, /health → pubblici
       if (publicApi.has(req.path)) return next();
       return auth.requireAuth(req, res, next);
     });
+    // Percorsi /internal/* non passano per il gate di autenticazione
+    // (accessibili solo in loopback all'interno del container Docker).
+    this.app.use('/internal', (req, res, next) => next());
   }
 
   /** Rate-limiter stretto per il login (anti brute-force). */
@@ -366,33 +372,113 @@ class ArbitrageBotServer {
       }
     });
 
-    // Storico operazioni eseguite (fill Hyperliquid: manuali + bot)
+    // Storico operazioni eseguite (fill Hyperliquid on-chain + trade DB di tutti i bot attivi e storici)
     app.get('/api/perps/fills', async (req, res) => {
       try {
-        const { address } = req.query;
-        if (!address) return res.status(400).json({ success: false, error: 'address richiesto' });
-        const fills = await hyperliquid.getUserFills(address);
-
-        // Attribuzione al bot d'origine: mappa oid->bot dai trade registrati,
-        // più fallback per coin con un solo bot.
         const bots = db.listBots();
-        const botById = new Map(bots.map(b => [b.id, b.name]));
-        const oidToBot = new Map();
-        for (const t of db.listTrades(500)) {
-          if (t.hl_oid != null) oidToBot.set(String(t.hl_oid), t.bot_id ? (botById.get(t.bot_id) || 'Bot') : 'Manuale');
+        const address = req.query.address || bots[0]?.master_address || hyperliquid.config?.masterAddress || null;
+        let onChainFills = [];
+        if (address) {
+          try {
+            onChainFills = await hyperliquid.getUserFills(address);
+          } catch {
+            onChainFills = [];
+          }
         }
+
+        // Mappa bot per ID e nome (inclusi bot storici/proposals)
+        const botNameMap = new Map(bots.map(b => [b.id, b.name]));
+        try {
+          const proposals = db.db?.prepare('SELECT linked_bot_id, coin, type FROM proposals WHERE linked_bot_id IS NOT NULL').all() || [];
+          for (const p of proposals) {
+            if (p.linked_bot_id && !botNameMap.has(p.linked_bot_id)) {
+              const shortId = p.linked_bot_id.slice(0, 4);
+              botNameMap.set(p.linked_bot_id, `${p.coin} (AI #${shortId})`);
+            }
+          }
+        } catch { /* noop */ }
+
+        // Mappa oid -> trade info
+        const dbTrades = db.listTrades(1000);
+        const oidToTrade = new Map();
+        for (const t of dbTrades) {
+          if (t.hl_oid != null) {
+            oidToTrade.set(String(t.hl_oid), t);
+          }
+        }
+
+        // Mappa posizioni chiuse per PnL
+        const dbPositions = db.listPositions(500);
+        const posByBot = new Map();
+        for (const p of dbPositions) {
+          if (p.bot_id) {
+            if (!posByBot.has(p.bot_id)) posByBot.set(p.bot_id, []);
+            posByBot.get(p.bot_id).push(p);
+          }
+        }
+
         const coinBots = {};
         for (const b of bots) (coinBots[b.coin] ||= new Set()).add(b.name);
 
-        const enriched = fills.map(f => {
-          let botName = oidToBot.get(String(f.oid));
-          if (!botName) {
+        const seenOids = new Set();
+        const merged = [];
+
+        // 1. Fill on-chain Hyperliquid
+        for (const f of onChainFills) {
+          if (f.oid != null) seenOids.add(String(f.oid));
+          const dbTrade = f.oid != null ? oidToTrade.get(String(f.oid)) : null;
+          let botName = null;
+          if (dbTrade?.bot_id) {
+            botName = botNameMap.get(dbTrade.bot_id) || `Bot #${dbTrade.bot_id.slice(0, 4)}`;
+          } else {
             const s = coinBots[f.coin];
             botName = (s && s.size === 1) ? [...s][0] : null;
           }
-          return { ...f, botName };
-        });
-        res.json({ success: true, data: enriched });
+
+          merged.push({
+            ...f,
+            botId: dbTrade?.bot_id || null,
+            botName: botName || (f.oid ? 'Manuale' : null),
+            isPaper: false
+          });
+        }
+
+        // 2. Trade dal database locale (es. Paper trades o trade storici)
+        for (const t of dbTrades) {
+          if (t.hl_oid != null && seenOids.has(String(t.hl_oid))) {
+            continue; // già incluso da onChainFills
+          }
+          const botName = (t.bot_id ? botNameMap.get(t.bot_id) : null) || (t.bot_id ? `Bot #${t.bot_id.slice(0, 4)}` : 'Manuale');
+          const isLong = String(t.side).toLowerCase().includes('buy') || String(t.side).toLowerCase() === 'long';
+
+          let closedPnl = null;
+          if (t.bot_id && posByBot.has(t.bot_id)) {
+            const matchPos = posByBot.get(t.bot_id).find(p => Math.abs((p.closed_at || p.opened_at) - t.ts) < 60000);
+            if (matchPos && matchPos.pnl != null) {
+              closedPnl = matchPos.pnl;
+            }
+          }
+
+          merged.push({
+            tid: `db_${t.id}`,
+            time: t.ts,
+            coin: t.coin,
+            side: isLong ? 'buy' : 'sell',
+            dir: isLong ? 'Open Long' : 'Open Short',
+            sz: t.sz,
+            px: t.px,
+            fee: t.fee || 0,
+            closedPnl: closedPnl,
+            hash: null,
+            oid: t.hl_oid,
+            botId: t.bot_id || null,
+            botName: botName,
+            isPaper: Boolean(t.hl_oid && String(t.hl_oid).length < 8)
+          });
+        }
+
+        merged.sort((a, b) => (b.time || 0) - (a.time || 0));
+        res.json({ success: true, data: merged });
       } catch (error) {
         res.status(500).json({ success: false, error: error.message });
       }
@@ -411,7 +497,28 @@ class ArbitrageBotServer {
         const botById = new Map(bots.map(b => [b.id, b.name]));
         const coinBots = {};
         for (const b of bots) (coinBots[b.coin] ||= new Set()).add(b.name);
-        const dbOpen = db.listPositions(200).filter(p => p.status === 'open');
+        let dbOpen = db.listPositions(200).filter(p => p.status === 'open');
+
+        // Riga `open` in DB senza riscontro sull'exchange, con il bot FERMO:
+        // nessun tick può accorgersene (`bot._reconcile` gira solo mentre il bot
+        // è running), quindi resterebbe orfana per sempre. Qui l'account live e
+        // le righe DB sono già entrambi in mano: la regola sta in
+        // `reconciler.js`, questa rotta si limita a fornirle i dati.
+        // `.status` letto direttamente dalle istanze invece di `listStates()`:
+        // serve solo sapere chi sta girando, non costruire ogni stato completo.
+        const runningBotIds = new Set(
+          [...botManager.bots.values()].filter(b => b?.status === 'running').map(b => b.id)
+        );
+        const riconciliate = reconcileStalePositions({
+          openRows: dbOpen, livePositions: account.positions || [], bots, runningBotIds, address
+        });
+        // Le righe appena chiuse non sono più "aperte": lasciarle nella mappa
+        // farebbe attribuire il loro bot a una posizione live omonima.
+        if (riconciliate.length) {
+          const chiuse = new Set(riconciliate.map(r => r.row.id));
+          dbOpen = dbOpen.filter(p => !chiuse.has(p.id));
+        }
+
         const key = (coin, side) => `${coin}|${side}`;
         const dbMap = new Map();
         for (const p of dbOpen) dbMap.set(key(p.coin, p.side), p);
@@ -492,11 +599,11 @@ class ArbitrageBotServer {
         defaultMaxDailyLossUsd: config.HYPERLIQUID_CONFIG.risk.maxDailyLossUsd
       }));
       const marketStatus = marketData.getStatus();
-      let equityHistory = address ? db.listRiskEquityHistory(network, address, 180) : [];
+      let equityHistory = address ? db.listRiskEquityHistory(network, address, 2000) : [];
       const persistedDrawdown = address ? db.getRiskDrawdownState(network, address) : null;
       if (account && Number.isFinite(Number(account.equity)) && address) {
-        db.insertRiskEquitySample(network, address, Math.floor(now / 1000), Number(account.equity), 180);
-        equityHistory = db.listRiskEquityHistory(network, address, 180);
+        db.insertRiskEquitySample(network, address, Math.floor(now / 1000), Number(account.equity), 10000);
+        equityHistory = db.listRiskEquityHistory(network, address, 2000);
       }
       const drawdown = mergeDrawdownState(calculateDrawdown(equityHistory), persistedDrawdown);
       if (address) db.upsertRiskDrawdownState(network, address, drawdown, now);
@@ -752,9 +859,42 @@ class ArbitrageBotServer {
     });
 
     // --- Bot ---
+    // AGENT-AWARE: Admin View — mostra TUTTI i bot con campo `actor` per distinguere
+    // chi ha operato (icona + label per la UI). Filtro opzionale ?agent_id= per isolare.
     app.get('/api/perps/bots', (req, res) => {
-      res.json({ success: true, data: botManager.listStates() });
+      const agentId = req.query.agent_id || null;
+      const states = botManager.listStates(agentId);
+
+      // Arricchisce ogni stato con metadati actor per la UI admin
+      const ACTOR_META = {
+        'hermes':           { label: 'Hermes',  icon: '🤖', color: 'agent-badge-hermes' },
+        'hermes_agent_01':  { label: 'Hermes',  icon: '🤖', color: 'agent-badge-hermes' },
+        'user_manual':      { label: 'Manuale', icon: '👤', color: 'agent-badge-manual' },
+      };
+      const enriched = states.map(s => {
+        const rawAid = s.actor_id || s.linked_agent_id || 'user_manual';
+        const isHermes = String(rawAid).toLowerCase().includes('hermes');
+        const aid = isHermes ? 'hermes' : rawAid;
+        const meta = ACTOR_META[rawAid] || ACTOR_META[aid] || (isHermes ? { label: 'Hermes', icon: '🤖', color: 'agent-badge-hermes' } : { label: s.actor_label || aid, icon: '🔹', color: 'agent-badge-manual' });
+        const label = s.actor_label || meta.label;
+        const isManaged = Boolean(s.is_managed_by_agent || isHermes);
+
+        return {
+          ...s,
+          // Sovrascrive status con 'crashed' se il watchdog ha rilevato un crash in-memory
+          status: botManager.bots.get(s.id)?._crashed ? 'crashed' : s.status,
+          actor: aid,
+          actor_id: rawAid,
+          actorLabel: label,
+          actor_label: label,
+          actorIcon: meta.icon,
+          actorColor: meta.color,
+          is_managed_by_agent: isManaged,
+        };
+      });
+      res.json({ success: true, data: enriched });
     });
+
 
     // Monitor live: cosa sta valutando il bot (indicatori vs soglie, distanza al segnale)
     app.get('/api/perps/bots/:id/monitor', async (req, res) => {
@@ -781,11 +921,15 @@ class ArbitrageBotServer {
     // legittima. Il campo arriva da `botManager.createBot()` e passa da qui senza
     // essere toccato — la decisione di cosa sia una sovrapposizione sta nel
     // manager, che è l'unico a sapere quali bot sono davvero in esecuzione.
+    //
+    // AGENT-AWARE: accetta `linked_agent_id` ('user_manual' default) e
+    // `max_allocation_usd` (Budget Ceiling, null = nessun limite).
     app.post('/api/perps/bots', (req, res) => {
       try {
-        const { name, coin, masterAddress, config: botConfig } = req.body;
+        const { name, coin, masterAddress, config: botConfig, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent } = req.body;
         const state = botManager.createBot({
-          name, coin, masterAddress, network: hyperliquid.getNetwork(), config: botConfig
+          name, coin, masterAddress, network: hyperliquid.getNetwork(), config: botConfig,
+          linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent
         });
         res.json({ success: true, data: state });
       } catch (error) {
@@ -921,7 +1065,211 @@ class ArbitrageBotServer {
       }
     });
 
-    // --- Ordine manuale ---
+    // --- AGENT-AWARE: Kill Switch "Safe-Exit" ---
+
+    //
+    // Filosofia: non chiude tutto "a colpo" per evitare slippage devastante.
+    //
+    // Body:
+    //   agent_id          : (required) 'hermes' | 'user_manual' | ...
+    //   size_threshold_usd: (optional, default 500) soglia in USD.
+    //                       Le posizioni con notional > soglia vengono chiuse subito
+    //                       via market order (pericolose per il capitale).
+    //                       Le posizioni < soglia vengono lasciate aperte per una
+    //                       gestione manuale più ponderata (evita slippage su size piccole).
+    //
+    // Risposta: include `skipped` (posizioni sotto soglia, lasciate aperte).
+    app.post('/api/perps/kill-switch', async (req, res) => {
+      try {
+        const { agent_id, size_threshold_usd } = req.body || {};
+        if (!agent_id) return res.status(400).json({ success: false, error: 'agent_id richiesto' });
+
+        // Soglia: default 500 USD, null/0 = chiudi tutto (nessuna soglia)
+        const threshold = size_threshold_usd != null ? Number(size_threshold_usd) : 500;
+
+        // Trova tutti i bot dell'agente (in memoria)
+        const targets = [...botManager.bots.values()].filter(
+          b => (b.linked_agent_id || 'user_manual') === agent_id
+        );
+
+        const stopped = [];           // bot fermati
+        const closedPositions = [];   // posizioni chiuse (size > soglia)
+        const skippedPositions = [];  // posizioni lasciate aperte (size <= soglia)
+        const errors = [];
+
+        for (const bot of targets) {
+          try {
+            // STEP 1 — Ferma SEMPRE il bot (nessuna nuova apertura da questo momento)
+            if (bot.status === 'running') {
+              bot.stop();
+              stopped.push(bot.id);
+            }
+
+            // STEP 2 — Valuta la posizione aperta (Safe-Exit)
+            if (bot.position) {
+              // Stima del notional: size * entryPx (prezzo di ingresso come proxy)
+              // Se entryPx non disponibile, usiamo il prezzo mid live come fallback
+              const entryPx = bot.position.entryPx || 0;
+              const size = bot.position.size || 0;
+              const estimatedNotional = size * entryPx;
+
+              // Una posizione > soglia è pericolosa → chiudi subito
+              // threshold=0 → chiudi tutto (nessuna soglia)
+              const exceedsThreshold = threshold === 0 || estimatedNotional > threshold;
+
+              if (exceedsThreshold) {
+                try {
+                  const result = await hyperliquid.closePosition(
+                    { masterAddress: bot.masterAddress, coin: bot.coin },
+                    hyperliquid.getNetwork()
+                  );
+                  closedPositions.push({
+                    botId: bot.id, coin: bot.coin,
+                    notionalUsd: estimatedNotional, result
+                  });
+                } catch (closeErr) {
+                  errors.push({ botId: bot.id, action: 'close_position', error: closeErr.message });
+                }
+            } else {
+                // Posizione piccola: lascia aperta, segnala per gestione manuale.
+                // Il uPNL live viene arricchito dopo il loop (batch per wallet).
+                skippedPositions.push({
+                  botId: bot.id,
+                  coin: bot.coin,
+                  masterAddress: bot.masterAddress,
+                  notionalUsd: estimatedNotional,
+                  side: bot.position.side,
+                  size: bot.position.size,
+                  unrealizedPnl: null, // popolato sotto
+                  reason: `notional ${estimatedNotional.toFixed(2)} USD <= soglia ${threshold} USD — gestione manuale raccomandata`
+                });
+              }
+            }
+          } catch (botErr) {
+            errors.push({ botId: bot.id, action: 'stop', error: botErr.message });
+          }
+        }
+
+        // --- Arricchimento uPNL live per le posizioni skippate ---
+        // Una singola call getAccount per wallet (non per bot) per minimizzare le API call.
+        // Il uPNL è l'informazione critica per decidere se chiudere manualmente.
+        if (skippedPositions.length > 0) {
+          const uniqueWallets = [...new Set(skippedPositions.map(p => p.masterAddress))];
+          const accountsByWallet = new Map();
+          await Promise.allSettled(
+            uniqueWallets.map(async addr => {
+              try {
+                const acc = await hyperliquid.getAccount(addr, hyperliquid.getNetwork());
+                // Mappa coin → unrealizedPnl per lookup O(1)
+                const pnlByCoin = new Map(
+                  (acc.positions || []).map(pos => [pos.coin, pos.unrealizedPnl])
+                );
+                accountsByWallet.set(addr, pnlByCoin);
+              } catch (e) {
+                logger.warn(`Kill Switch: impossibile recuperare uPNL per ${addr}: ${e.message}`);
+              }
+            })
+          );
+
+          // Arricchisci ogni posizione skippata con il uPNL live
+          for (const sp of skippedPositions) {
+            const pnlByCoin = accountsByWallet.get(sp.masterAddress);
+            if (pnlByCoin) {
+              sp.unrealizedPnl = pnlByCoin.get(sp.coin) ?? null;
+            }
+          }
+        }
+
+        db.insertAudit('system', 'kill_switch_safe_exit', {
+          agent_id, threshold, stopped, closedPositions: closedPositions.length,
+          skippedPositions: skippedPositions.length, errors
+        });
+
+        const logMsg = `🛑 Kill Switch Safe-Exit: agent=${agent_id}, soglia=${threshold} USD, ` +
+          `fermati=${stopped.length}, chiuse=${closedPositions.length}, skip=${skippedPositions.length}`;
+        logger.warn(logMsg);
+
+        // Notifica Telegram con dettaglio Safe-Exit
+        const notifParts = [
+          `🛑 <b>Kill Switch Safe-Exit</b> [${agent_id}]`,
+          `🔴 ${stopped.length} bot fermat${stopped.length === 1 ? 'o' : 'i'} (nessuna nuova apertura)`
+        ];
+        if (closedPositions.length) {
+          notifParts.push(`⚡ ${closedPositions.length} posizion${closedPositions.length === 1 ? 'e chiusa' : 'i chiuse'} (notional > ${threshold} USD)`);
+        }
+        if (skippedPositions.length) {
+          const skLines = skippedPositions.map(p => {
+            const pnl = p.unrealizedPnl;
+            let pnlStr;
+            if (pnl == null) {
+              pnlStr = '⚪ uPNL n/d';
+            } else if (pnl >= 0) {
+              pnlStr = `🟢 uPNL +$${pnl.toFixed(2)}`;
+            } else {
+              pnlStr = `🔴 uPNL -$${Math.abs(pnl).toFixed(2)}`;
+            }
+            return `  • ${p.coin} ${(p.side || '').toUpperCase()} | $${p.notionalUsd?.toFixed(0)} | ${pnlStr}`;
+          }).join('\n');
+          notifParts.push(
+            `⏸️ ${skippedPositions.length} posizion${skippedPositions.length === 1 ? 'e lasciata aperta' : 'i lasciate aperte'} (size &lt; soglia):\n${skLines}`
+          );
+        }
+        if (errors.length) notifParts.push(`⚠️ ${errors.length} errori`);
+        if (stopped.length || closedPositions.length || skippedPositions.length) {
+          notifier.notify(notifParts.join('\n'), { urgent: closedPositions.length > 0 });
+        }
+
+        this.io.emit('perps:killSwitch', {
+          agent_id, threshold, stopped, closedPositions, skippedPositions, errors
+        });
+
+        res.json({
+          success: true,
+          data: {
+            agent_id, threshold,
+            botsFound: targets.length,
+            stopped,
+            closedPositions,
+            skippedPositions,
+            errors
+          }
+        });
+      } catch (error) {
+        logger.error('Kill Switch errore:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // --- AGENT-AWARE: Posizioni con filtro opzionale per agent ---
+
+    // GET /api/perps/positions?agent_id=hermes&limit=50
+    app.get('/api/perps/positions', (req, res) => {
+      try {
+        const agentId = req.query.agent_id || null;
+        const limit = parseInt(req.query.limit) || 100;
+        const rows = db.listPositions(limit, agentId);
+        res.json({ success: true, data: rows });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // --- AGENT-AWARE: Trades con filtro opzionale per agent ---
+    // GET /api/perps/trades?agent_id=hermes&limit=50
+    app.get('/api/perps/trades', (req, res) => {
+      try {
+        const agentId = req.query.agent_id || null;
+        const botId = req.query.bot_id || null;
+        const coin = req.query.coin || null;
+        const limit = parseInt(req.query.limit) || 100;
+        const rows = db.listTradesBy({ agentId, botId, coin, limit });
+        res.json({ success: true, data: rows });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+
     app.post('/api/perps/order', async (req, res) => {
       try {
         const { masterAddress, coin, side, sizeUsd, size, leverage, tp, sl, slippage } = req.body;
@@ -973,6 +1321,8 @@ class ArbitrageBotServer {
 
         db.insertTrade({ coin, side, px: entryPx, sz: orderSize, hlOid: order.oid });
         this.io.emit('perps:fill', { coin, side, size: orderSize, px: entryPx });
+        // Notifica dashboard: ricarica bots + posizioni immediatamente
+        this.io.emit('perps:dashboardRefresh', { reason: 'fill', coin, side });
         res.json({ success: true, data: { order, entryPx, size: orderSize, ...tpsl } });
       } catch (error) {
         logger.error('Errore ordine Perps:', error.message);
@@ -987,6 +1337,8 @@ class ArbitrageBotServer {
         const coin = decodeURIComponent(req.params.coin);
         const result = await hyperliquid.closePosition({ masterAddress, coin }, hyperliquid.getNetwork());
         this.io.emit('perps:position', { coin, closed: true });
+        // Notifica dashboard: ricarica bots + posizioni immediatamente
+        this.io.emit('perps:dashboardRefresh', { reason: 'position_closed', coin });
         res.json({ success: true, data: result });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });
@@ -1318,6 +1670,110 @@ class ArbitrageBotServer {
         }
       }
       res.json({ success: true, data: { killSwitch: on, changed: was !== on } });
+    });
+
+    /**
+     * MCP (Model Context Protocol) Endpoints per Hermes e agenti AI esterni.
+     * Supporta JSON-RPC 2.0 (`POST /api/mcp`), lista tools (`GET /api/mcp/tools`)
+     * e invocazione REST diretta (`POST /api/mcp/call` e `POST /api/mcp/tools/:toolName`).
+     */
+    app.post('/api/mcp', handleJsonRpcMcp);
+    app.get('/api/mcp/tools', (req, res) => res.json({ success: true, tools: MCP_TOOLS_DEFINITIONS }));
+    app.post('/api/mcp/call', async (req, res) => {
+      const { name, arguments: toolArgs } = req.body || {};
+      const result = await executeMcpTool(name, toolArgs || {});
+      res.json(result);
+    });
+    app.post('/api/mcp/tools/:toolName', async (req, res) => {
+      const result = await executeMcpTool(req.params.toolName, req.body || {});
+      res.json(result);
+    });
+
+    /**
+     * INTERNAL RELOAD — endpoint loopback per sincronizzare botManager dal DB.
+     *
+     * Chiamato dal processo MCP Stdio (Hermes) dopo operazioni mutanti
+     * (register_bot, delete_bot, bot_control). Garantisce che la UI e le API
+     * HTTP riflettano immediatamente lo stato del DB senza riavvio del container.
+     *
+     * Sicurezza: nessun cookie richiesto, ma accettato SOLO da loopback (127.x)
+     * o dalla rete Docker interna (172.x). Qualsiasi altro IP riceve 403.
+     */
+    app.post('/internal/mcp/reload', async (req, res) => {
+      const ip = req.ip || req.socket?.remoteAddress || '';
+      const allowed = ip === '127.0.0.1' || ip === '::1' || ip.startsWith('::ffff:127.') || ip.startsWith('172.');
+      if (!allowed) {
+        logger.warn(`/internal/mcp/reload rifiutato da IP non loopback: ${ip}`);
+        return res.status(403).json({ success: false, error: 'Accesso non consentito' });
+      }
+      try {
+        const { PerpsBot } = await import('./perps/bot.js');
+        const dbBots = db.listBots();
+        let added = 0, removed = 0, updated = 0;
+        const dbIds = new Set(dbBots.map(r => r.id));
+        const dbById = new Map(dbBots.map(r => [r.id, r]));
+
+        // 1. Rimuovi dalla Map i bot eliminati dal DB
+        for (const [id] of botManager.bots) {
+          if (!dbIds.has(id)) {
+            botManager.bots.get(id)?.stop?.();
+            botManager.bots.delete(id);
+            if (botManager.io) botManager.io.emit('perps:botDelete', { id });
+            removed++;
+          }
+        }
+
+        // 2. Aggiungi bot presenti nel DB ma non in-memory
+        for (const row of dbBots) {
+          if (!botManager.bots.has(row.id)) {
+            const bot = new PerpsBot(row, botManager._onUpdate.bind(botManager));
+            botManager.bots.set(bot.id, bot);
+            if (row.status === 'running') bot.start();
+            // Notifica il client della nuova card
+            if (botManager.io) botManager.io.emit('perps:botCreate', bot.getState());
+            added++;
+          }
+        }
+
+        // 3. Reconcilia lo status dei bot già in-memory con il DB
+        //    (es. MCP Stdio ha cambiato status=running/stopped sul DB
+        //    ma Express non l'ha ancora avviato/fermato in memoria)
+        for (const [id, bot] of botManager.bots) {
+          const row = dbById.get(id);
+          if (!row) continue;
+          const inMemStatus = bot.status;
+          const dbStatus   = row.status;
+          if (inMemStatus === dbStatus) continue; // già allineato
+
+          if (dbStatus === 'running' && inMemStatus !== 'running') {
+            // Il DB dice running ma Express ha il bot fermo: avvialo
+            try { bot.start(); updated++; } catch {}
+          } else if (dbStatus === 'stopped' && inMemStatus === 'running') {
+            // Il DB dice stopped ma Express lo ha ancora in run: fermalo
+            try { bot.stop(); updated++; } catch {}
+          }
+
+          // Notifica il client dello stato aggiornato con i dati freschi
+          if (botManager.io) {
+            setTimeout(() => {
+              const state = bot.getState();
+              botManager.io.emit('perps:botUpdate', state);
+            }, 50); // piccola attesa perché start() è asincrono
+          }
+        }
+
+        logger.info(`🔄 MCP reload: +${added} aggiunti, -${removed} rimossi, ~${updated} status reconciliati`);
+
+        // Emetti dashboardRefresh per aggiornamento completo
+        if (botManager.io) {
+          botManager.io.emit('perps:dashboardRefresh', { reason: 'mcp_reload' });
+        }
+
+        return res.json({ success: true, added, removed, updated, total: botManager.bots.size });
+      } catch (err) {
+        logger.error('Errore /internal/mcp/reload:', err.message);
+        return res.status(500).json({ success: false, error: err.message });
+      }
     });
 
     /**

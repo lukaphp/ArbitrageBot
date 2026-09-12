@@ -38,6 +38,7 @@ import paperBroker from '../src/perps/paperBroker.js';
 import db from '../src/db/database.js';
 import riskManager from '../src/perps/riskManager.js';
 import notifier from '../src/perps/notifier.js';
+import logger from '../src/utils/logger.js';
 import { PerpsBot } from '../src/perps/bot.js';
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'arbitrage-closereason-'));
@@ -49,6 +50,13 @@ client.roundPx = (px) => Math.round(px * 1e4) / 1e4;
 
 const notified = [];
 notifier.notify = async (text) => { notified.push(text); };
+
+// I `logger.warn` fanno parte del contratto: una chiusura che il bot NON è
+// riuscito a spiegare deve distinguersi nei log da un TP/SL riconosciuto,
+// altrimenti l'unico posto in cui il dubbio è visibile resta una colonna di DB
+// che nessuno guarda mentre il problema è in corso.
+const warns = [];
+logger.warn = (...args) => { warns.push(args.map(String).join(' ')); };
 
 const CONFIG = {
   paper: true,
@@ -122,6 +130,7 @@ test('TAKE PROFIT scattato → close_reason "take profit eseguito", bucket tp', 
   const coin = 'CR1-PERP';
   const bot = await botWithOpenPosition('bot-cr-1', coin, master);
   const posId = bot.position.id;
+  warns.length = 0;
 
   // Prezzo sopra il TP (110) e ben sopra lo SL (95): scatta solo il TP.
   await moveAndReconcile(bot, master, coin, 111);
@@ -133,6 +142,10 @@ test('TAKE PROFIT scattato → close_reason "take profit eseguito", bucket tp', 
   assert.equal(db.closeReasonBucket(row.close_reason), 'tp');
   assert.ok(row.pnl > 0, 'PnL reale positivo, coerente con un TP');
   assert.deepEqual(db.getBotPerformance(bot.id).closeReasons, { tp: 1 });
+  // Contro-prova del warn sulle chiusure non spiegate: una chiusura RICONOSCIUTA
+  // non deve produrlo, altrimenti sarebbe rumore a ogni TP e nessuno lo leggerebbe.
+  assert.equal(warns.filter(w => /non spiegata|irrisolt/i.test(w)).length, 0,
+    'nessun warn di chiusura irrisolta quando il TP è stato riconosciuto');
 });
 
 test('STOP LOSS scattato → close_reason "stop loss eseguito", bucket sl', async () => {
@@ -202,6 +215,7 @@ test('DUBBIO: fill di chiusura non ancora visibili → si torna alla stringa gen
   bot.position.openedAt = Date.now() + 60_000;
   bot.position.lastUnrealized = -3;
 
+  warns.length = 0;
   await bot._reconcile(undefined, { price: MID, candles: [] });
 
   const row = rowOf(posId);
@@ -209,6 +223,12 @@ test('DUBBIO: fill di chiusura non ancora visibili → si torna alla stringa gen
     'senza il dato non si etichetta: resta la stringa generica di sempre');
   assert.equal(db.closeReasonBucket(row.close_reason), 'trigger_or_external');
   assert.equal(row.pnl, -3, 'il PnL ripiega sull\'unrealized noto, come prima');
+
+  // La stringa generica in DB era l'unico segnale: nei log questa chiusura era
+  // indistinguibile da un TP riconosciuto. Ora no.
+  const warn = warns.find(w => /non spiegata|irrisolt/i.test(w));
+  assert.ok(warn, `una chiusura non spiegata deve lasciare un warn dedicato — visti: ${JSON.stringify(warns)}`);
+  assert.match(warn, new RegExp(coin), 'il warn dice di quale posizione si tratta');
 });
 
 test('DUBBIO: posizione ereditata da prima del fix (nessun oid tracciato) → generica', async () => {

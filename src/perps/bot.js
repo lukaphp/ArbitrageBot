@@ -262,7 +262,19 @@ export class PerpsBot {
       // Posizione non più sull'exchange: TP o SL scattati, oppure chiusura da
       // fuori. `null` = «deducilo dai fill», mentre gli oid dei trigger sono
       // ancora in memoria (vedi _registerClose/_classifyCloseFills).
-      await this._registerClose(null, this.position.lastUnrealized || 0);
+      const coin = this.coin;
+      const side = this.position.side;
+      const closeReason = await this._registerClose(null, this.position.lastUnrealized || 0);
+
+      // La deduzione non è riuscita: nessun fill spiega la sparizione (non
+      // ancora visibili, senza oid, o posizione senza trigger tracciati). In DB
+      // resta la stringa generica, ma nei log questa chiusura era finora
+      // indistinguibile da un TP riconosciuto — e sono due situazioni diverse:
+      // qui il bot NON sa cosa è successo ai suoi soldi. Il warn è l'unico posto
+      // in cui il dubbio è visibile mentre sta accadendo.
+      if (closeReason === CLOSE_REASON_UNRESOLVED) {
+        logger.warn(`Bot ${this.name}: chiusura NON spiegata di ${side} ${coin} — nessun fill riconducibile ai trigger del bot (${CLOSE_REASON_UNRESOLVED}). PnL registrato dall'ultimo unrealized noto, non dai fill.`);
+      }
     } else if (livePos && this.position) {
       this.position.size = livePos.size;
       this.position.lastUnrealized = livePos.unrealizedPnl;
@@ -1125,6 +1137,11 @@ export class PerpsBot {
    *   mio controllo, deducila dai fill» — vedi `_classifyCloseFills`. La
    *   deduzione va fatta ORA, mentre gli oid dei trigger sono ancora in memoria:
    *   a posteriori, sullo storico già chiuso, il dato non è più ricostruibile.
+   *
+   * @returns il `close_reason` scritto in DB (`undefined` se non c'era una
+   *   posizione da chiudere). Serve al chiamante per distinguere una chiusura
+   *   riconosciuta da una rimasta irrisolta senza ricalcolare la deduzione —
+   *   vedi il warn in `_reconcile`.
    */
   async _registerClose(reason, fallbackPnl = 0) {
     if (!this.position) return;
@@ -1175,6 +1192,8 @@ export class PerpsBot {
       notifier.notify(`🛑 <b>${this.name}</b>: limite perdita giornaliera raggiunto, bot fermato.`, { urgent: true });
       this.stop();
     }
+
+    return closeReason;
   }
 
   getState() {

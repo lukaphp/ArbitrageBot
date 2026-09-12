@@ -75,6 +75,7 @@ import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk,
 // DEBT-03: la profondità della coda di esecuzione (WARN-02) è la sola fonte reale
 // per "Queue health" nella card EXECUTION STATUS della cockpit.
 import execQueue from './perps/execQueue.js';
+import { reconcileStalePositions } from './perps/reconciler.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -496,7 +497,28 @@ class ArbitrageBotServer {
         const botById = new Map(bots.map(b => [b.id, b.name]));
         const coinBots = {};
         for (const b of bots) (coinBots[b.coin] ||= new Set()).add(b.name);
-        const dbOpen = db.listPositions(200).filter(p => p.status === 'open');
+        let dbOpen = db.listPositions(200).filter(p => p.status === 'open');
+
+        // Riga `open` in DB senza riscontro sull'exchange, con il bot FERMO:
+        // nessun tick può accorgersene (`bot._reconcile` gira solo mentre il bot
+        // è running), quindi resterebbe orfana per sempre. Qui l'account live e
+        // le righe DB sono già entrambi in mano: la regola sta in
+        // `reconciler.js`, questa rotta si limita a fornirle i dati.
+        // `.status` letto direttamente dalle istanze invece di `listStates()`:
+        // serve solo sapere chi sta girando, non costruire ogni stato completo.
+        const runningBotIds = new Set(
+          [...botManager.bots.values()].filter(b => b?.status === 'running').map(b => b.id)
+        );
+        const riconciliate = reconcileStalePositions({
+          openRows: dbOpen, livePositions: account.positions || [], bots, runningBotIds, address
+        });
+        // Le righe appena chiuse non sono più "aperte": lasciarle nella mappa
+        // farebbe attribuire il loro bot a una posizione live omonima.
+        if (riconciliate.length) {
+          const chiuse = new Set(riconciliate.map(r => r.row.id));
+          dbOpen = dbOpen.filter(p => !chiuse.has(p.id));
+        }
+
         const key = (coin, side) => `${coin}|${side}`;
         const dbMap = new Map();
         for (const p of dbOpen) dbMap.set(key(p.coin, p.side), p);

@@ -574,6 +574,15 @@ export class PerpsDatabase {
    *    non sono distinguibili tra loro, e fingere che lo siano sarebbe lo stesso
    *    errore che questo lavoro ha appena corretto;
    *  - `strategy` ← uscita per regola della strategia o segnale esterno;
+   *  - `reconciliation_mismatch` ← 'riconciliata (orfana, bot fermo)': la riga
+   *    era `open` in DB mentre sull'exchange la posizione non c'era più, e il
+   *    bot era FERMO (nessun tick che potesse accorgersene). Chiusa a posteriori
+   *    da `reconciler.js`. **Non è un trade con esito**: il PnL è `null` perché
+   *    non ricostruibile, quindi queste righe non dicono nulla su come è andata
+   *    — dicono che DB ed exchange erano disallineati. Sta PRIMA di
+   *    `trigger_or_external` per la stessa ragione per cui `safety` sta in cima:
+   *    perché la sua posizione nella ladder non dipenda dalle parole che il
+   *    testo contiene oggi;
    *  - `trigger_or_external` ← 'chiusa (TP/SL o esterna)', cioè i casi in cui NON
    *    si è potuto stabilire quale ordine abbia chiuso (fill non ancora visibili,
    *    fill senza oid, posizione aperta prima del tracciamento degli oid). Ci
@@ -594,6 +603,7 @@ export class PerpsDatabase {
     if (/stop loss/.test(text)) return 'sl';
     if (/manuale o esterna/.test(text)) return 'manual_or_external';
     if (/regola di uscita|segnale esterno/.test(text)) return 'strategy';
+    if (/riconciliata/.test(text)) return 'reconciliation_mismatch';
     if (/tp\/sl|più trigger|esterna/.test(text)) return 'trigger_or_external';
     return 'other';
   }

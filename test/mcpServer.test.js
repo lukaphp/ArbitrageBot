@@ -18,6 +18,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import db from '../src/db/database.js';
 import botManager from '../src/perps/botManager.js';
 import riskAgent from '../src/agents/riskAgent.js';
@@ -56,6 +59,18 @@ import {
 // stesso mock: nessun ordine che arriva a `placeMarketOrder` deve dipendere
 // da una rete esterna raggiungibile.
 client.getMid = async () => 50.0;
+
+// ISOLAMENTO DEL DB. Questo file usava il DB REALE (`data/perps.db`), contro la
+// convenzione del progetto — e non era un dettaglio formale: `paperBroker`
+// PERSISTE il suo stato simulato nella tabella `settings` (QUAL-01), quindi ogni
+// esecuzione lasciava le posizioni paper dell'indirizzo di test dentro il DB di
+// sviluppo. Accumulandosi run dopo run, l'esposizione dell'account `0x…dEaD`
+// superava il tetto di 5000$ e i subtest sui guardrail iniziavano a fallire
+// **in modo permanente**, su una macchina sì e su un'altra no, per uno stato
+// che nessuno vedeva. Redirezione PRIMA di qualunque `ensure()`/`init()`: gli
+// import sopra sono lazy sul DB (nessuno apre il file al caricamento).
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'arbitrage-mcp-'));
+db.dbPath = path.join(tempDir, 'perps.db');
 
 /**
  * Osservatorio del ponte cross-processo (`notifyExpressReload`).

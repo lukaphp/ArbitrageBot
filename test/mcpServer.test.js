@@ -17,6 +17,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import db from '../src/db/database.js';
 import botManager from '../src/perps/botManager.js';
 import riskAgent from '../src/agents/riskAgent.js';
@@ -55,6 +56,44 @@ import {
 // stesso mock: nessun ordine che arriva a `placeMarketOrder` deve dipendere
 // da una rete esterna raggiungibile.
 client.getMid = async () => 50.0;
+
+/**
+ * Osservatorio del ponte cross-processo (`notifyExpressReload`).
+ *
+ * Il punto di osservazione è la RICHIESTA HTTP verso `/internal/mcp/reload`, non
+ * la funzione che la fa: `notifyExpressReload` è interna al modulo e, anche
+ * esportandola, i suoi chiamanti userebbero il binding locale — una spia sul
+ * nome non intercetterebbe nulla e il test passerebbe (o fallirebbe) per il
+ * motivo sbagliato. Qui si verifica invece il comportamento che serve davvero:
+ * che il tool bussi al processo Express.
+ *
+ * `await import('http')` dentro tools.js restituisce lo STESSO oggetto di
+ * questo import (verificato: `ns.default === http`), quindi sostituire
+ * `http.request` basta. Si intercetta SOLO il percorso di reload e si delega
+ * tutto il resto all'originale, per non alterare nessun'altra rete del
+ * processo di test. Nei test `botManager.io` NON è null (Express e MCP girano
+ * nello stesso processo), quindi l'emit diretto "funziona" comunque: senza
+ * questa intercettazione non ci sarebbe modo di distinguere un tool che
+ * notifica anche il processo Express da uno che non lo fa.
+ */
+const reloadCalls = [];
+const originalHttpRequest = http.request;
+http.request = function (options, ...rest) {
+  const isReload = options && typeof options === 'object' && options.path === '/internal/mcp/reload';
+  if (!isReload) return originalHttpRequest.call(this, options, ...rest);
+  reloadCalls.push({ method: options.method, hostname: options.hostname, port: options.port });
+  const cb = rest.find(a => typeof a === 'function');
+  const req = {
+    on: () => req,
+    destroy: () => req,
+    end: () => { if (cb) setImmediate(() => cb({ resume: () => {} })); return req; }
+  };
+  return req;
+};
+
+/** `notifyExpressReload` non è attesa dai chiamanti: si drena il tick prima di guardare. */
+const flush = () => new Promise(r => setImmediate(r));
+const resetReloadCalls = () => { reloadCalls.length = 0; };
 
 test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes', async (t) => {
   db.ensure();
@@ -509,11 +548,93 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     assert.ok(!deletedDbBot);
   });
 
+  await t.test('12. Sync cross-processo: ogni tool che MUTA bussa a /internal/mcp/reload', async () => {
+    // Con Hermes su MCP Stdio, `botManager.io` è null in quel processo: gli
+    // emit Socket.IO dei tool sono no-op e la WebApp resta ferma finché
+    // qualcuno non ricarica. L'unico ponte è la POST loopback al processo
+    // Express, che rilegge dal DB e riemette lui gli eventi ai browser veri.
+
+    // CONTROLLO DI RIFERIMENTO, prima dei casi nuovi: su `bot_control` il ponte
+    // esisteva già. Se qui non si vedesse nulla, l'osservatorio sarebbe cieco e
+    // i verdi che seguono non varrebbero niente.
+    resetReloadCalls();
+    const stopRes = await handleBotControl({ bot_id: testBotId, action: 'stop' });
+    assert.equal(stopRes.success, true);
+    await flush();
+    assert.equal(reloadCalls.length, 1, 'bot_control notifica già oggi il processo Express');
+    assert.equal(reloadCalls[0].method, 'POST');
+    assert.equal(reloadCalls[0].hostname, '127.0.0.1');
+
+    // place_order_paper: muta il paper broker e scrive un trade. Bot dedicato
+    // con indirizzo proprio: il bot condiviso della suite arriva qui con
+    // esposizione paper accumulata dai subtest precedenti e un tetto abbassato
+    // a 800$, quindi qualunque ordine verrebbe respinto dal guardrail — e il
+    // test verificherebbe il rifiuto, non la sincronizzazione.
+    const orderBotId = 'test-mcp-reload-' + Date.now();
+    db.insertBot({
+      id: orderBotId,
+      name: 'MCP Reload Order Bot',
+      coin: 'SOL-PERP',
+      network: 'testnet',
+      masterAddress: '0x000000000000000000000000000000000000bEEF',
+      config: { leverage: 2, maxPositionUsd: 5000, maxDailyLossUsd: 200 },
+      status: 'stopped',
+      linked_agent_id: 'hermes_agent_01',
+      actor_label: 'Hermes',
+      actor_id: 'hermes_agent_01',
+      is_managed_by_agent: 1
+    });
+    botManager.loadFromDb();
+
+    resetReloadCalls();
+    resetOrderVelocity(orderBotId);
+    const order = await handlePlaceOrderPaper({
+      bot_id: orderBotId, side: 'long', size: 1.0, entry_price: 50.0
+    });
+    assert.equal(order.success, true, order.message);
+    await flush();
+    assert.equal(reloadCalls.length, 1, 'place_order_paper deve notificare il processo Express');
+    resetOrderVelocity(orderBotId);
+    try { db.deleteBot(orderBotId); } catch {}
+
+    // update_strategy_params: lo stadio 1 non ha ancora cambiato NULLA, quindi
+    // non deve bussare; solo lo stadio 2 scrive.
+    const params = { leverage: 3 };
+    resetReloadCalls();
+    const prompt = await handleUpdateStrategyParams({ bot_id: testBotId, params });
+    assert.equal(prompt.status, 'confirmation_required');
+    await flush();
+    assert.equal(reloadCalls.length, 0, 'la sola richiesta di conferma non cambia nulla da sincronizzare');
+
+    const updated = await handleUpdateStrategyParams({
+      bot_id: testBotId, params, confirmation_token: prompt.confirmation_token
+    });
+    assert.equal(updated.success, true);
+    await flush();
+    assert.equal(reloadCalls.length, 1, 'update_strategy_params deve notificare il processo Express');
+
+    // emergency_shutdown: è il caso in cui una dashboard ferma al momento
+    // sbagliato è peggio di tutti — il kill-switch è attivo e la UI mostra i
+    // bot ancora in esecuzione.
+    const killPrompt = await handleEmergencyShutdown({ threshold: 5.0 });
+    assert.equal(killPrompt.status, 'confirmation_required');
+    resetReloadCalls();
+    const shutdown = await handleEmergencyShutdown({
+      confirmation_token: killPrompt.confirmation_token, threshold: 5.0
+    });
+    assert.equal(shutdown.success, true);
+    await flush();
+    assert.equal(reloadCalls.length, 1, 'emergency_shutdown deve notificare il processo Express');
+
+    riskAgent.setKillSwitch(false); // stesso ripristino del subtest 6
+  });
+
   // Cleanup finale del bot di test
   try {
     await handleBotControl({ bot_id: testBotId, action: 'stop' });
     db.deleteBot(testBotId);
   } catch {}
+  http.request = originalHttpRequest;
 });
 
 /**

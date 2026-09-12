@@ -22,9 +22,13 @@ visto, che è esattamente ciò che la DoD di questo progetto vuole evitare.
 
 **How to apply:** rebuild nativo una volta, poi esegui la suite con
 `node --test --test-force-exit test/*.test.js` invece di `npm test`, e **dichiara nel report che hai
-usato quella variante e perché**. Misura sempre un **baseline prima di toccare i file**: al
-2026-09-12 c'erano 4 rossi pre-esistenti, tutti su test di UI in `public/` (2 nel drawer advisor, 2
-nella tab Performance) — senza baseline li si attribuisce al proprio lavoro. Per capire *chi* tiene
+usato quella variante e perché**. Misura sempre un **baseline prima di toccare i file** — e prima di
+spiegare un rosso che cambia tra due run, **guarda `git log`**: il working tree è condiviso e i
+colleghi committano mentre lavori ([[tree-condiviso-mai-git-stash]]). Il 2026-09-12 ho visto 4 rossi
+di UI (drawer advisor ×2, tab Performance ×2) sparire tra due run e stavo per dichiararli *flake*:
+erano invece un bug vero — sandbox `node:vm` senza `location`/`history` — corretto da un altro nel
+frattempo. Un rosso intermittente in questa suite esiste (il DCA con fill parziale in
+`botFillSize.test.js`), ma "flake" è la spiegazione da dare **ultima**, non la prima. Per capire *chi* tiene
 vivo il processo: importa il file di test da uno script e stampa
 `process.getActiveResourcesInfo()` da un timer `unref`-ato, oppure avvolgi `setInterval`/`setTimeout`
 per registrarne lo stack. Se qualcuno decide di sistemarlo, le due strade sono `--test-force-exit`

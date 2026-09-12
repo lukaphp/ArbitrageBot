@@ -410,6 +410,10 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
       });
     }
 
+    // …e il processo Express, che nel percorso MCP Stdio è un ALTRO processo:
+    // lì `botManager.io` è null e l'emit qui sopra non raggiunge nessuno.
+    notifyExpressReload().catch(() => {});
+
     const resPayload = {
       bot_id,
       coin,
@@ -592,6 +596,11 @@ export async function handleEmergencyShutdown({ threshold = null, confirmation_t
       botManager.io.emit('perps:dashboardRefresh', { reason: 'emergency_shutdown' });
     }
 
+    // …e il processo Express, che nel percorso MCP Stdio è un ALTRO processo.
+    // È il caso in cui una dashboard ferma fa più danno: kill-switch attivo e
+    // bot fermi, ma la UI continua a mostrarli in esecuzione.
+    notifyExpressReload().catch(() => {});
+
     const resPayload = {
       kill_switch: true,
       stopped_bots_count: stoppedCount,
@@ -707,6 +716,10 @@ export async function handleUpdateStrategyParams({ bot_id, params, confirmation_
       botManager.io.emit('perps:botUpdate', updatedState);
       botManager.io.emit('perps:dashboardRefresh', { reason: 'update_strategy_params', botId: bot_id });
     }
+
+    // …e il processo Express, che nel percorso MCP Stdio è un ALTRO processo:
+    // lì `botManager.io` è null e la config mostrata resterebbe quella vecchia.
+    notifyExpressReload().catch(() => {});
 
     logMcpAudit('update_strategy_params', { bot_id, updated_keys: Object.keys(params), success: true });
 

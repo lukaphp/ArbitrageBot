@@ -129,7 +129,12 @@ function loadPerfUi({ data = PERFORMANCE, fails = false, withCharts = true } = {
       return { ok: true, status: 200, json: async () => ({ success: true, data: {} }) };
     },
     alert: () => {}, confirm: () => true,
-    setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {}
+    setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {},
+    // CI-03: switchCockpitTab() persiste il tab nell'URL (location.hash +
+    // history.replaceState, vedi b54285a) — senza questi due globali il
+    // metodo lancia ReferenceError non appena viene chiamato.
+    location: { hash: '' },
+    history: { replaceState: () => {} }
   };
   if (withCharts) sandbox.window.LightweightCharts = chartStub(record);
   sandbox.LightweightCharts = sandbox.window.LightweightCharts;

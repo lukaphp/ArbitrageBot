@@ -1156,14 +1156,29 @@ class PerpsApp {
    * Breakdown dei motivi di chiusura. Le chiavi sconosciute vengono mostrate come
    * arrivano (escapate): meglio una etichetta grezza che nascondere trade veri
    * perché il backend ha aggiunto un motivo che questa mappa non conosce.
+   *
+   * Un bucket è però trattato diversamente dagli altri: quello delle posizioni
+   * chiuse dalla riconciliazione DB↔Hyperliquid (bot fermo, posizione sparita
+   * dall'exchange senza che nessun trigger del bot l'abbia chiusa). Non è un
+   * esito di trading come TP o SL — è il segnale che il DB e l'exchange si erano
+   * disallineati, e va letto come un avviso, non come una riga di statistica.
+   * Perciò riceve lo stesso trattamento visivo del badge `⚠️ CRASH` sulla card
+   * del bot (`.bot-status-crashed-badge`), unico avviso già presente in questa UI.
+   *
+   * Il nome del bucket lo decide il backend (`closeReasonBucket()` in
+   * `src/db/database.js`): sta in una costante sola perché rinominarlo resti una
+   * riga da cambiare, non una caccia nel file.
    */
   _renderCloseReasons() {
     const target = document.getElementById('perfCloseReasons');
     if (!target) return;
+    const RECONCILIATION_BUCKET = 'reconciliation_mismatch';
+    const RECONCILIATION_HINT = 'Posizione chiusa dalla riconciliazione: risultava aperta nel database ma non su Hyperliquid. Nessun trigger del bot l\'ha chiusa.';
     const labels = {
       tp: 'Take profit', sl: 'Stop loss', manual: 'Chiusura manuale', dca: 'DCA',
       trailing: 'Trailing stop', liquidation: 'Liquidazione', signal: 'Segnale di uscita',
-      killswitch: 'Kill-switch', unknown: 'Non registrato', other: 'Altro'
+      killswitch: 'Kill-switch', unknown: 'Non registrato', other: 'Altro',
+      [RECONCILIATION_BUCKET]: '⚠️ Disallineato con Hyperliquid'
     };
     const totals = new Map();
     for (const bot of this.perfData?.bots || []) {
@@ -1182,7 +1197,10 @@ class PerpsApp {
     target.innerHTML = rows.map(([reason, count]) => {
       const label = labels[reason] || reason;
       const pct = total > 0 ? Math.round((count / total) * 100) : 0;
-      return `<div class="cockpit-metric-row"><span>${this._escapeHtml(label)}</span><strong>${count} · ${pct}%</strong></div>`;
+      const isMismatch = reason === RECONCILIATION_BUCKET;
+      const rowClass = isMismatch ? 'cockpit-metric-row close-reason-mismatch' : 'cockpit-metric-row';
+      const hint = isMismatch ? ` title="${this._escapeHtml(RECONCILIATION_HINT)}"` : '';
+      return `<div class="${rowClass}"${hint}><span>${this._escapeHtml(label)}</span><strong>${count} · ${pct}%</strong></div>`;
     }).join('');
   }
 

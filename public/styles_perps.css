@@ -574,6 +574,23 @@
   50%       { opacity: 0.35; }
 }
 
+/* Riga "⚠️ Disallineato con Hyperliquid" nel breakdown dei motivi di chiusura
+   (sezione Performance). Stessa palette di allerta del badge ⚠️ CRASH qui sopra
+   — è lo stesso tipo di informazione: qualcosa non torna e va guardato. Niente
+   lampeggio, però: il badge sta su una card che si guarda al volo, questa è una
+   riga in un elenco di statistiche che resta a schermo.
+   Il selettore è composto (due classi) perché `.cockpit-metric-row` è definita
+   in styles_cockpit.css, caricato DOPO questo file. */
+.cockpit-metric-row.close-reason-mismatch {
+  color: #e53e3e;
+  font-weight: 700;
+  border-left: 3px solid #e53e3e;
+  padding-left: 8px;
+  background: rgba(229, 62, 62, 0.08);
+  cursor: help;
+}
+.cockpit-metric-row.close-reason-mismatch strong { color: #e53e3e; }
+
 /* Card con bordo rosso quando crashed */
 .bot-card.bot-crashed {
   border: 1.5px solid rgba(229, 62, 62, 0.6) !important;

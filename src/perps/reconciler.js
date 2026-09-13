@@ -56,6 +56,32 @@ import notifier from './notifier.js';
  */
 export const CLOSE_REASON_STALE_ORPHAN = 'riconciliata (orfana, bot fermo)';
 
+/**
+ * Motivo di chiusura per una riga che duplica una posizione già chiusa da
+ * un'altra riga: UNA sola posizione fisica, più righe `positions` che se la
+ * contendono perché più bot sullo stesso (wallet, coin) l'hanno adottata
+ * ciascuno per conto proprio (`_reconcile`, ramo di adozione).
+ *
+ * PERCHÉ NON RIUSARE `CLOSE_REASON_STALE_ORPHAN`. Quello dice «la posizione non
+ * c'è più sull'exchange e il bot era fermo»: una divergenza DB↔exchange sanata
+ * a posteriori, con PnL mai conosciuto. Qui è l'opposto — la posizione è
+ * esistita davvero, si è chiusa davvero e il suo PnL è noto: appartiene però a
+ * UNA riga sola, e queste sono le copie. Mescolarle renderebbe indistinguibili
+ * due difetti diversi, che si correggono in modi diversi (l'uno con la
+ * riconciliazione, l'altro impedendo l'adozione multipla).
+ *
+ * Vale la stessa disciplina sul testo: nessuna delle parole su cui la ladder di
+ * `closeReasonBucket` fa match prima di arrivare qui ("stop loss", "esterna",
+ * "riconciliata", "TP/SL", …), altrimenti una copia finirebbe contata come un
+ * trade spiegato — esattamente il conteggio che questo motivo serve a evitare.
+ *
+ * Il PnL di queste righe va messo a `null`, non a 0: `null` è già la convenzione
+ * del progetto per «non attribuibile a questa riga» (`(r.pnl || 0)` nelle somme,
+ * `pnl != null` nella rotta dei fill), mentre 0 affermerebbe un trade chiuso in
+ * pari che non è mai avvenuto.
+ */
+export const CLOSE_REASON_DUPLICATE_ADOPTION = 'duplicata (stessa posizione adottata da più bot)';
+
 /** Stessa tolleranza di suffisso già usata dalla rotta: DB 'SOL-PERP' ↔ live 'SOL'. */
 const sameCoin = (liveCoin, rowCoin) => liveCoin === rowCoin || `${liveCoin}-PERP` === rowCoin;
 
@@ -131,4 +157,7 @@ export function reconcileStalePositions({ openRows, livePositions, bots, running
   return orfane;
 }
 
-export default { CLOSE_REASON_STALE_ORPHAN, findOrphanPositions, reconcileStalePositions };
+export default {
+  CLOSE_REASON_STALE_ORPHAN, CLOSE_REASON_DUPLICATE_ADOPTION,
+  findOrphanPositions, reconcileStalePositions
+};

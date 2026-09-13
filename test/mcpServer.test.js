@@ -85,26 +85,31 @@ db.dbPath = path.join(tempDir, 'perps.db');
  * motivo sbagliato. Qui si verifica invece il comportamento che serve davvero:
  * che il tool bussi al processo Express.
  *
- * `await import('http')` dentro tools.js restituisce lo STESSO oggetto di
- * questo import (verificato: `ns.default === http`), quindi sostituire
- * `http.request` basta. Si intercetta SOLO il percorso di reload e si delega
- * tutto il resto all'originale, per non alterare nessun'altra rete del
- * processo di test. Nei test `botManager.io` NON è null (Express e MCP girano
- * nello stesso processo), quindi l'emit diretto "funziona" comunque: senza
- * questa intercettazione non ci sarebbe modo di distinguere un tool che
- * notifica anche il processo Express da uno che non lo fa.
+ * La POST parte da `postInternal` (`src/utils/internalLoopback.js`, condiviso
+ * con `botManager` da MCP-SYNC-02), che usa lo STESSO oggetto `http` di questo
+ * import: sostituire `http.request` basta, e il resto della rete del processo
+ * di test resta intatto perché si delega all'originale.
  */
 const reloadCalls = [];
 const originalHttpRequest = http.request;
 http.request = function (options, ...rest) {
-  const isReload = options && typeof options === 'object' && options.path === '/internal/mcp/reload';
-  if (!isReload) return originalHttpRequest.call(this, options, ...rest);
-  reloadCalls.push({ method: options.method, hostname: options.hostname, port: options.port });
+  // MCP-SYNC-02: si intercetta TUTTO `/internal/*`, non il solo reload. In
+  // questo processo `botManager.io` è null, quindi ogni `_emit()` di un bot
+  // avviato dai subtest fa partire davvero una POST loopback su
+  // `/internal/mcp/bot-update`: senza questo filtro il test aprirebbe socket
+  // veri verso la porta 3000 — e su una macchina con l'app in esecuzione
+  // manderebbe stati di bot di test alla dashboard vera. `reloadCalls` continua
+  // a contare SOLO il reload, che è l'oggetto delle assertion esistenti.
+  const isInternal = options && typeof options === 'object' && String(options.path || '').startsWith('/internal/');
+  if (!isInternal) return originalHttpRequest.call(this, options, ...rest);
+  if (options.path === '/internal/mcp/reload') {
+    reloadCalls.push({ method: options.method, hostname: options.hostname, port: options.port });
+  }
   const cb = rest.find(a => typeof a === 'function');
   const req = {
     on: () => req,
     destroy: () => req,
-    end: () => { if (cb) setImmediate(() => cb({ resume: () => {} })); return req; }
+    end: () => { if (cb) setImmediate(() => cb({ statusCode: 200, resume: () => {} })); return req; }
   };
   return req;
 };
@@ -749,9 +754,26 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     // CONTROLLO DI RIFERIMENTO, prima dei casi nuovi: su `bot_control` il ponte
     // esisteva già. Se qui non si vedesse nulla, l'osservatorio sarebbe cieco e
     // i verdi che seguono non varrebbero niente.
+    //
+    // IL BOT VA PORTATO IN ESECUZIONE PRIMA. Questo controllo era verde per il
+    // motivo sbagliato (scoperto in MCP-SYNC-02): il bot condiviso arriva qui
+    // GIÀ FERMO (`emergency_shutdown`, subtest 8), e `bot_control('stop')` su un
+    // bot fermo esce sul ramo "è già fermo" e ritorna `success: true` SENZA
+    // notificare nessuno — giustamente, non ha cambiato niente. L'unica POST che
+    // si contava era quella, in ritardo di una microtask, del subtest
+    // precedente: `notifyExpressReload` faceva `await import('http')` prima di
+    // partire, quindi cadeva dopo il `resetReloadCalls()` di questa riga. Tolto
+    // quell'await (la POST ora è sincrona), lo straggler cade prima del reset e
+    // il controllo si è scoperto vuoto. Uno `stop` che ferma davvero qualcosa è
+    // l'unica versione di questa assertion che significhi quello che dichiara.
+    const startRes = await handleBotControl({ bot_id: testBotId, action: 'start' });
+    assert.equal(startRes.success, true, 'il bot deve essere in esecuzione perché lo stop muti qualcosa');
+    await flush();
+
     resetReloadCalls();
     const stopRes = await handleBotControl({ bot_id: testBotId, action: 'stop' });
     assert.equal(stopRes.success, true);
+    assert.equal(stopRes.data?.status, 'stopped', 'lo stop ha davvero fermato il bot, non trovato già fermo');
     await flush();
     assert.equal(reloadCalls.length, 1, 'bot_control notifica già oggi il processo Express');
     assert.equal(reloadCalls[0].method, 'POST');

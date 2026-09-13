@@ -35,6 +35,7 @@ db.init();
 
 const { default: app } = await import('../src/server.js');
 const { default: botManager } = await import('../src/perps/botManager.js');
+const { CLOSE_REASON_STALE_ORPHAN, CLOSE_REASON_DUPLICATE_ADOPTION } = await import('../src/perps/reconciler.js');
 botManager.bots.clear();
 
 const BOT = 'bot-perf-1';
@@ -178,6 +179,30 @@ test('classificatore: mappa i testi che bot.js scrive davvero', () => {
   assert.equal(db.closeReasonBucket('Segnale esterno: close'), 'strategy');
   assert.equal(db.closeReasonBucket(null), 'other');
   assert.equal(db.closeReasonBucket('qualcosa di nuovo'), 'other');
+});
+
+/**
+ * I due motivi "non è un trade" devono restare DISTINGUIBILI fra loro e da tutto
+ * il resto. Le asserzioni partono dalle COSTANTI e non da stringhe riscritte a
+ * mano: se qualcuno cambia il testo di una costante lasciando indietro la ladder,
+ * questo test diventa rosso — che è l'unico modo in cui quella svista è
+ * osservabile (il testo finirebbe in `other` senza che niente si rompa).
+ */
+test('classificatore: righe duplicate e righe riconciliate hanno bucket propri e diversi', () => {
+  assert.equal(db.closeReasonBucket(CLOSE_REASON_DUPLICATE_ADOPTION), 'duplicate_adoption');
+  assert.equal(db.closeReasonBucket(CLOSE_REASON_STALE_ORPHAN), 'reconciliation_mismatch');
+  assert.notEqual(
+    db.closeReasonBucket(CLOSE_REASON_DUPLICATE_ADOPTION),
+    db.closeReasonBucket(CLOSE_REASON_STALE_ORPHAN),
+    'sono due difetti diversi: confonderli nasconde quale dei due si sta verificando'
+  );
+
+  // La trappola vera: il testo di una copia parla della stessa posizione chiusa
+  // da uno stop loss. Se cadesse nei bucket "spiegati" verrebbe contata come un
+  // trade con esito — cioè il conteggio gonfiato che la costante serve a evitare.
+  for (const bucket of ['tp', 'sl', 'safety', 'strategy', 'trigger_or_external', 'manual_or_external', 'other']) {
+    assert.notEqual(db.closeReasonBucket(CLOSE_REASON_DUPLICATE_ADOPTION), bucket);
+  }
 });
 
 test('serie PnL cumulato: cronologica crescente e cumulativa', () => {

@@ -14,6 +14,7 @@ import paperBroker from '../perps/paperBroker.js';
 import client from '../perps/hyperliquidClient.js';
 import riskAgent from '../agents/riskAgent.js';
 import logger from '../utils/logger.js';
+import { postInternal } from '../utils/internalLoopback.js';
 import {
   validateInstructionOverride,
   checkOrderVelocity,
@@ -154,28 +155,12 @@ export function validateDynamicSizingParams(source) {
  * Non-blocking: il fallimento non deve interrompere la risposta MCP.
  */
 async function notifyExpressReload() {
-  try {
-    const http = await import('http');
-    return new Promise((resolve) => {
-      const options = {
-        hostname: '127.0.0.1',
-        port: 3000,
-        path: '/internal/mcp/reload',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': 0 },
-        timeout: 3000,
-      };
-      const req = http.default.request(options, (res) => {
-        res.resume();
-        resolve();
-      });
-      req.on('error', () => resolve()); // silenzioso: Stdio funziona anche senza Express
-      req.on('timeout', () => { req.destroy(); resolve(); });
-      req.end();
-    });
-  } catch {
-    // import dinamico fallito o altro: non blocca nulla
-  }
+  // La POST loopback vive in `src/utils/internalLoopback.js`, condivisa con
+  // `botManager` (che la usa per inoltrare gli update autonomi del tick loop):
+  // un solo posto dove stanno host, porta, timeout e la regola "non fallire mai
+  // rumorosamente". Il valore di ritorno qui si ignora di proposito — lo Stdio
+  // funziona anche a Express spento.
+  await postInternal('/internal/mcp/reload');
 }
 
 /**

@@ -10,7 +10,7 @@
     "cli": "node src/index.js",
     "build": "mkdir -p dist && cp -r public dist/ && echo 'Build completato'",
     "setup": "node setup.js",
-    "test": "node --test test/*.test.js",
+    "test": "PERPS_LOOPBACK_PUSH=0 node --test test/*.test.js",
     "test:smoke": "node test-bot.js",
     "lint": "node scripts/lint-syntax.js",
     "restart": "bash scripts/restart.sh",

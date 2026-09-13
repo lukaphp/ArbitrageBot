@@ -13,6 +13,7 @@ import notifier from './notifier.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import db from '../db/database.js';
 import logger from '../utils/logger.js';
+import { postInternal } from '../utils/internalLoopback.js';
 
 class BotManager {
   constructor() {
@@ -20,25 +21,114 @@ class BotManager {
     this.io = null;
     this.watchdogTimer = null;
     this.lastWatchdogAlert = new Map(); // botId -> ts (throttle alert)
+    this._forwardInFlight = new Set(); // botId con una POST loopback ancora in volo
+    this._forwardFailures = 0;         // consecutive: serve al log per episodio, non per tentativo
   }
 
   setIo(io) {
     this.io = io;
   }
 
-  _onUpdate = (state) => {
-    if (this.io) {
-      this.io.emit('perps:botUpdate', state);
-      // Emette dashboardRefresh istantaneo se l'azione di trading è operativa (open_long/open_short/close)
-      if (state.lastEval && (state.lastEval.action === 'open_long' || state.lastEval.action === 'open_short' || state.lastEval.action === 'close')) {
-        this.io.emit('perps:dashboardRefresh', {
-          reason: 'strategy_signal',
-          botId: state.id,
-          action: state.lastEval.action
-        });
-      }
+  /**
+   * Push verso i browser di UN aggiornamento di bot. È l'unico posto che decide
+   * COSA viene emesso: `_onUpdate` (processo Express) e la rotta interna
+   * `/internal/mcp/bot-update` (stato arrivato dal processo MCP) passano
+   * entrambi di qui, così i due percorsi non possono divergere.
+   *
+   * @returns {boolean} true se c'era davvero un `io` su cui emettere.
+   */
+  emitBotUpdate(state) {
+    if (!this.io || !state) return false;
+    this.io.emit('perps:botUpdate', state);
+    // Emette dashboardRefresh istantaneo se l'azione di trading è operativa (open_long/open_short/close)
+    if (state.lastEval && (state.lastEval.action === 'open_long' || state.lastEval.action === 'open_short' || state.lastEval.action === 'close')) {
+      this.io.emit('perps:dashboardRefresh', {
+        reason: 'strategy_signal',
+        botId: state.id,
+        action: state.lastEval.action
+      });
     }
+    return true;
+  }
+
+  /**
+   * Callback di fine tick di ogni `PerpsBot` (`bot._emit()`).
+   *
+   * MCP-SYNC-02 — quando il bot gira nel processo MCP Stdio, `this.io` è `null`
+   * (lì non c'è nessun client Socket.IO) e questo callback era un no-op
+   * SILENZIOSO: nessun evento raggiungeva mai il browser, e l'unico
+   * aggiornamento che l'utente vedeva era quello provocato da un tool MCP
+   * esplicito via `notifyExpressReload()`. Tutto ciò che il bot decide da solo
+   * dentro il tick — nuova valutazione, apertura/chiusura da segnale di
+   * strategia, TP/SL scattato, errore — spariva.
+   *
+   * Il ramo `else` inoltra quindi lo stato al processo Express via loopback.
+   * Deliberatamente NON tocca il ramo con `io` presente: dove l'emit diretto
+   * funziona già, il comportamento resta identico a prima (nessun doppio push).
+   * Il fix è indipendente da CHI esegue il tick loop: se un domani il loop
+   * tornasse a girare solo in Express, questo ramo semplicemente non si attiva.
+   */
+  _onUpdate = (state) => {
+    if (this.emitBotUpdate(state)) return;
+    this._forwardUpdateToExpress(state);
   };
+
+  /**
+   * Inoltro loopback dello stato al processo Express, fire-and-forget.
+   *
+   * FREQUENZA: si inoltra OGNI tick, senza debounce. `perps:botUpdate` alimenta
+   * prezzo, ultima valutazione e stato posizione nella UI: filtrarlo come si fa
+   * con `dashboardRefresh` (solo open/close) lascerebbe la card ferma tra
+   * un'operazione e l'altra, che è esattamente il sintomo da correggere. Il
+   * costo è una POST su 127.0.0.1 ogni `loopInterval` per bot — default 10s
+   * (`HYPERLIQUID_CONFIG.botLoopInterval`), quindi ordine di 0,1 req/s per bot:
+   * irrilevante rispetto al tick stesso, che fa già più chiamate HTTP verso
+   * Hyperliquid. Se un giorno la cadenza scendesse sotto il secondo, il posto
+   * dove mettere un debounce è questo, non `bot._emit()`.
+   *
+   * MAI bloccante: nessun `await` qui e nessuno in `_onUpdate` — il tick non
+   * aspetta né Express né il timeout. Se una POST è ancora in volo per lo stesso
+   * bot si SALTA quella nuova invece di accodarla: ogni payload è uno snapshot
+   * completo, quindi l'ultimo vince e accodare significherebbe solo consegnare
+   * stati già vecchi (e far crescere la coda se Express è lento).
+   *
+   * Fallire in silenzio qui rimetterebbe in piedi lo stesso problema invisibile
+   * che si sta chiudendo, quindi si logga — ma UNA VOLTA PER EPISODIO, non per
+   * tentativo: un warn quando il ponte si rompe, un info quando torna a
+   * funzionare. Nessuna notifica Telegram: è freschezza della UI, non un money
+   * path.
+   *
+   * `PERPS_LOOPBACK_PUSH=0` disattiva l'inoltro. Serve UNICAMENTE alla suite di
+   * test (`npm test` lo imposta): lì i bot si creano con `io` null, quindi ogni
+   * `_emit()` è indistinguibile da quello del processo MCP e farebbe partire
+   * POST vere verso la porta 3000 — su una macchina con l'app in esecuzione,
+   * stati di bot di test comparirebbero nella dashboard reale, e in questo
+   * periodo (indagine sulla duplicazione bot) sarebbero indizi falsi presi per
+   * veri. In produzione la variabile non va impostata: chi la mette a 0 spegne
+   * il ponte e torna al bug che questo metodo chiude.
+   */
+  _forwardUpdateToExpress(state) {
+    if (process.env.PERPS_LOOPBACK_PUSH === '0') return;
+    if (!state || !state.id) return;
+    if (this._forwardInFlight.has(state.id)) return;
+    this._forwardInFlight.add(state.id);
+    postInternal('/internal/mcp/bot-update', { state }, { timeoutMs: 1500 })
+      .then((delivered) => {
+        if (delivered) {
+          if (this._forwardFailures > 0) {
+            logger.info(`🔗 Ponte UI ripristinato: gli aggiornamenti dei bot tornano a raggiungere la dashboard (dopo ${this._forwardFailures} tentativi falliti)`);
+          }
+          this._forwardFailures = 0;
+          return;
+        }
+        this._forwardFailures++;
+        if (this._forwardFailures === 1) {
+          logger.warn('🔗 Ponte UI interrotto: lo stato dei bot non raggiunge il processo Express (POST /internal/mcp/bot-update). La dashboard resterà ferma finché non si ripristina.');
+        }
+      })
+      .catch(() => { /* postInternal non rigetta mai: ramo difensivo */ })
+      .finally(() => this._forwardInFlight.delete(state.id));
+  }
 
   /** Carica i bot dal DB e riavvia quelli che risultavano in esecuzione. */
   loadFromDb() {

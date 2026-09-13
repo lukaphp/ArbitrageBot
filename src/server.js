@@ -30,6 +30,7 @@ import crypto from 'crypto';
 // Importa moduli bot
 import config, { isMainnetAllowed } from './config/config.js';
 import logger from './utils/logger.js';
+import { isInternalIp } from './utils/internalLoopback.js';
 
 // EVM-01: qui c'erano gli import della demo di arbitraggio EVM
 // (blockchainConnection, priceFeedManager, arbitrageAnalyzer, transactionExecutor).
@@ -1701,8 +1702,7 @@ class ArbitrageBotServer {
      */
     app.post('/internal/mcp/reload', async (req, res) => {
       const ip = req.ip || req.socket?.remoteAddress || '';
-      const allowed = ip === '127.0.0.1' || ip === '::1' || ip.startsWith('::ffff:127.') || ip.startsWith('172.');
-      if (!allowed) {
+      if (!isInternalIp(ip)) {
         logger.warn(`/internal/mcp/reload rifiutato da IP non loopback: ${ip}`);
         return res.status(403).json({ success: false, error: 'Accesso non consentito' });
       }
@@ -1772,6 +1772,49 @@ class ArbitrageBotServer {
         return res.json({ success: true, added, removed, updated, total: botManager.bots.size });
       } catch (err) {
         logger.error('Errore /internal/mcp/reload:', err.message);
+        return res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    /**
+     * MCP-SYNC-02 — INTERNAL BOT UPDATE: push di UN aggiornamento di bot ai browser.
+     *
+     * Il gemello di `/internal/mcp/reload`, per un problema diverso. Quello
+     * serve dopo un'operazione MUTANTE di un tool MCP e fa risincronizzare
+     * Express dal DB. Questo serve per i cambi di stato che il bot produce DA
+     * SOLO dentro il suo tick (nuova valutazione, apertura/chiusura da segnale,
+     * TP/SL scattato, errore): quando quel bot gira nel processo MCP Stdio,
+     * `botManager.io` è null lì e `_onUpdate` non aveva nessuno a cui parlare —
+     * l'aggiornamento spariva e la dashboard restava indietro fino al polling.
+     *
+     * Non rilegge dal DB di proposito: lo stato arriva già calcolato da
+     * `bot.getState()` nell'altro processo (che è l'unico ad averlo completo in
+     * memoria — `position`, `lastEval`, `lastError` non stanno tutti su DB), e
+     * un giro DB in più darebbe una fotografia diversa, non più fresca.
+     *
+     * L'emit passa da `botManager.emitBotUpdate`, lo stesso metodo usato dal
+     * ramo con `io` presente: i due percorsi non possono divergere.
+     *
+     * Sicurezza: identica a `/internal/mcp/reload` (stesso `isInternalIp`).
+     */
+    app.post('/internal/mcp/bot-update', (req, res) => {
+      const ip = req.ip || req.socket?.remoteAddress || '';
+      if (!isInternalIp(ip)) {
+        logger.warn(`/internal/mcp/bot-update rifiutato da IP non loopback: ${ip}`);
+        return res.status(403).json({ success: false, error: 'Accesso non consentito' });
+      }
+      const state = req.body?.state;
+      if (!state || typeof state !== 'object' || !state.id) {
+        return res.status(400).json({ success: false, error: 'state mancante o senza id' });
+      }
+      try {
+        // `emitted: false` non è un errore: significa che questo processo non ha
+        // client Socket.IO (Express non ancora pronto). Chi chiama deve poterlo
+        // distinguere da un 403/500, quindi 200 con il flag.
+        const emitted = botManager.emitBotUpdate(state);
+        return res.json({ success: true, emitted });
+      } catch (err) {
+        logger.error('Errore /internal/mcp/bot-update:', err.message);
         return res.status(500).json({ success: false, error: err.message });
       }
     });

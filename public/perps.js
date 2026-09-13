@@ -1221,13 +1221,19 @@ class PerpsApp {
    * arrivano (escapate): meglio una etichetta grezza che nascondere trade veri
    * perché il backend ha aggiunto un motivo che questa mappa non conosce.
    *
-   * Un bucket è però trattato diversamente dagli altri: quello delle posizioni
-   * chiuse dalla riconciliazione DB↔Hyperliquid (bot fermo, posizione sparita
-   * dall'exchange senza che nessun trigger del bot l'abbia chiusa). Non è un
-   * esito di trading come TP o SL — è il segnale che il DB e l'exchange si erano
-   * disallineati, e va letto come un avviso, non come una riga di statistica.
-   * Perciò riceve lo stesso trattamento visivo del badge `⚠️ CRASH` sulla card
-   * del bot (`.bot-status-crashed-badge`), unico avviso già presente in questa UI.
+   * Due bucket sono però trattati diversamente dagli altri, perché non sono
+   * esiti di trading come TP o SL ma segnali di un difetto, e vanno letti come
+   * avvisi invece che come righe di statistica:
+   *
+   *  - le posizioni chiuse dalla riconciliazione DB↔Hyperliquid (bot fermo,
+   *    posizione sparita dall'exchange senza che nessun trigger l'abbia chiusa);
+   *  - le righe DUPLICATE, cioè una sola posizione reale adottata da più bot
+   *    sullo stesso wallet e mercato, ognuno con la propria riga. Qui il rischio
+   *    di lettura è più insidioso dell'altro: senza distinguerle, N copie dello
+   *    stesso trade sembrano N trade e gonfiano ogni conteggio.
+   *
+   * Entrambi ricevono lo stesso trattamento visivo del badge `⚠️ CRASH` sulla
+   * card del bot (`.bot-status-crashed-badge`), unico avviso già presente qui.
    *
    * Il nome del bucket lo decide il backend (`closeReasonBucket()` in
    * `src/db/database.js`): sta in una costante sola perché rinominarlo resti una
@@ -1237,12 +1243,23 @@ class PerpsApp {
     const target = document.getElementById('perfCloseReasons');
     if (!target) return;
     const RECONCILIATION_BUCKET = 'reconciliation_mismatch';
-    const RECONCILIATION_HINT = 'Posizione chiusa dalla riconciliazione: risultava aperta nel database ma non su Hyperliquid. Nessun trigger del bot l\'ha chiusa.';
+    const DUPLICATE_BUCKET = 'duplicate_adoption';
+    // Bucket che NON sono esiti di trading ma segnali di difetto: stesso
+    // trattamento visivo, tooltip diverso perché il difetto è diverso (e si
+    // corregge in modo diverso). La classe CSS resta una sola, quella già
+    // esistente: il significato per chi guarda è identico — «questa riga è un
+    // avviso, non una statistica» — e inventarne una seconda identica
+    // aggiungerebbe CSS senza aggiungere informazione.
+    const WARNING_HINTS = {
+      [RECONCILIATION_BUCKET]: 'Posizione chiusa dalla riconciliazione: risultava aperta nel database ma non su Hyperliquid. Nessun trigger del bot l\'ha chiusa.',
+      [DUPLICATE_BUCKET]: 'Riga duplicata: una sola posizione reale è stata adottata da più bot sullo stesso wallet e mercato, e ognuno ne ha registrata una copia. Il risultato vero è contato una volta sola, sulla riga originale.'
+    };
     const labels = {
       tp: 'Take profit', sl: 'Stop loss', manual: 'Chiusura manuale', dca: 'DCA',
       trailing: 'Trailing stop', liquidation: 'Liquidazione', signal: 'Segnale di uscita',
       killswitch: 'Kill-switch', unknown: 'Non registrato', other: 'Altro',
-      [RECONCILIATION_BUCKET]: '⚠️ Disallineato con Hyperliquid'
+      [RECONCILIATION_BUCKET]: '⚠️ Disallineato con Hyperliquid',
+      [DUPLICATE_BUCKET]: '⚠️ Riga duplicata (non è un trade)'
     };
     const totals = new Map();
     for (const bot of this.perfData?.bots || []) {
@@ -1261,9 +1278,9 @@ class PerpsApp {
     target.innerHTML = rows.map(([reason, count]) => {
       const label = labels[reason] || reason;
       const pct = total > 0 ? Math.round((count / total) * 100) : 0;
-      const isMismatch = reason === RECONCILIATION_BUCKET;
-      const rowClass = isMismatch ? 'cockpit-metric-row close-reason-mismatch' : 'cockpit-metric-row';
-      const hint = isMismatch ? ` title="${this._escapeHtml(RECONCILIATION_HINT)}"` : '';
+      const warningHint = WARNING_HINTS[reason];
+      const rowClass = warningHint ? 'cockpit-metric-row close-reason-mismatch' : 'cockpit-metric-row';
+      const hint = warningHint ? ` title="${this._escapeHtml(warningHint)}"` : '';
       return `<div class="${rowClass}"${hint}><span>${this._escapeHtml(label)}</span><strong>${count} · ${pct}%</strong></div>`;
     }).join('');
   }

@@ -583,6 +583,13 @@ export class PerpsDatabase {
    *    `trigger_or_external` per la stessa ragione per cui `safety` sta in cima:
    *    perché la sua posizione nella ladder non dipenda dalle parole che il
    *    testo contiene oggi;
+   *  - `duplicate_adoption` ← righe che DUPLICANO una posizione chiusa da
+   *    un'altra riga: una sola posizione fisica adottata da più bot sullo stesso
+   *    (wallet, coin), ognuno con la sua riga (vedi
+   *    `CLOSE_REASON_DUPLICATE_ADOPTION` in `reconciler.js`). Bucket PROPRIO e
+   *    non `reconciliation_mismatch`: là il PnL non è mai stato conoscibile, qui
+   *    è noto ma appartiene a UNA riga sola e queste sono le copie. Contarle
+   *    insieme nasconderebbe che sono due difetti distinti;
    *  - `trigger_or_external` ← 'chiusa (TP/SL o esterna)', cioè i casi in cui NON
    *    si è potuto stabilire quale ordine abbia chiuso (fill non ancora visibili,
    *    fill senza oid, posizione aperta prima del tracciamento degli oid). Ci
@@ -604,6 +611,7 @@ export class PerpsDatabase {
     if (/manuale o esterna/.test(text)) return 'manual_or_external';
     if (/regola di uscita|segnale esterno/.test(text)) return 'strategy';
     if (/riconciliata/.test(text)) return 'reconciliation_mismatch';
+    if (/duplicata/.test(text)) return 'duplicate_adoption';
     if (/tp\/sl|più trigger|esterna/.test(text)) return 'trigger_or_external';
     return 'other';
   }

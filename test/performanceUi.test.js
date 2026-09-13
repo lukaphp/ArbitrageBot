@@ -258,6 +258,37 @@ test('le chiusure da riconciliazione DB↔Hyperliquid escono come avviso, non co
   assert.doesNotMatch(tpRow, /close-reason-mismatch/, 'le altre righe non ereditano lo stile di allerta');
 });
 
+test('le righe duplicate escono come avviso, con un tooltip PROPRIO e non quello della riconciliazione', async () => {
+  const ui = loadPerfUi({
+    data: {
+      ...PERFORMANCE,
+      bots: [{
+        botId: 'b1', name: 'X', trades: 6,
+        closeReasons: { sl: 1, duplicate_adoption: 4, reconciliation_mismatch: 1 }
+      }]
+    }
+  });
+  await ui.perps.loadPerformance();
+  const html = ui.elements.perfCloseReasons.innerHTML;
+
+  assert.match(html, /⚠️ Riga duplicata \(non è un trade\)<\/span><strong>4 · 67%/);
+  assert.doesNotMatch(html, /duplicate_adoption/, 'la chiave grezza non deve arrivare a schermo');
+
+  const dupRow = html.split('<div ').find(chunk => chunk.includes('Riga duplicata'));
+  assert.match(dupRow, /class="cockpit-metric-row close-reason-mismatch"/);
+  assert.match(dupRow, /title="[^"]*adottata da più bot[^"]*"/, 'il tooltip spiega QUESTO difetto');
+  assert.doesNotMatch(dupRow, /title="[^"]*riconciliazione[^"]*"/,
+    'i due avvisi non devono condividere la spiegazione: sono difetti diversi');
+
+  // L'altro avviso resta quello di prima: la generalizzazione non l'ha assorbito.
+  const mismatchRow = html.split('<div ').find(chunk => chunk.includes('Disallineato'));
+  assert.match(mismatchRow, /class="cockpit-metric-row close-reason-mismatch"/);
+  assert.match(mismatchRow, /title="[^"]*riconciliazione[^"]*"/);
+
+  const slRow = html.split('<div ').find(chunk => chunk.includes('Stop loss'));
+  assert.doesNotMatch(slRow, /close-reason-mismatch/, 'un esito vero non prende lo stile di allerta');
+});
+
 test('confronto per bot: PnL, win rate ed expectancy con il segno e la classe giusta', async () => {
   const ui = loadPerfUi();
   await ui.perps.loadPerformance();

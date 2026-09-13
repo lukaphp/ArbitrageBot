@@ -130,6 +130,30 @@
 .bot-status-dot.online { background: #48bb78; box-shadow: 0 0 6px #48bb78; }
 .bot-status-dot.offline { background: #cbd5e0; }
 .bot-pnl { font-size: 0.95rem; }
+/* Badge del mercato scambiato (es. "BTC") nell'intestazione della card.
+   Stessa grammatica pill di .agent-badge e .rule-pill — cambia solo il contrasto,
+   che qui deve essere il più alto della riga: è l'informazione che si cerca
+   scorrendo molte card. Monospace come i ticker della cockpit, così i simboli
+   restano allineati fra una card e l'altra.
+   Fondo e bordo sono opachi e non in alpha: oggi la card è chiara, ma sta dentro
+   `body.cockpit-mode` (tema scuro) e un pill semitrasparente cambierebbe resa se
+   domani la superficie sotto diventasse scura. */
+.coin-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border: 1px solid #cbd5e0;
+  border-radius: 10px;
+  background: #edf2f7;
+  color: #1a2434;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: default;
+}
 .bot-card-body { font-size: 0.85rem; color: #4a5568; margin-bottom: 12px; }
 .bot-meta { display: flex; justify-content: space-between; padding: 3px 0; gap: 10px; }
 .bot-meta .label { color: #718096; }

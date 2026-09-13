@@ -412,6 +412,70 @@ class PerpsApp {
       }, 150);
     });
 
+    // --- Kill-switch e rete cambiati da un'altra sessione ---
+    // Il server emetteva questi due eventi e nessuno li ascoltava: lo stato mostrato
+    // restava quello del caricamento finché l'utente non ricaricava la pagina. Il caso
+    // che conta è il kill-switch alzato altrove (Hermes via MCP, un altro browser) con
+    // questa scheda che continua a presentare le aperture come consentite.
+    //
+    // I due emit di `perps:killSwitch` NON hanno lo stesso payload, e la differenza è
+    // sostanziale:
+    //   • `emergency_shutdown` (MCP) manda `{on:true, actor, reason}` e ha davvero
+    //     chiamato `riskAgent.setKillSwitch(true)` → lo stato è nel messaggio;
+    //   • `POST /api/perps/kill-switch` (Safe-Exit) manda l'esito dell'operazione
+    //     (`stopped`, `closedPositions`, `skippedPositions`, `errors`) e **non** tocca
+    //     il flag → lì `on` non c'è, e dedurlo sarebbe inventare uno stato.
+    // Quindi: si applica `on` solo se è davvero un booleano, altrimenti si rilegge la
+    // fonte autorevole (`/api/perps/risk`, che in `_renderRiskSnapshot` richiama
+    // `_setKillSwitchUi`). Uno stato ignoto non è uno stato spento: mostrare
+    // "aperture consentite" perché il dato manca è peggio che non mostrare nulla.
+    this.socket.on('perps:killSwitch', (data) => {
+      if (typeof data?.on === 'boolean') this._setKillSwitchUi(data.on);
+      // In entrambi i casi dei bot sono stati fermati e delle posizioni possono
+      // essere state chiuse: card, conto e snapshot vanno riletti.
+      this.loadBots();
+      this.refreshAccount();
+      this.refreshRiskSnapshot();
+
+      if (data?.on === true) {
+        // `{on:true}` arriva solo dal percorso MCP: non può essere l'eco di un'azione
+        // partita da questo browser, quindi dire "da un'altra sessione" è esatto.
+        // `reason` finisce in un toast: `showToast` usa textContent (niente markup
+        // iniettabile), resta solo da non far esplodere la larghezza del toast.
+        const reason = data.reason ? ` (${String(data.reason).slice(0, 60)})` : '';
+        this.toast(`🛑 Kill-switch attivato da un'altra sessione${reason}: nuove aperture bloccate`, 'warning');
+      } else if (Array.isArray(data?.stopped)) {
+        // Safe-Exit: può essere anche la nostra stessa azione tornata indietro, quindi
+        // il messaggio riporta i fatti senza attribuirne l'origine. Il toast si mostra
+        // solo se il payload è davvero quello del Safe-Exit — su una forma inattesa si
+        // resta zitti invece di annunciare "0 bot fermati", che sarebbe un'affermazione.
+        const stopped = data.stopped.length;
+        const closed = Array.isArray(data.closedPositions) ? data.closedPositions.length : 0;
+        const skipped = Array.isArray(data.skippedPositions) ? data.skippedPositions.length : 0;
+        let msg = `🛑 Kill Switch Safe-Exit: ${stopped} bot fermat${stopped === 1 ? 'o' : 'i'}`;
+        if (closed) msg += `, ${closed} posizion${closed === 1 ? 'e chiusa' : 'i chiuse'}`;
+        if (skipped) msg += ` · ${skipped} lasciat${skipped === 1 ? 'a aperta' : 'e aperte'} per gestione manuale`;
+        this.toast(msg, 'warning');
+      }
+    });
+
+    // Cambio di rete Hyperliquid fatto da un'altra sessione. Non basta aggiornare il
+    // branding: mercati, mid e conto appartengono alla rete precedente e sarebbero
+    // rimasti a schermo come se fossero ancora validi. Si ripete la stessa sequenza di
+    // `setNetwork()` senza il POST, e si rilegge la rete da `/api/perps/network`
+    // (`loadNetwork`) invece di fidarsi del payload: unica fonte, nessuna logica di
+    // pill/faucet/branding duplicata qui.
+    this.socket.on('perps:network', async (data) => {
+      const net = data?.network;
+      if (net !== 'testnet' && net !== 'mainnet') return; // payload inatteso: meglio non toccare nulla
+      if (net === this.network) return;                   // eco del nostro stesso cambio rete
+      this.toast(`Rete Perps cambiata da un'altra sessione: ${net.toUpperCase()}`, 'warning');
+      await this.loadNetwork();
+      await this.loadMarkets();
+      await this.refreshAccount();
+      await this.loadBots();
+    });
+
     // --- Feature 3: Watchdog Crash Alert ---
     // Il Watchdog server emette questo quando un bot non trocka da troppo tempo.
     // Mostra un banner rosso sticky sopra la lista bot con possibilità di dismiss.
@@ -3057,6 +3121,14 @@ class PerpsApp {
       ? `<span class="muted" title="Budget Ceiling"> · max ${this.fmtUsd(b.max_allocation_usd)}</span>`
       : '';
 
+    // Badge del mercato scambiato. Prima era testo `.muted` accanto al nome
+    // ("· BTC"): scorrendo una lista lunga la coin è la prima cosa che si cerca
+    // e finiva per essere l'ultima che si vedeva. Stessa grammatica pill degli
+    // altri badge della card, contrasto più alto. `_escapeHtml` perché il valore
+    // finisce sia nel testo sia in un attributo.
+    const coin = this._escapeHtml(b.coin);
+    const coinBadge = `<span class="coin-badge" title="Mercato: ${coin} perp">${coin}</span>`;
+
     // Watchdog Crash badge
     const crashBadge = crashed
       ? `<span class="bot-status-crashed-badge" title="${b.crashReason || 'Nessun tick rilevato'}">⚠️ CRASH</span>`
@@ -3083,7 +3155,7 @@ class PerpsApp {
       <div class="bot-card-head">
         <div>
           <span class="bot-status-dot ${dotClass}"></span>
-          <strong>${b.name}</strong> <span class="muted">· ${b.coin}</span>
+          <strong>${b.name}</strong> ${coinBadge}
           ${b.paper ? '<span class="testnet-badge" style="font-size:.6em;vertical-align:middle" title="Forward-test: esecuzione simulata su prezzi reali">PAPER</span>' : ''}
           ${agentBadge}${budgetInfo}${crashBadge}
         </div>

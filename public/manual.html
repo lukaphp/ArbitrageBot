@@ -1231,7 +1231,7 @@
                     </div>
                 </div>
 
-                <p>Tipi di proposta ammessi: <code>pause_bot</code>, <code>close</code>, <code>tighten_sl</code>, <code>open</code>, <code>new_strategy_candidate</code>.</p>
+                <p>Tipi di proposta ammessi: <code>pause_bot</code>, <code>close</code>, <code>tighten_sl</code>, <code>open</code>, <code>new_strategy_candidate</code>, <code>tune_params</code>.</p>
 
                 <div class="table-wrap">
                 <table class="feature-table">
@@ -1247,6 +1247,19 @@
                 </div>
 
                 <p style="margin-top:14px">Le proposte non approvate <strong>scadono</strong> (default 30 minuti): un suggerimento basato su un mercato di mezz'ora fa non deve poter essere eseguito ore dopo.</p>
+            </div>
+
+            <div class="card">
+                <h3>Proposte di tuning (<code>tune_params</code>)</h3>
+                <p>Non tutte le proposte vengono dall'Analyst. Un controllo periodico <strong>deterministico</strong> (nessun modello, nessun costo in token) segnala i bot che sono in esecuzione ma non aprono una posizione da più di 15 minuti, e mette in coda una proposta <code>tune_params</code>. In coda si riconoscono dall'etichetta <strong>⚙️ regola automatica</strong> al posto della percentuale di confidenza: una regola aritmetica non ha una confidenza da dichiarare.</p>
+
+                <p>Ce ne sono di due tipi, e la coda li distingue <strong>prima</strong> del click:</p>
+                <ul>
+                    <li><strong>Con una modifica da applicare</strong> — la scheda mostra <em>«Se approvi: intervallo candele → 5m»</em>. Approvare <strong>scrive davvero</strong> nella configurazione del bot, senza altre conferme. L'unico parametro che una proposta di tuning può toccare è <code>candleInterval</code>, e solo di un gradino più corto: cambia <em>ogni quanto</em> il bot valuta le sue regole, mai <em>quanto denaro</em> ci mette sopra. Leva, size, TP/SL e tetti di rischio non sono modificabili per questa via, ed è reversibile rimettendo a mano l'intervallo precedente.</li>
+                    <li><strong>Diagnostiche</strong> — quando nessun parametro risolverebbe (bot senza regole d'ingresso, oppure intervallo già al minimo) la proposta spiega <em>perché</em> il bot è fermo e la scheda lo dichiara: <em>«Nessun parametro da applicare: è una diagnosi»</em>. Approvarla la archivia, non modifica niente.</li>
+                </ul>
+
+                <p>Queste proposte scadono dopo <strong>3 ore</strong> e non dopo 30 minuti: «questo bot è fermo da tre ore» resta vero anche domani, a differenza di un «chiudi adesso» legato al prezzo. Dopo una proposta, lo stesso bot resta in silenzio per 6 ore qualunque sia stata la tua decisione.</p>
             </div>
 
             <div class="card">

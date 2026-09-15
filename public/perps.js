@@ -99,6 +99,21 @@ const RISK_PROFILES = {
     desc: 'Leva e size elevate, obiettivi di profitto ampi. Rischio maggiore.' }
 };
 
+/**
+ * Nomi in italiano dei parametri che una proposta `tune_params` può cambiare.
+ *
+ * La whitelist vera è `TUNABLE_KEYS` in `src/agents/tunePatch.js`, ed è lei a
+ * decidere cosa è ammesso: qui c'è solo come si chiama la chiave in una frase
+ * leggibile. Deliberatamente NON è una mappa esaustiva con fallback a "nascondi":
+ * se domani la whitelist cresce e questa riga resta indietro, la chiave viene
+ * mostrata com'è (`maxLeverage → 5`) invece di sparire. Su una modifica che sta
+ * per essere scritta nella config di un bot con un click, un nome tecnico è molto
+ * meno grave di un cambiamento invisibile.
+ */
+const TUNE_PARAM_LABELS = {
+  candleInterval: 'intervallo candele'
+};
+
 class PerpsApp {
   constructor() {
     this.markets = [];
@@ -2344,35 +2359,115 @@ class PerpsApp {
     }
     box.innerHTML = list.map(p => {
       this._proposalsById[p.id] = p;
-      const conf = p.confidence != null ? `${Math.round(p.confidence * 100)}%` : '—';
-      const payload = p.payload ? Object.entries(p.payload).filter(([k]) => k !== 'config').map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(', ') : '';
+      // Ogni valore che finisce nel markup passa da `_escapeHtml`: `rationale` e
+      // `payload` contengono il NOME DEL BOT, che è testo scritto dall'utente (o
+      // da un agente esterno) e salvato in DB. Senza escaping questa è la stessa
+      // XSS stored della card bot (issue #9), su una superficie diversa.
+      const id = this._escapeHtml(p.id);
       const isStrategy = p.type === 'new_strategy_candidate';
       const approveBtn = isStrategy
-        ? `<button class="btn btn-sm btn-primary" onclick="perps.applyStrategyProposal('${p.id}')">⚙️ Approva e configura</button>`
-        : `<button class="btn btn-sm btn-primary" onclick="perps.approveProposal('${p.id}')">✅ Approva</button>`;
+        ? `<button class="btn btn-sm btn-primary" onclick="perps.applyStrategyProposal('${id}')">⚙️ Approva e configura</button>`
+        : `<button class="btn btn-sm btn-primary" onclick="perps.approveProposal('${id}')">✅ Approva</button>`;
       return `
       <div class="agent-proposal">
         <div class="ap-head">
-          <span class="ap-type">${p.type}</span>
-          ${p.coin ? `<span class="ap-coin">${p.coin}</span>` : ''}
-          <span class="ap-conf">confidenza ${conf}</span>
+          <span class="ap-type">${this._escapeHtml(p.type)}</span>
+          ${p.coin ? `<span class="ap-coin">${this._escapeHtml(p.coin)}</span>` : ''}
+          ${this._proposalConfidenceHtml(p)}
         </div>
-        <div class="ap-rationale">${p.rationale || ''}</div>
-        ${payload ? `<div class="ap-payload">${payload}</div>` : ''}
-        ${p.model ? `<div class="ap-cost">🧠 ${p.model} · costo elaborazione ${this._fmtCost(p.costUsd)}</div>` : ''}
+        <div class="ap-rationale">${this._escapeHtml(p.rationale || '')}</div>
+        ${this._proposalDetailHtml(p)}
+        ${p.model ? `<div class="ap-cost">🧠 ${this._escapeHtml(p.model)} · costo elaborazione ${this._escapeHtml(this._fmtCost(p.costUsd))}</div>` : ''}
         <div class="ap-actions">
           ${approveBtn}
-          <button class="btn btn-sm btn-outline" onclick="perps.rejectProposal('${p.id}')">🚫 Rifiuta</button>
+          <button class="btn btn-sm btn-outline" onclick="perps.rejectProposal('${id}')">🚫 Rifiuta</button>
         </div>
       </div>`;
     }).join('');
+  }
+
+  /**
+   * Etichetta in alto a destra della proposta.
+   *
+   * Non tutte le proposte vengono da un modello: l'inactivity-watcher è una regola
+   * deterministica e lascia `confidence` a null di proposito, perché un numero lì
+   * sarebbe inventato. Mostrare "confidenza —" su una proposta che una confidenza
+   * non ce l'ha per costruzione fa sembrare mancante un dato che invece non esiste:
+   * chi legge deve poter distinguere "l'AI non si è espressa" da "qui non c'è nessuna
+   * AI". Quando il modello c'è ma il numero manca, resta il vecchio "—" (ignoto).
+   */
+  _proposalConfidenceHtml(p) {
+    if (p.confidence != null) return `<span class="ap-conf">confidenza ${Math.round(p.confidence * 100)}%</span>`;
+    if (p.source && p.source !== 'analyst') {
+      const src = this._escapeHtml(p.source);
+      return `<span class="ap-conf" title="Proposta generata da una regola deterministica (${src}), non da un modello AI: non ha un punteggio di confidenza.">⚙️ regola automatica</span>`;
+    }
+    return '<span class="ap-conf">confidenza —</span>';
+  }
+
+  /**
+   * Dettaglio sotto la motivazione. Per i tipi che la UI non conosce resta il
+   * riassunto generico del payload (leggibile, mai nascosto in silenzio); per
+   * `tune_params` c'è un trattamento dedicato, perché il generico mostrerebbe
+   * l'unica cosa che conta — la modifica che il click sta per applicare — come
+   * JSON grezzo in mezzo a un botId che non serve a nessuno.
+   */
+  _proposalDetailHtml(p) {
+    if (p.type === 'tune_params') return this._tuneParamsDetailHtml(p);
+    const payload = p.payload
+      ? Object.entries(p.payload).filter(([k]) => k !== 'config')
+        .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(', ')
+      : '';
+    return payload ? `<div class="ap-payload">${this._escapeHtml(payload)}</div>` : '';
+  }
+
+  /**
+   * Dettaglio di una proposta di tuning (`tune_params`, inactivity-watcher).
+   *
+   * Due esiti possibili, e la differenza è la cosa più importante da comunicare
+   * PRIMA del click, non dopo:
+   *  - con `patch`: approvare SCRIVE davvero nella config del bot. La riga dice
+   *    quale parametro e con che valore, perché "approva" qui non è un promemoria;
+   *  - senza `patch`: la proposta è diagnostica (bot senza regole d'ingresso, o
+   *    intervallo già al minimo). Approvarla la archivia e basta. Lasciare credere
+   *    il contrario significherebbe far aspettare a qualcuno un effetto che non
+   *    arriverà mai — e poi dare la colpa al bot.
+   *
+   * `botId` non viene mostrato: è un UUID che non aiuta a decidere. Il nome del
+   * bot sì, ed è testo utente, quindi escapato.
+   */
+  _tuneParamsDetailHtml(p) {
+    const payload = p.payload || {};
+    const patch = payload.patch && typeof payload.patch === 'object' ? payload.patch : null;
+
+    const ctx = [];
+    if (payload.botName) ctx.push(`bot «${payload.botName}»`);
+    if (Number.isFinite(payload.idleMinutes)) ctx.push(`fermo da ${this._fmtIdleMinutes(payload.idleMinutes)}`);
+    const ctxHtml = ctx.length ? `<div class="ap-payload">${this._escapeHtml(ctx.join(' · '))}</div>` : '';
+
+    const changes = patch ? Object.entries(patch)
+      .map(([k, v]) => `${TUNE_PARAM_LABELS[k] || k} → ${typeof v === 'object' ? JSON.stringify(v) : v}`) : [];
+
+    if (!changes.length) {
+      return ctxHtml + '<div class="ap-change ap-change-none">📝 Nessun parametro da applicare: è una diagnosi.'
+        + ' Approvarla la archivia, <strong>non modifica il bot</strong>.</div>';
+    }
+    return ctxHtml + `<div class="ap-change">🎚️ Se approvi: <strong>${this._escapeHtml(changes.join(' · '))}</strong>`
+      + ' — cambia solo ogni quanto il bot valuta le sue regole. Leva, size, TP/SL e tetti di rischio restano invariati.</div>';
+  }
+
+  /** Minuti in una durata leggibile: 42 → «42 min», 185 → «3h 05m». */
+  _fmtIdleMinutes(min) {
+    const n = Math.max(0, Math.round(min));
+    if (n < 60) return `${n} min`;
+    return `${Math.floor(n / 60)}h ${String(n % 60).padStart(2, '0')}m`;
   }
 
   /** Approva una strategia suggerita e apre il creatore bot precompilato. */
   async applyStrategyProposal(id) {
     const p = this._proposalsById?.[id];
     try {
-      await this.api(`/api/agents/proposals/${id}/approve`, { method: 'POST' });
+      await this.api(`/api/agents/proposals/${encodeURIComponent(id)}/approve`, { method: 'POST' });
     } catch (e) {
       this.toast(`Errore: ${e.message}`, 'error');
       return;
@@ -2386,12 +2481,33 @@ class PerpsApp {
     this.toast('Strategia approvata: rivedi i parametri e salva il bot', 'info');
   }
 
+  /**
+   * Approva una proposta e RIFERISCE COSA È SUCCESSO DAVVERO.
+   *
+   * Il server distingue tre esiti che qui devono restare distinti:
+   *  - esecuzione riuscita con una modifica misurabile (`result.tuned`, proposte
+   *    `tune_params`): il toast dice il valore prima e dopo, così chi ha cliccato
+   *    vede l'effetto senza andarlo a cercare nella card del bot;
+   *  - `suggestion`: nulla è stato eseguito. Il messaggio arriva dal server perché
+   *    il motivo cambia col tipo — «configura a mano nel creatore bot» è vero per
+   *    `new_strategy_candidate`, ma su una proposta di tuning diagnostica sarebbe
+   *    falso: lì non c'è nessun creatore bot da aprire;
+   *  - errore (incluso il rifiuto del gate di rischio): `api()` lancia, e la
+   *    proposta resta pendente sul server — il toast non deve dire "approvata".
+   */
   async approveProposal(id) {
     try {
-      const r = await this.api(`/api/agents/proposals/${id}/approve`, { method: 'POST' });
-      this.toast(r?.suggestion
-        ? '📝 Suggerimento acquisito — configuralo a mano nel creatore bot'
-        : 'Proposta approvata ed eseguita', 'success');
+      const r = await this.api(`/api/agents/proposals/${encodeURIComponent(id)}/approve`, { method: 'POST' });
+      const tuned = r?.result?.tuned;
+      if (tuned && typeof tuned === 'object') {
+        const parts = Object.entries(tuned)
+          .map(([k, v]) => `${TUNE_PARAM_LABELS[k] || k}: ${v?.da ?? '—'} → ${v?.a ?? '—'}`);
+        this.toast(`🎚️ Applicato — ${parts.join(', ')}`, 'success');
+      } else if (r?.suggestion) {
+        this.toast(`📝 ${r?.result?.message || 'Suggerimento acquisito — configuralo a mano nel creatore bot'}`, 'info');
+      } else {
+        this.toast('Proposta approvata ed eseguita', 'success');
+      }
     } catch (e) {
       this.toast(`Non eseguita: ${e.message}`, 'warning');
     }
@@ -2399,7 +2515,7 @@ class PerpsApp {
   }
 
   async rejectProposal(id) {
-    try { await this.api(`/api/agents/proposals/${id}/reject`, { method: 'POST' }); this.toast('Proposta rifiutata', 'info'); }
+    try { await this.api(`/api/agents/proposals/${encodeURIComponent(id)}/reject`, { method: 'POST' }); this.toast('Proposta rifiutata', 'info'); }
     catch (e) { this.toast(e.message, 'error'); }
     this.loadAgents();
   }
@@ -3873,7 +3989,7 @@ class PerpsApp {
       // Se il bot nasce da una strategia AI approvata, collegalo per seguirne l'esito
       if (!id && this._pendingProposalId && created?.id) {
         try {
-          await this.api(`/api/agents/proposals/${this._pendingProposalId}/link`, { method: 'POST', body: JSON.stringify({ botId: created.id }) });
+          await this.api(`/api/agents/proposals/${encodeURIComponent(this._pendingProposalId)}/link`, { method: 'POST', body: JSON.stringify({ botId: created.id }) });
           this.toast('Bot collegato alla strategia AI: ne seguirai l\'esito nello storico', 'success');
         } catch (_) { /* il bot è creato comunque */ }
         this._pendingProposalId = null;

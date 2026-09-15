@@ -14,6 +14,7 @@ import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import db from '../db/database.js';
 import logger from '../utils/logger.js';
 import { postInternal } from '../utils/internalLoopback.js';
+import { mergeStrategyConfig, extractBotConfig } from './strategySchema.js';
 
 class BotManager {
   constructor() {
@@ -263,6 +264,58 @@ class BotManager {
     this.bots.set(id, fresh);
     if (wasRunning) fresh.start();
     return fresh.getState();
+  }
+
+  /**
+   * Applica una PATCH PARZIALE alla configurazione di un bot e ricarica
+   * l'istanza runtime.
+   *
+   * È il punto unico in cui una modifica parziale di config diventa effettiva.
+   * Esisteva già, ma sparso dentro `handleUpdateStrategyParams` (leggi la riga →
+   * fondi → `updateBot` ripassando TUTTI gli altri campi della riga → emetti);
+   * con l'arrivo di un secondo chiamante (`executionAgent`, proposte
+   * `tune_params` approvate a mano) quelle venti righe sarebbero diventate due
+   * copie. Due copie di questa sequenza non sono un problema estetico: chi
+   * dimentica di ripassare `max_allocation_usd` o `actor_id` a `updateBot` li
+   * azzera in silenzio, cioè toglie a un bot il suo tetto di allocazione senza
+   * che nessuno lo veda — la stessa classe di problema che `mergeStrategyConfig`
+   * risolve un livello più sotto.
+   *
+   * NON valida la patch: la validazione è responsabilità del chiamante, perché è
+   * diversa per ciascuno (i guardrail a due stadi per l'MCP, la whitelist delle
+   * chiavi tunabili per le proposte). Qui si fonde e si applica.
+   *
+   * @param botId id del bot
+   * @param patch oggetto di chiavi di config da fondere (non sostituisce il resto)
+   * @param reason etichetta per il `dashboardRefresh` verso la UI
+   * @returns { state, previousConfig, config } — `previousConfig` serve al
+   *          chiamante per raccontare nell'audit cosa è cambiato davvero.
+   */
+  async applyConfigPatch(botId, patch, { reason = 'config_patch' } = {}) {
+    db.ensure();
+    const botRow = db.getBot(botId);
+    if (!botRow) throw new Error(`Bot non trovato (id: ${botId})`);
+
+    const previousConfig = extractBotConfig(botRow);
+    const config = mergeStrategyConfig(previousConfig, patch);
+
+    const state = await this.updateBot(botId, {
+      name: botRow.name,
+      coin: botRow.coin,
+      config,
+      linked_agent_id: botRow.linked_agent_id,
+      max_allocation_usd: botRow.max_allocation_usd,
+      actor_label: botRow.actor_label,
+      actor_id: botRow.actor_id,
+      is_managed_by_agent: botRow.is_managed_by_agent
+    });
+
+    if (this.io) {
+      this.io.emit('perps:botUpdate', state);
+      this.io.emit('perps:dashboardRefresh', { reason, botId });
+    }
+
+    return { state, previousConfig, config };
   }
 
   deleteBot(id) {

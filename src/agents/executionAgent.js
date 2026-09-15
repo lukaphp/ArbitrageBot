@@ -20,6 +20,7 @@ import riskManager from '../perps/riskManager.js';
 import db from '../db/database.js';
 import bus, { EVENTS } from './bus.js';
 import logger from '../utils/logger.js';
+import { validateTunePatch } from './tunePatch.js';
 
 class ExecutionAgent {
   constructor() {
@@ -57,6 +58,7 @@ class ExecutionAgent {
         case 'close_suggestion': result = await this._close(action); break;
         case 'tighten_sl':      result = await this._tightenSl(action); break;
         case 'open':            result = await this._open(action); break;
+        case 'tune_params':     result = await this._tuneParams(action); break;
         default:
           // Tipi non auto-eseguibili (es. new_strategy_candidate): solo registrati.
           // Non è una vera esecuzione: libera la prenotazione idempotenza.
@@ -64,6 +66,22 @@ class ExecutionAgent {
           db.insertAudit('executionAgent', 'action.noop', { type: action.type, coin: action.coin });
           return { ok: true, result: { noop: true, message: 'Tipo non auto-eseguibile: configura manualmente.' } };
       }
+
+      // Un handler può concludere che NON c'era nulla da eseguire (es. una
+      // proposta `tune_params` diagnostica, senza patch applicabile). È lo
+      // stesso esito del ramo `default`, raggiunto però dopo aver guardato il
+      // contenuto dell'azione e non solo il suo tipo — quindi riceve lo stesso
+      // trattamento: prenotazione dell'idempotenza RILASCIATA (non è successo
+      // niente da non ripetere), audit `action.noop`, nessun `ORDER_FILLED` sul
+      // bus. Senza questo ramo una proposta puramente diagnostica lascerebbe in
+      // `executed_actions` la traccia di un'esecuzione mai avvenuta e
+      // annuncerebbe un ordine riempito che non esiste.
+      if (result?.noop === true) {
+        if (action.id) { this.executed.delete(action.id); db.unmarkActionExecuted(action.id); }
+        db.insertAudit('executionAgent', 'action.noop', { type: action.type, coin: action.coin, message: result.message });
+        return { ok: true, result };
+      }
+
       db.insertAudit('executionAgent', 'order.filled', { type: action.type, coin: action.coin, result });
       bus.publish(EVENTS.ORDER_FILLED, { action, result });
       return { ok: true, result };
@@ -106,6 +124,66 @@ class ExecutionAgent {
     }, network);
     if (r.error) throw new Error(r.error);
     return { slPlaced: triggerPx };
+  }
+
+  /**
+   * TUNING DI CONFIGURAZIONE approvato a mano (proposta `tune_params`).
+   *
+   * Perché il click APPLICA davvero invece di lasciare un promemoria. Le
+   * proposte che restano suggerimenti (`new_strategy_candidate`) lo restano
+   * perché descrivono una strategia intera, con size e leva: lì "configura a
+   * mano" è una protezione, non un fastidio. Qui la modifica è un singolo campo
+   * già scelto e già validato, e lasciarla da riportare a mano avrebbe due
+   * effetti sgradevoli — l'operatore la riscrive con un refuso, oppure non la
+   * riscrive affatto e la proposta diventa l'ennesima riga che scade senza
+   * conseguenze. Una coda advisory serve se approvare produce l'effetto.
+   *
+   * Ciò che rende sicuro applicare è il RESTRINGIMENTO, non la fiducia:
+   * `validateTunePatch` ammette solo `candleInterval`, e solo su un valore della
+   * whitelist. Non passa di qui nessun campo che cambi il denaro a rischio, per
+   * cui l'invariante dichiarata in cima a questo file — l'auto-esecuzione non
+   * aumenta mai l'esposizione — non viene toccata: cambia ogni quanto il bot
+   * guarda il mercato, non quanto ci mette sopra.
+   *
+   * La validazione è rifatta QUI, sul lato che scrive, anche se il watcher l'ha
+   * già fatta quando ha creato la proposta: fra i due momenti c'è una riga in
+   * `proposals` e nessuno garantisce che sia arrivata da lì. Una patch fuori
+   * whitelist LANCIA — finisce in `order.error` nell'audit e torna come errore a
+   * chi ha cliccato — invece di essere ripulita e applicata a metà.
+   *
+   * La fusione con la config esistente non è duplicata: è
+   * `botManager.applyConfigPatch`, lo stesso identico percorso di
+   * `update_strategy_params` (merge di un livello + ricarica dell'istanza +
+   * emit UI), così i due modi di modificare una config non possono divergere.
+   */
+  async _tuneParams(action) {
+    if (!action.botId) throw new Error('tune_params richiede botId');
+
+    const patch = action.patch || null;
+    if (!patch) {
+      // Proposta diagnostica: dice PERCHÉ il bot è fermo quando nessun parametro
+      // lo sbloccherebbe (nessuna regola d'ingresso, intervallo già al minimo).
+      // Non è un fallimento: è l'esito corretto, e va detto così invece di
+      // fingere un'applicazione riuscita.
+      return {
+        noop: true,
+        botId: action.botId,
+        message: 'Nessun parametro applicabile: la proposta è diagnostica, la modifica va decisa a mano.'
+      };
+    }
+
+    const v = validateTunePatch(patch);
+    if (!v.ok) {
+      throw new Error(`Patch di tuning rifiutata (fuori dai parametri modificabili): ${v.errors.join(' ')}`);
+    }
+
+    const { default: botManager } = await import('../perps/botManager.js'); // lazy: evita cicli
+    const { previousConfig, config } = await botManager.applyConfigPatch(action.botId, patch, { reason: 'tune_params' });
+
+    const changed = {};
+    for (const k of Object.keys(patch)) changed[k] = { da: previousConfig?.[k] ?? null, a: config?.[k] ?? null };
+    logger.info(`🎚️  Tuning applicato al bot ${action.botId}`, changed);
+    return { botId: action.botId, tuned: changed };
   }
 
   async _open(action) {

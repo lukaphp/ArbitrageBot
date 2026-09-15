@@ -67,6 +67,7 @@ if (typeof BigInt.prototype.toJSON !== 'function') {
 
 // Sistema agentico (backbone + Analyst AI)
 import agentRuntime from './agents/runtime.js';
+import { inactivityWatcherAgent } from './agents/inactivityWatcher.js';
 import analyst from './agents/analyst/analyst.js';
 import advisor from './agents/advisor/advisor.js';
 import proposals from './agents/proposals.js';
@@ -2141,6 +2142,13 @@ class ArbitrageBotServer {
         agentRuntime.register(analyst);
         agentRuntime.register(proposals.janitorAgent());
         agentRuntime.register(mlTrainer);
+        // Watcher di inattività: NON è un agente AI e non dipende da
+        // AGENTS_ENABLED — è un controllo deterministico su timestamp, non costa
+        // token e non chiama nessun modello. Legge i bot dal botManager di
+        // QUESTO processo: gira dov'è la flotta, non dove sta l'LLM.
+        agentRuntime.register(inactivityWatcherAgent({
+          getBots: () => botManager.listStates()
+        }));
         await agentRuntime.startAll();
         logger.info('🤖 Sottosistema Perps + agenti pronto');
       } catch (perpsError) {

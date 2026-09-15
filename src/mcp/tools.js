@@ -15,6 +15,7 @@ import client from '../perps/hyperliquidClient.js';
 import riskAgent from '../agents/riskAgent.js';
 import logger from '../utils/logger.js';
 import { postInternal } from '../utils/internalLoopback.js';
+import { mergeStrategyConfig, extractBotConfig } from '../perps/strategySchema.js';
 import {
   validateInstructionOverride,
   checkOrderVelocity,
@@ -31,46 +32,14 @@ import {
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
 /**
- * Fonde i parametri di `update_strategy_params` nella config esistente,
- * scendendo di UN livello sui blocchi annidati.
- *
- * Perché non basta lo spread. La config di strategia è fatta di blocchi
- * (`risk`, `sizing`, `tp`, `sl`, `trailing`, `dca`) e uno spread shallow li
- * sostituisce interi: `params.risk = { useDynamicSizing: true }` cancellava
- * `maxPositionUsd`/`maxLeverage`/`maxDailyLossUsd` di quel bot, cioè il tetto
- * di rischio PER BOT, senza dirlo a nessuno. Restava in piedi il solo cap
- * globale di HYPERLIQUID_CONFIG, quindi non una posizione senza limiti — ma un
- * limite che l'operatore credeva di avere e non aveva più. Un agente che
- * aggiorna un singolo campo non sta chiedendo di azzerare gli altri.
- *
- * Un livello e non ricorsivo, di proposito: la profondità serve ai blocchi di
- * primo livello, e una fusione ricorsiva renderebbe impossibile sostituire un
- * sotto-oggetto per intero senza prima svuotarlo campo per campo.
- *
- * Restano SOSTITUZIONI integrali, perché sono richieste esplicite e non
- * aggiornamenti parziali:
- *  - un valore non-oggetto (`risk: null`) — è il modo legittimo di azzerare un
- *    blocco, e interpretarlo come merge toglierebbe all'agente il solo modo di
- *    cancellarlo;
- *  - gli array (`entryRules`) — una lista di regole fusa elemento per elemento
- *    sarebbe una strategia che nessuno ha scritto;
- *  - il caso in cui la config attuale NON ha un oggetto su quella chiave.
- *
- * Funzione pura, esportata: si verifica in isolamento, senza passare dalle due
- * conferme MCP.
+ * `mergeStrategyConfig` ed `extractBotConfig` sono definite in
+ * `perps/strategySchema.js` (funzioni pure sulla configurazione di strategia) e
+ * ri-esportate qui: hanno un secondo consumatore fuori dal layer MCP
+ * (`agents/executionAgent`, proposte `tune_params`) e devono restare UNA sola,
+ * non due copie che divergono. I chiamanti e i test che le importano da qui
+ * continuano a funzionare identici.
  */
-export function mergeStrategyConfig(currentConfig, params) {
-  const base = isPlainObject(currentConfig) ? currentConfig : {};
-  if (!isPlainObject(params)) return { ...base };
-
-  const merged = { ...base };
-  for (const [key, value] of Object.entries(params)) {
-    merged[key] = (isPlainObject(base[key]) && isPlainObject(value))
-      ? { ...base[key], ...value }
-      : value;
-  }
-  return merged;
-}
+export { mergeStrategyConfig, extractBotConfig };
 
 /**
  * Registra una chiamata MCP nell'audit log del database.
@@ -161,22 +130,6 @@ async function notifyExpressReload() {
   // rumorosamente". Il valore di ritorno qui si ignora di proposito — lo Stdio
   // funziona anche a Express spento.
   await postInternal('/internal/mcp/reload');
-}
-
-/**
- * Helper per estrarre e parsare in sicurezza la configurazione di un bot da DB.
- */
-export function extractBotConfig(botRow) {
-  if (!botRow) return {};
-  const raw = botRow.config_json || botRow.config || {};
-  if (typeof raw === 'string') {
-    try {
-      return JSON.parse(raw || '{}');
-    } catch {
-      return {};
-    }
-  }
-  return raw && typeof raw === 'object' ? raw : {};
 }
 
 /**
@@ -717,30 +670,14 @@ export async function handleUpdateStrategyParams({ bot_id, params, confirmation_
   }
 
   try {
-    const currentConfig = extractBotConfig(botRow);
-
-    // Merge profondo di UN livello: aggiornare un campo dentro `risk` (o
+    // Merge profondo di UN livello + ricarica runtime + emit UI: la sequenza sta
+    // in `botManager.applyConfigPatch`, condivisa con le proposte `tune_params`
+    // approvate a mano. Aggiornare un campo dentro `risk` (o
     // `sizing`/`tp`/`sl`/`trailing`/`dca`) non deve cancellare gli altri campi
-    // dello stesso blocco. Vedi `mergeStrategyConfig`.
-    const mergedConfig = mergeStrategyConfig(currentConfig, params);
-
-    // Aggiornamento atomico nel DB e ricaricamento runtime tramite botManager.updateBot
-    const updatedState = await botManager.updateBot(bot_id, {
-      name: botRow.name,
-      coin: botRow.coin,
-      config: mergedConfig,
-      linked_agent_id: botRow.linked_agent_id,
-      max_allocation_usd: botRow.max_allocation_usd,
-      actor_label: botRow.actor_label,
-      actor_id: botRow.actor_id,
-      is_managed_by_agent: botRow.is_managed_by_agent
+    // dello stesso blocco: vedi `mergeStrategyConfig`.
+    const { state: updatedState } = await botManager.applyConfigPatch(bot_id, params, {
+      reason: 'update_strategy_params'
     });
-
-    // Invalida e notifica UI via WebSocket
-    if (botManager.io) {
-      botManager.io.emit('perps:botUpdate', updatedState);
-      botManager.io.emit('perps:dashboardRefresh', { reason: 'update_strategy_params', botId: bot_id });
-    }
 
     // …e il processo Express, che nel percorso MCP Stdio è un ALTRO processo:
     // lì `botManager.io` è null e la config mostrata resterebbe quella vecchia.

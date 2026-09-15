@@ -756,6 +756,26 @@ export class PerpsDatabase {
     return row ? row.closed_at : null;
   }
 
+  /**
+   * Timestamp (ms) dell'ULTIMA APERTURA di un bot, o null se non ha mai aperto.
+   *
+   * Affianca `lastClosedAt` invece di riusarlo: il watcher di inattività misura
+   * da quanto il bot non ENTRA a mercato, e le due date rispondono a domande
+   * diverse. Un bot che ha aperto e non ha ancora chiuso non è inattivo, ma
+   * `lastClosedAt` lo direbbe fermo da sempre; un bot che apre e chiude di
+   * continuo ha le due date quasi sovrapposte e lì la differenza non si vede —
+   * è il primo caso a rendere sbagliato il riuso.
+   *
+   * Guarda TUTTE le posizioni, aperte e chiuse: l'apertura è il fatto che conta.
+   */
+  lastOpenedAt(botId) {
+    this.ensure();
+    const row = this.db.prepare(
+      `SELECT opened_at FROM positions WHERE bot_id = ? ORDER BY opened_at DESC LIMIT 1`
+    ).get(botId);
+    return row ? row.opened_at : null;
+  }
+
   /** Conta le perdite consecutive più recenti di un bot. */
   getConsecutiveLosses(botId) {
     this.ensure();

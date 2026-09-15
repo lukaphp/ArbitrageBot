@@ -170,6 +170,8 @@ export function validateStrategyConfig(config, { prefix = '' } = {}) {
     if (blk.mode !== undefined && !['percent', 'absolute', 'atr'].includes(blk.mode)) at(`config.${key}.mode non riconosciuto: ${blk.mode}.`);
   }
 
+  errors.push(...validatePartialTp(config.partialTp, prefix));
+
   // Parametri del SIZING DINAMICO ATR (config.risk). Volutamente NON si
   // toccano `maxPositionUsd`/`maxLeverage`/`maxDailyLossUsd`, che vivono nello
   // stesso oggetto ma non sono mai stati validati qui: iniziare a rifiutarli
@@ -203,6 +205,139 @@ export function validateStrategyConfig(config, { prefix = '' } = {}) {
       if (d.steps !== undefined && (!Number.isInteger(d.steps) || d.steps < 0)) at(`dca.steps non valido: ${d.steps}.`);
       if (d.stepPercent !== undefined && (!Number.isFinite(d.stepPercent) || d.stepPercent <= 0)) at(`dca.stepPercent non valido: ${d.stepPercent}.`);
     }
+  }
+
+  return errors;
+}
+
+/**
+ * Legge la config di strategia da una riga `bots`, qualunque forma abbia
+ * (`config_json` stringa, `config` già oggetto, niente del tutto).
+ *
+ * Viveva in `src/mcp/tools.js`. È stata spostata qui, insieme a
+ * `mergeStrategyConfig`, perché ha un secondo consumatore fuori dal layer MCP
+ * (`agents/executionAgent`, per le proposte `tune_params`) e importare
+ * `mcp/tools.js` da lì avrebbe tirato dentro guardrail, botManager e l'intera
+ * superficie degli strumenti — oltre a creare un ciclo con `botManager`, che a
+ * sua volta ha bisogno della fusione. Qui non c'è I/O e non c'è nessun import
+ * oltre alla config: è il posto dove stanno già le funzioni pure che parlano di
+ * configurazione di strategia. `mcp/tools.js` continua a ri-esportarle, così i
+ * chiamanti (e i test) esistenti non cambiano.
+ */
+export function extractBotConfig(botRow) {
+  if (!botRow) return {};
+  const raw = botRow.config_json || botRow.config || {};
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw || '{}');
+    } catch {
+      return {};
+    }
+  }
+  return raw && typeof raw === 'object' ? raw : {};
+}
+
+/**
+ * Fonde i parametri di un aggiornamento nella config esistente, scendendo di UN
+ * livello sui blocchi annidati.
+ *
+ * Perché non basta lo spread. La config di strategia è fatta di blocchi
+ * (`risk`, `sizing`, `tp`, `sl`, `trailing`, `dca`) e uno spread shallow li
+ * sostituisce interi: `params.risk = { useDynamicSizing: true }` cancellava
+ * `maxPositionUsd`/`maxLeverage`/`maxDailyLossUsd` di quel bot, cioè il tetto
+ * di rischio PER BOT, senza dirlo a nessuno. Restava in piedi il solo cap
+ * globale di HYPERLIQUID_CONFIG, quindi non una posizione senza limiti — ma un
+ * limite che l'operatore credeva di avere e non aveva più. Chi aggiorna un
+ * singolo campo non sta chiedendo di azzerare gli altri.
+ *
+ * Un livello e non ricorsivo, di proposito: la profondità serve ai blocchi di
+ * primo livello, e una fusione ricorsiva renderebbe impossibile sostituire un
+ * sotto-oggetto per intero senza prima svuotarlo campo per campo.
+ *
+ * Restano SOSTITUZIONI integrali, perché sono richieste esplicite e non
+ * aggiornamenti parziali:
+ *  - un valore non-oggetto (`risk: null`) — è il modo legittimo di azzerare un
+ *    blocco, e interpretarlo come merge toglierebbe il solo modo di cancellarlo;
+ *  - gli array (`entryRules`, `partialTp`) — una lista fusa elemento per
+ *    elemento sarebbe una strategia che nessuno ha scritto;
+ *  - il caso in cui la config attuale NON ha un oggetto su quella chiave.
+ *
+ * Funzione pura: si verifica in isolamento, senza passare dalle due conferme MCP.
+ */
+export function mergeStrategyConfig(currentConfig, params) {
+  const base = isPlainObject(currentConfig) ? currentConfig : {};
+  if (!isPlainObject(params)) return { ...base };
+
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(params)) {
+    merged[key] = (isPlainObject(base[key]) && isPlainObject(value))
+      ? { ...base[key], ...value }
+      : value;
+  }
+  return merged;
+}
+
+/**
+ * Valida la SCALA di take profit parziali (`config.partialTp`).
+ *
+ * Perché serve, e perché non bastava il giro che già c'era sopra: il loop su
+ * `['tp', 'sl', 'trailing']` non include `partialTp`, che ha una forma diversa
+ * (una LISTA di gradini, non un blocco `{enabled, mode, value}`). Il risultato
+ * era che questa chiave non veniva guardata da nessuno: un payload malformato
+ * attraversava l'import e `update_strategy_params` senza una parola e arrivava
+ * fino a `bot._placeTpSl`.
+ *
+ * Cosa succederebbe là in fondo, gradino per gradino — è questo che motiva le
+ * tre regole qui sotto, non un gusto per la severità:
+ *  - `riskManager.computeTpLadder` FILTRA i gradini con `portion > 0 &&
+ *    atPercent > 0`. Un gradino scritto male (portion negativa, `atPercent`
+ *    stringa, voce `null`) non produce nessun errore: sparisce. Il bot opera
+ *    con una scala di uscita diversa da quella configurata, e il solo modo di
+ *    accorgersene è contare i trigger sull'exchange.
+ *  - `portion` è una FRAZIONE della size (0-1), non una percentuale. Un `50`
+ *    scritto al posto di `0.5` passa il filtro e chiede di chiudere cinquanta
+ *    volte la posizione.
+ *  - la somma delle `portion` oltre 1 chiede di chiudere più size di quanta ne
+ *    esista: sull'exchange diventa un ordine di chiusura rifiutato o, peggio,
+ *    l'apertura di una posizione opposta.
+ *
+ * Coerente col resto del file: si RIFIUTA, non si aggiusta. Nessun clamp della
+ * somma a 1, nessuno scarto silenzioso del gradino storto — sarebbe di nuovo
+ * una strategia che nessuno ha scritto.
+ *
+ * Tolleranza sulla somma: `1 + 1e-9`, perché `0.3 + 0.3 + 0.4` in virgola
+ * mobile fa 1.0000000000000002 e rifiutare una scala legittima per l'ultimo bit
+ * della mantissa sarebbe un falso positivo, non un controllo.
+ */
+function validatePartialTp(ladder, prefix = '') {
+  const errors = [];
+  const at = (msg) => errors.push(`${prefix}${msg}`);
+  if (ladder === undefined || ladder === null) return errors;
+
+  if (!Array.isArray(ladder)) {
+    at('config.partialTp deve essere una lista di gradini { portion, atPercent }.');
+    return errors;
+  }
+
+  let sum = 0;
+  ladder.forEach((step, i) => {
+    const where = `partialTp, gradino ${i + 1}`;
+    if (!isPlainObject(step)) {
+      at(`${where}: non è un oggetto { portion, atPercent }.`);
+      return;
+    }
+    if (!Number.isFinite(step.portion) || step.portion <= 0 || step.portion > 1) {
+      at(`${where}: portion non valida: ${JSON.stringify(step.portion)} (attesa una frazione della posizione > 0 e <= 1 — 0.5 è metà, non 50).`);
+    } else {
+      sum += step.portion;
+    }
+    if (!Number.isFinite(step.atPercent) || step.atPercent <= 0) {
+      at(`${where}: atPercent non valido: ${JSON.stringify(step.atPercent)} (atteso un numero > 0, la distanza percentuale dall'ingresso).`);
+    }
+  });
+
+  if (sum > 1 + 1e-9) {
+    at(`config.partialTp: la somma delle portion è ${sum.toFixed(4)}, oltre 1 — chiuderebbe più size di quanta ne esista in posizione.`);
   }
 
   return errors;
@@ -338,5 +473,6 @@ export function validateItemList(list, { maxItems = 100 } = {}) {
 export default {
   EXPORT_KIND, EXPORT_VERSION, VALID_INTERVALS, VALID_RULE_TYPES, VALID_INDICATORS,
   buildEnvelope, historyExportItem, botExportItem, exportFileName,
-  validateStrategyConfig, validateItem, validateEnvelope, validateItemList
+  validateStrategyConfig, validateItem, validateEnvelope, validateItemList,
+  extractBotConfig, mergeStrategyConfig
 };

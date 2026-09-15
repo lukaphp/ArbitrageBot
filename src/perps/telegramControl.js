@@ -50,6 +50,23 @@ const HELP = [
 ].join('\n');
 
 /**
+ * Nome leggibile dei parametri toccabili da una proposta `tune_params`, per
+ * dire in chat COSA è cambiato invece di mostrare la chiave di config.
+ *
+ * La whitelist vera è `TUNABLE_KEYS` in `src/agents/tunePatch.js` ed è lei a
+ * decidere cosa è ammesso: qui c'è solo come si chiama la chiave in una frase.
+ * Deliberatamente NON esaustiva con fallback a "nascondi": se la whitelist
+ * cresce e questa riga resta indietro, la chiave viene mostrata com'è
+ * (`maxLeverage: 3 → 5`) invece di sparire — su una modifica già scritta nella
+ * config di un bot, un nome tecnico è molto meno grave di un cambiamento
+ * invisibile. Stessa mappa (e stessa scelta) della coda web in `public/perps.js`,
+ * duplicata perché quel file è browser e non può importare da `src/`.
+ */
+const TUNE_PARAM_LABELS = {
+  candleInterval: 'intervallo candele'
+};
+
+/**
  * ADV-03 — finestra di validità della conferma del budget advisor.
  * Una conferma che resta valida per sempre non è una conferma: se il messaggio
  * "confirm" arriva mezz'ora dopo, chi lo manda potrebbe non ricordare più a
@@ -292,8 +309,23 @@ class TelegramControl {
     const pending = proposals.list({ status: 'pending' });
     if (!pending.length) return this._send('Nessuna proposta AI in attesa.');
     const lines = pending.map(p =>
-      `🧠 <code>${p.id.slice(0, 8)}</code> [${p.type}] ${p.coin || ''} · conf ${p.confidence != null ? Math.round(p.confidence * 100) + '%' : '—'}\n   ${p.rationale || ''}`);
+      `🧠 <code>${p.id.slice(0, 8)}</code> [${p.type}] ${p.coin || ''} · ${this._confLabel(p)}\n   ${p.rationale || ''}`);
     return this._send(`<b>Proposte AI in attesa</b>\n${lines.join('\n')}\n\n/approva &lt;id&gt; · /rifiuta &lt;id&gt;`);
+  }
+
+  /**
+   * Etichetta di confidenza in elenco. Non tutte le proposte vengono da un
+   * modello: l'inactivity-watcher è una regola deterministica e lascia
+   * `confidence` a null DI PROPOSITO (un numero lì sarebbe inventato). Scrivere
+   * "conf —" su una proposta che una confidenza non ce l'ha per costruzione fa
+   * sembrare mancante un dato che invece non esiste. Quando il modello c'è ma il
+   * numero manca resta "conf —", che lì è il significato corretto (ignoto).
+   * Stessa distinzione della coda web (`_proposalConfidenceHtml` in perps.js).
+   */
+  _confLabel(p) {
+    if (p.confidence != null) return `conf ${Math.round(p.confidence * 100)}%`;
+    if (p.source && p.source !== 'analyst') return '⚙️ regola automatica';
+    return 'conf —';
   }
 
   async _cmdDecide(arg, approve) {
@@ -302,10 +334,44 @@ class TelegramControl {
     if (!p) return this._send(`Proposta "${arg}" non trovata. Usa /proposte.`);
     if (approve) {
       const r = await proposals.approve(p.id);
-      return this._send(r.ok ? `✅ Approvata ed eseguita [${p.type}] ${p.coin || ''}` : `⚠️ Non eseguita: ${r.reason}`);
+      if (!r.ok) return this._send(`⚠️ Non eseguita: ${r.reason}`);
+      return this._send(this._approveOutcomeText(p, r));
     }
     const r = proposals.reject(p.id);
     return this._send(r.ok ? `🚫 Proposta rifiutata` : `⚠️ ${r.reason}`);
+  }
+
+  /**
+   * Esito di un'approvazione, detto per quello che è.
+   *
+   * `proposals.approve()` torna `{ ok: true }` in tre casi diversi, e solo uno
+   * dei tre ha cambiato qualcosa sul bot: rispondere "✅ Approvata ed eseguita"
+   * su qualunque `ok` afferma un'esecuzione che per una proposta diagnostica
+   * (`tune_params` senza patch, `new_strategy_candidate`) non è mai avvenuta —
+   * chi legge aspetta un effetto che non arriverà e poi dà la colpa al bot.
+   * Stessa verità mostrata dalla coda web (`approveProposal` in perps.js), sulle
+   * stesse tre uscite:
+   *  - `result.tuned`: la patch è stata scritta in `bots.config_json`, e la
+   *    risposta riporta il cambiamento MISURATO (da → a) invece di ripetere la
+   *    patch richiesta: se il merge ha prodotto altro, si vede qui;
+   *  - `suggestion`: nulla è stato eseguito, la proposta è solo archiviata. Il
+   *    testo arriva dal server perché il motivo cambia col tipo ("configura a
+   *    mano nel creatore bot" è vero per `new_strategy_candidate`, falso per un
+   *    tuning diagnostico);
+   *  - esecuzione reale (apertura, chiusura, pausa bot…): il vecchio messaggio.
+   */
+  _approveOutcomeText(p, r) {
+    const tag = `[${p.type}] ${p.coin || ''}`.trim();
+    const tuned = r.result?.tuned;
+    if (tuned && typeof tuned === 'object' && Object.keys(tuned).length) {
+      const parts = Object.entries(tuned)
+        .map(([k, v]) => `${TUNE_PARAM_LABELS[k] || k}: ${v?.da ?? '—'} → ${v?.a ?? '—'}`);
+      return `🎚️ Applicato ${tag} — ${parts.join(', ')}`;
+    }
+    if (r.suggestion) {
+      return `📝 ${tag} — ${r.result?.message || 'Suggerimento acquisito: configuralo a mano, il bot non è stato modificato.'}`;
+    }
+    return `✅ Approvata ed eseguita ${tag}`;
   }
 
   /**

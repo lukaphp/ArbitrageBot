@@ -72,6 +72,15 @@ export class PerpsBot {
     this.lastError = null;
     this._inFlightTick = null; // promise del tick in corso (DEBT-01, vedi tick()/whenIdle())
     this.lastTickAt = 0;       // per il watchdog (rileva bot "fermi")
+    // Istante dell'ultimo `start()` di QUESTA istanza. Serve al watcher di
+    // inattività come riferimento per un bot che non ha mai aperto niente:
+    // senza, "fermo da quanto?" non avrebbe risposta e il primo controllo dopo
+    // un riavvio proporrebbe subito un tuning per ogni bot della flotta.
+    // In memoria di proposito: un riavvio del processo azzera il conteggio, ed
+    // è il comportamento voluto — dopo un deploy si concede al bot la stessa
+    // finestra che si concede a uno appena avviato, invece di sommare a
+    // un'attesa che nessuno stava più osservando.
+    this.startedAt = null;
     this.tickErrors = 0;       // contatore errori di tick (metriche)
     this._lastCooldownNotifyUntil = null; // episodio di cooldown già notificato (una notifica per episodio, non per tick)
     this.dailyKey = this._todayKey();
@@ -138,6 +147,7 @@ export class PerpsBot {
   start() {
     if (this.status === 'running') return;
     this.status = 'running';
+    this.startedAt = Date.now();
     db.setBotStatus(this.id, 'running');
     const interval = this.config.loopInterval || HYPERLIQUID_CONFIG.botLoopInterval;
     this.tick(); // primo giro immediato
@@ -1209,7 +1219,7 @@ export class PerpsBot {
       max_allocation_usd: this.maxAllocationUsd,
       position: this.position, dailyPnl: this.dailyPnl,
       lastEval: this.lastEval, lastError: this.lastError, config: this.config,
-      lastTickAt: this.lastTickAt, tickErrors: this.tickErrors,
+      lastTickAt: this.lastTickAt, startedAt: this.startedAt, tickErrors: this.tickErrors,
       stats
     };
   }

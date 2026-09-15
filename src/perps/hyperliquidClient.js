@@ -254,6 +254,39 @@ class HyperliquidClient {
     }
   }
 
+  /**
+   * Chiude TUTTE le SDK in cache (WebSocket, lettura, firma) e svuota le cache.
+   *
+   * Perché serve, e perché non basta `closeWs()`. Alla PRIMA chiamata
+   * informativa l'SDK inizializza la mappa dei simboli e avvia un `setInterval`
+   * di 60s per rinfrescarla (`SymbolConversion.startPeriodicRefresh`): è un
+   * timer REF'D che tiene vivo l'event loop, e nessuna delle nostre SDK di
+   * lettura veniva mai chiusa. In `src/server.js` è invisibile — quel processo
+   * ha in ascolto un socket HTTP e comunque termina con `process.exit(0)` — ma
+   * in un processo che deve finire da solo (un test, uno script una-botta) è la
+   * differenza fra uscire e restare appeso per sempre: è la causa per cui
+   * `test/mcpServer.test.js` non faceva terminare `node --test` e serviva
+   * `--test-force-exit`.
+   *
+   * `sdk.disconnect()` ferma il refresh periodico e chiude l'eventuale WS. La
+   * chiamiamo best-effort per istanza: un'istanza che lancia in chiusura non
+   * deve impedire di chiudere le altre, ed è comunque fuori dalla cache (la
+   * prossima `getReadSdk` ne costruisce una nuova, che si re-inizializza da
+   * sola alla prima chiamata).
+   */
+  async closeAllSdks() {
+    await this.closeWs();
+    for (const [key, sdk] of [...this.readSdks, ...this.signSdks]) {
+      try {
+        sdk?.disconnect?.();
+      } catch (e) {
+        logger.debug(`Hyperliquid SDK (${key}): disconnect fallito`, e?.message);
+      }
+    }
+    this.readSdks.clear();
+    this.signSdks.clear();
+  }
+
   // ---- Info / dati di mercato ----
 
   async getMeta(network = this.network) {

@@ -21,6 +21,19 @@ import logger from '../utils/logger.js';
 const RISK_REDUCING = new Set(['close', 'close_suggestion', 'pause_bot', 'tighten_sl', 'reduce']);
 // Azioni neutre: solo suggerimenti, non aprono nulla → non richiedono account.
 const RISK_NEUTRAL = new Set(['new_strategy_candidate', 'rebalance_suggestion', 'note']);
+/**
+ * Azioni che scrivono SOLO nella configurazione di un bot, senza toccare il
+ * mercato: nessun ordine, nessuna size, nessuna leva. Insieme a sé e non dentro
+ * `RISK_NEUTRAL` perché una di queste viene davvero eseguita (la config cambia),
+ * mentre le "neutre" restano suggerimenti da configurare a mano — e la
+ * motivazione restituita deve dire la verità su quale dei due casi è.
+ *
+ * Senza questa riga un `tune_params` cadeva nel ramo delle APERTURE e veniva
+ * respinto con «Nessun wallet/agent collegato»: un messaggio falso per
+ * un'azione che non apre niente. Il kill-switch resta davanti a tutto, quindi a
+ * kill-switch attivo nemmeno un cambio di configurazione passa.
+ */
+const CONFIG_ONLY = new Set(['tune_params']);
 
 class RiskAgent {
   /** Il kill-switch è ON? (flag persistito in settings). */
@@ -62,6 +75,9 @@ class RiskAgent {
 
     // Le azioni neutre (suggerimenti) non aprono nulla: passano senza account.
     if (RISK_NEUTRAL.has(action.type)) return { ok: true, reason: 'Suggerimento (nessuna esecuzione).' };
+
+    // Modifica di sola configurazione: nessun ordine, nessun account richiesto.
+    if (CONFIG_ONLY.has(action.type)) return { ok: true, reason: 'Modifica di configurazione (nessun ordine a mercato).' };
 
     // Da qui in poi: aperture / incrementi di esposizione.
     if (!this._marketAllowed(action.coin)) {

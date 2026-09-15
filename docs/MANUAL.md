@@ -504,7 +504,7 @@ operativa solo dopo il tuo consenso esplicito — e comunque dopo essere passata
 gate di rischio deterministico (§7.3).
 
 Tipi di proposta ammessi: `pause_bot`, `close`, `tighten_sl`, `open`,
-`new_strategy_candidate`.
+`new_strategy_candidate`, `tune_params`.
 
 | Azione | Effetto |
 |:---|:---|
@@ -514,6 +514,33 @@ Tipi di proposta ammessi: `pause_bot`, `close`, `tighten_sl`, `open`,
 
 Le proposte non approvate **scadono** (default 30 minuti): un suggerimento basato su
 un mercato di mezz'ora fa non deve poter essere eseguito ore dopo.
+
+### Proposte di tuning (`tune_params`)
+
+Non tutte le proposte vengono dall'Analyst. Un controllo periodico **deterministico**
+(nessun modello, nessun costo in token) segnala i bot che sono in esecuzione ma non
+aprono una posizione da più di 15 minuti, e mette in coda una proposta `tune_params`.
+In coda si riconoscono dall'etichetta **⚙️ regola automatica** al posto della
+percentuale di confidenza: una regola aritmetica non ha una confidenza da dichiarare.
+
+Ce ne sono di due tipi, e la coda li distingue **prima** del click:
+
+- **Con una modifica da applicare** — la scheda mostra *«Se approvi: intervallo candele
+  → 5m»*. Approvare **scrive davvero** nella configurazione del bot, senza altre
+  conferme. L'unico parametro che una proposta di tuning può toccare è
+  `candleInterval`, e solo di un gradino più corto: cambia *ogni quanto* il bot valuta
+  le sue regole, mai *quanto denaro* ci mette sopra. Leva, size, TP/SL e tetti di
+  rischio non sono modificabili per questa via, ed è reversibile rimettendo a mano
+  l'intervallo precedente.
+- **Diagnostiche** — quando nessun parametro risolverebbe (bot senza regole
+  d'ingresso, oppure intervallo già al minimo) la proposta spiega *perché* il bot è
+  fermo e la scheda lo dichiara: *«Nessun parametro da applicare: è una diagnosi»*.
+  Approvarla la archivia, non modifica niente.
+
+Queste proposte scadono dopo **3 ore** e non dopo 30 minuti: «questo bot è fermo da
+tre ore» resta vero anche domani, a differenza di un «chiudi adesso» legato al prezzo.
+Dopo una proposta, lo stesso bot resta in silenzio per 6 ore qualunque sia stata la
+tua decisione.
 
 ### Controllo dei costi
 

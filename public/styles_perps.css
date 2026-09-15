@@ -377,6 +377,13 @@
 .ap-conf { margin-left: auto; color: #718096; font-size: 12px; }
 .ap-rationale { font-size: 13px; line-height: 1.5; color: #2d3748; }
 .ap-payload { font-size: 12px; color: #718096; margin-top: 4px; font-family: ui-monospace, monospace; }
+/* Riga "cosa succede se approvi": è la frase che decide il click, quindi ha uno
+   sfondo pieno e non il grigio del payload. Colori solidi e non in alpha perché
+   la card è chiara ma sta dentro body.cockpit-mode (stessa ragione di .coin-badge). */
+.ap-change { font-size: 12px; line-height: 1.5; color: #3730a3; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; padding: 7px 9px; margin-top: 6px; }
+/* Proposta diagnostica: approvarla non modifica niente. Ambra, non indaco: è un
+   avviso su cosa NON succederà, non l'anteprima di una modifica. */
+.ap-change-none { color: #92400e; background: #fffbeb; border-color: #fde68a; }
 .ap-actions { display: flex; gap: 8px; margin-top: 10px; }
 .agent-killswitch { display: flex; gap: 10px; align-items: center; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border, #edf2f7); }
 .btn-danger { background: #e53e3e; color: #fff; border: 0; }

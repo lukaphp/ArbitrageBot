@@ -382,7 +382,7 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     assert.match(duplicateAfterDbClose.message, /rilevata sull'account/, 'senza riga in DB il rifiuto deve venire dal livello account');
 
     resetOrderVelocity(dbLevelBotId);
-    try { db.deleteBot(dbLevelBotId); } catch { /* cleanup best-effort */ }
+    try { botManager.deleteBot(dbLevelBotId); } catch { /* cleanup best-effort */ }
   });
 
   /**
@@ -448,7 +448,7 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     assert.equal(exitOrder.success, true, exitOrder.message);
 
     resetOrderVelocity(liveBotId);
-    try { db.deleteBot(liveBotId); } catch { /* cleanup best-effort */ }
+    try { botManager.deleteBot(liveBotId); } catch { /* cleanup best-effort */ }
   });
 
   await t.test('5. get_system_snapshot - Restituisce snapshot consolidato', async () => {
@@ -642,7 +642,7 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     assert.equal(res2.success, true);
     assert.equal(res2.data.current_config.risk, null, 'un valore non-oggetto sostituisce, non fonde');
 
-    try { db.deleteBot(nestedBotId); } catch {}
+    try { botManager.deleteBot(nestedBotId); } catch {}
   });
 
   await t.test('8. Audit Logging - Registrazione chiamate con actor hermes_mcp_call', async () => {
@@ -809,7 +809,7 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     await flush();
     assert.equal(reloadCalls.length, 1, 'place_order_paper deve notificare il processo Express');
     resetOrderVelocity(orderBotId);
-    try { db.deleteBot(orderBotId); } catch {}
+    try { botManager.deleteBot(orderBotId); } catch {}
 
     // update_strategy_params: lo stadio 1 non ha ancora cambiato NULLA, quindi
     // non deve bussare; solo lo stadio 2 scrive.
@@ -843,12 +843,37 @@ test('MCP & Guardrails Suite: Test dei Tool e Pre-Flight Validation per Hermes',
     riskAgent.setKillSwitch(false); // stesso ripristino del subtest 6
   });
 
-  // Cleanup finale del bot di test
+  // Cleanup finale del bot di test. `botManager.deleteBot` e non `db.deleteBot`:
+  // è lo stesso percorso di `handleDeleteBot` in produzione, e ferma l'istanza in
+  // memoria PRIMA di rimuoverla. Con la sola cancellazione a livello DB l'oggetto
+  // `PerpsBot` sopravviveva in `botManager.bots` a una riga che non esiste più —
+  // un bot fantasma che i subtest successivi (`get_system_snapshot`) possono
+  // vedere. Resta DENTRO il corpo del test, prima del ripristino di
+  // `http.request`: `bot.stop()` chiama `_emit()`, che in questo processo fa una
+  // POST loopback — deve ancora finire nello stub, non sulla porta 3000 vera.
   try {
     await handleBotControl({ bot_id: testBotId, action: 'stop' });
-    db.deleteBot(testBotId);
+    botManager.deleteBot(testBotId);
   } catch {}
   http.request = originalHttpRequest;
+});
+
+/**
+ * TEARDOWN DEL PROCESSO — perché questo file non terminava.
+ *
+ * I subtest avviano bot VERI (`bot_control start`), il cui primo tick chiama
+ * `marketData`/`client.getAccount` e quindi apre un'SDK Hyperliquid di lettura.
+ * L'SDK, inizializzandosi, avvia un `setInterval` di 60s per rinfrescare la
+ * mappa dei simboli, e quella SDK resta in cache in `hyperliquidClient` per
+ * sempre: a test finiti l'event loop aveva ancora un timer ref'd e `node --test`
+ * non usciva più (da cui `--test-force-exit`). NON erano i timer dei bot: quelli
+ * `bot.stop()` li azzera già, verificato tracciando i timer vivi a fine suite.
+ * `closeAllSdks()` è il rilascio esplicito di quelle istanze.
+ */
+test.after(async () => {
+  await client.closeAllSdks();
+  try { db.close(); } catch { /* noop */ }
+  fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
 /**

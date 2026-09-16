@@ -4,8 +4,9 @@
  *
  * Esecuzione SIMULATA sui prezzi reali in tempo reale: stessa pipeline dei bot
  * live (segnali, gate, gestione posizione) ma NESSUN ordine reale parte. Riempe
- * gli ordini al mid corrente ± slippage e applica le stesse fee taker del
- * backtester, così il forward-test riflette costi realistici.
+ * gli ordini al mid corrente ± il COSTO di esecuzione simulato (`DEFAULT_SLIPPAGE`,
+ * non la tolleranza dell'ordine — vedi `simulatedSlippage`) e applica le stesse
+ * fee taker del backtester, così il forward-test riflette costi realistici.
  *
  * Espone il sottoinsieme dell'interfaccia di hyperliquidClient usato da PerpsBot,
  * così il bot può usarlo come "broker" trasparente quando config.paper === true.
@@ -19,6 +20,9 @@ import db from '../db/database.js';
 import logger from '../utils/logger.js';
 
 const TAKER_FEE_PCT = 0.00035;
+// Costo di esecuzione SIMULATO, per lato. È lo stesso valore del backtester
+// (`DEFAULT_SLIPPAGE_PCT` in backtester.js): forward-test e backtest devono
+// costare uguale, altrimenti non sono confrontabili.
 const DEFAULT_SLIPPAGE = 0.0005;
 const START_EQUITY = parseFloat(process.env.PAPER_START_EQUITY) || 10000;
 
@@ -30,10 +34,38 @@ const STATE_KEY = 'paper_broker_state';
 // una riga di `settings`.
 const MAX_PERSISTED_FILLS = 500;
 
+/**
+ * Slippage REALIZZATO da simulare su un fill, dato il parametro `slippage` che
+ * il chiamante passa a `placeMarketOrder`.
+ *
+ * CRIT #16 — sono due grandezze diverse e vanno tenute distinte:
+ *  - il parametro del chiamante è una TOLLERANZA: `hyperliquidClient.placeMarketOrder`
+ *    ci costruisce il limit IoC aggressivo (`mid ± slippage`), cioè il prezzo
+ *    PEGGIORE accettabile. `bot._openPosition` e `bot._maybeDca` passano
+ *    `config.slippage ?? 0.02`, cioè il 2%;
+ *  - il COSTO di esecuzione atteso è un'altra cosa, dell'ordine dei punti base
+ *    (`DEFAULT_SLIPPAGE`), ed è ciò che il fill simulato deve pagare — sul
+ *    mercato vero il fill arriva dal book, non dal limit price.
+ *
+ * Usare la tolleranza come costo riempiva ogni ordine paper al 2% dal mid: con
+ * uno SL all'1.5% la posizione nasceva GIÀ oltre il proprio stop e moriva alla
+ * prima valutazione dei trigger, in entrambe le direzioni e a mercato fermo
+ * (flotta OPS-FLEET-02 del 15/09: 18 trade su 18 in perdita, ~218 USD).
+ *
+ * Un IoC però non si riempie mai PEGGIO del proprio limit price: se il chiamante
+ * indica una tolleranza più stretta del modello, è quella a valere.
+ */
+export function simulatedSlippage(tolerance) {
+  const tol = Number(tolerance);
+  if (!Number.isFinite(tol) || tol < 0) return DEFAULT_SLIPPAGE;
+  return Math.min(tol, DEFAULT_SLIPPAGE);
+}
+
 export class PaperBroker {
   constructor() {
     // master(lower) -> { equity, positions: Map<coin,{side,size,entryPx,leverage}>,
     //                    triggers: Map<coin,[{oid,tpsl,triggerPx,isBuy,size}]>,
+    //                    leverage: Map<coin, number>,
     //                    fills: [{time,coin,dir,closedPnl,fee}], oidSeq }
     this.state = new Map();
     this._loaded = false;
@@ -68,6 +100,9 @@ export class PaperBroker {
           equity: Number.isFinite(Number(acc.equity)) ? Number(acc.equity) : START_EQUITY,
           positions: new Map(Object.entries(acc.positions || {})),
           triggers: new Map(Object.entries(acc.triggers || {})),
+          // Assente negli stati salvati prima del fix sulla leva: si riparte da
+          // vuoto, e le posizioni già aperte tengono la leva con cui sono nate.
+          leverage: new Map(Object.entries(acc.leverage || {})),
           fills: Array.isArray(acc.fills) ? acc.fills : [],
           oidSeq: Number(acc.oidSeq) > 0 ? Number(acc.oidSeq) : 1
         });
@@ -91,6 +126,7 @@ export class PaperBroker {
           equity: acc.equity,
           positions: Object.fromEntries(acc.positions),
           triggers: Object.fromEntries(acc.triggers),
+          leverage: Object.fromEntries(acc.leverage),
           fills: acc.fills.slice(-MAX_PERSISTED_FILLS),
           oidSeq: acc.oidSeq
         };
@@ -107,14 +143,39 @@ export class PaperBroker {
     this._load();
     const key = (master || 'paper').toLowerCase();
     if (!this.state.has(key)) {
-      this.state.set(key, { equity: START_EQUITY, positions: new Map(), triggers: new Map(), fills: [], oidSeq: 1 });
+      this.state.set(key, { equity: START_EQUITY, positions: new Map(), triggers: new Map(), leverage: new Map(), fills: [], oidSeq: 1 });
     }
-    return this.state.get(key);
+    const acc = this.state.get(key);
+    // Account ripristinato da uno stato salvato prima del fix sulla leva.
+    if (!acc.leverage) acc.leverage = new Map();
+    return acc;
   }
 
   roundPx(px) { return client.roundPx(px); }
   async getMid(coin, network) { return client.getMid(coin, network); }
-  async setLeverage() { return { ok: true, paper: true }; }
+
+  /**
+   * Leva dell'account per coin. Non era un no-op innocuo: il valore ricevuto
+   * veniva buttato e `placeMarketOrder` scriveva `leverage: 1` fisso, così
+   * `marginUsed` in `getAccount()` risultava sbagliato di un fattore pari alla
+   * leva reale (3x sulla flotta OPS-FLEET-02 → margine apparente 3 volte il
+   * vero). Su Hyperliquid la leva è stato di account per coin, non un campo
+   * dell'ordine: la si ricorda qui, come fa l'exchange, e la si applica al fill.
+   * Stessa firma posizionale di `hyperliquidClient.setLeverage`.
+   */
+  async setLeverage(masterAddress, coin, leverage) {
+    const acc = this._acc(masterAddress);
+    const lev = Number(leverage);
+    if (coin && Number.isFinite(lev) && lev > 0) {
+      acc.leverage.set(coin, lev);
+      this._save();
+      return { ok: true, paper: true, leverage: lev };
+    }
+    // Valore non utilizzabile: non si inventa una leva e non si sporca lo stato.
+    // Il fallback a 1 resta in `placeMarketOrder`, dove è visibile.
+    logger.warn(`Paper broker: leva non valida per ${coin} (${leverage}), stato invariato`);
+    return { ok: true, paper: true, leverage: acc.leverage.get(coin) ?? null };
+  }
 
   /** Valuta i trigger (TP/SL) virtuali contro il mid corrente e chiude se colpiti. */
   async _evaluateTriggers(master, network) {
@@ -185,7 +246,10 @@ export class PaperBroker {
     const acc = this._acc(masterAddress);
     const mid = await client.getMid(coin, network);
     if (!mid) return { error: `Prezzo non disponibile per ${coin}` };
-    const px = client.roundPx(isBuy ? mid * (1 + slippage) : mid * (1 - slippage));
+    // CRIT #16: il fill paga il costo di esecuzione simulato, NON la tolleranza
+    // del chiamante (vedi `simulatedSlippage`).
+    const slip = simulatedSlippage(slippage);
+    const px = client.roundPx(isBuy ? mid * (1 + slip) : mid * (1 - slip));
     const oid = acc.oidSeq++;
     const existing = acc.positions.get(coin);
 
@@ -197,13 +261,19 @@ export class PaperBroker {
       const newSize = existing.size + size;
       existing.entryPx = (existing.entryPx * existing.size + px * size) / newSize;
       existing.size = newSize;
+      // La leva è stato di account per coin: un'aggiunta non la cambia (il bot
+      // non ripassa da `setLeverage` per il DCA). Si completa solo se manca del
+      // tutto, cioè su posizioni aperte prima di questo fix.
+      existing.leverage = existing.leverage || acc.leverage.get(coin) || 1;
       const fee = px * size * TAKER_FEE_PCT;
       acc.equity -= fee;
       acc.fills.push({ time: Date.now(), coin, dir: `Open ${existing.side === 'long' ? 'Long' : 'Short'}`, px, sz: size, fee, closedPnl: 0, oid });
     } else {
       // Apertura nuova
       const side = isBuy ? 'long' : 'short';
-      acc.positions.set(coin, { side, size, entryPx: px, leverage: 1 });
+      // Leva reale impostata dal bot prima dell'apertura (`setLeverage`); 1 solo
+      // se nessuno l'ha mai impostata per questa coin.
+      acc.positions.set(coin, { side, size, entryPx: px, leverage: acc.leverage.get(coin) || 1 });
       const fee = px * size * TAKER_FEE_PCT;
       acc.equity -= fee;
       acc.fills.push({ time: Date.now(), coin, dir: `Open ${side === 'long' ? 'Long' : 'Short'}`, px, sz: size, fee, closedPnl: 0, oid });

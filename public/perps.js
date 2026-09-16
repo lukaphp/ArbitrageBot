@@ -3208,6 +3208,17 @@ class PerpsApp {
     return `${pills.join(`<span class="rule-logic">${logic}</span>`)} ${tf}${dir}`;
   }
 
+  /**
+   * Markup di una card bot.
+   *
+   * Regola di questo metodo: ogni campo che arriva dal DB o da un agente esterno
+   * (`name`, `lastError`, `crashReason`, `lastEval.reason`, `coin`) passa da
+   * `_escapeHtml` prima di entrare nel template. Il nome del bot è testo scritto
+   * dall'utente nel modale di creazione — e scrivibile anche via agenti come Hermes —
+   * quindi senza escaping un nome con del markup verrebbe eseguito nel browser di
+   * chiunque apra la dashboard (XSS stored, issue #9). Vale sia nel testo sia negli
+   * attributi: `_escapeHtml` copre anche `"` e `'`.
+   */
   _botCardHtml(b) {
     const running = b.status === 'running';
     const crashed = b.status === 'crashed';
@@ -3225,7 +3236,11 @@ class PerpsApp {
       if (!le.reason || le.reason === "Nessuna regola d'ingresso configurata") {
         return le.action === 'hold' ? '⏳ In attesa candele warmup' : actionIcon;
       }
-      return `${actionIcon} ${le.reason}`;
+      // `le.reason` è l'unico valore non fidato qui dentro (può citare il nome del bot,
+      // testo scritto dall'utente): va escapato subito, così `evalReason` è già markup
+      // sicuro per chi la interpola più sotto. `actionIcon` e il testo di warmup sono
+      // costanti del file, non passano da qui.
+      return `${actionIcon} ${this._escapeHtml(le.reason)}`;
     })();
 
     const pnlClass = (b.dailyPnl || 0) >= 0 ? 'profit-positive' : 'profit-negative';
@@ -3262,9 +3277,13 @@ class PerpsApp {
     const coin = this._escapeHtml(b.coin);
     const coinBadge = `<span class="coin-badge" title="Mercato: ${coin} perp">${coin}</span>`;
 
-    // Watchdog Crash badge
+    // Watchdog Crash badge. `crashReason` può contenere il messaggio di un errore che
+    // riporta dati scritti dall'utente (nome del bot, parametri): qui finisce dentro un
+    // attributo, quindi l'escaping deve coprire anche apici e virgolette — `_escapeHtml`
+    // lo fa (`"` → `&quot;`, `'` → `&#39;`). Il fallback resta intatto: si escapa il
+    // valore finale, non si sostituisce la logica.
     const crashBadge = crashed
-      ? `<span class="bot-status-crashed-badge" title="${b.crashReason || 'Nessun tick rilevato'}">⚠️ CRASH</span>`
+      ? `<span class="bot-status-crashed-badge" title="${this._escapeHtml(b.crashReason || 'Nessun tick rilevato')}">⚠️ CRASH</span>`
       : '';
 
     // Stato dot: verde = running, rosso-pulse = crashed, grigio = stopped
@@ -3288,7 +3307,7 @@ class PerpsApp {
       <div class="bot-card-head">
         <div>
           <span class="bot-status-dot ${dotClass}"></span>
-          <strong>${b.name}</strong> ${coinBadge}
+          <strong>${this._escapeHtml(b.name)}</strong> ${coinBadge}
           ${b.paper ? '<span class="testnet-badge" style="font-size:.6em;vertical-align:middle" title="Forward-test: esecuzione simulata su prezzi reali">PAPER</span>' : ''}
           ${agentBadge}${budgetInfo}${crashBadge}
         </div>
@@ -3300,8 +3319,8 @@ class PerpsApp {
         <div class="bot-meta"><span class="label">Posizione</span> ${pos}</div>
         <div class="bot-meta"><span class="label">Valutazione</span> <span class="eval">${evalReason}</span></div>
         ${statsLine}
-        ${crashed ? `<div class="bot-error bot-crash-reason">🐕 Watchdog: ${b.crashReason || 'nessun tick rilevato'}</div>` : ''}
-        ${!crashed && b.lastError ? `<div class="bot-error">⚠️ ${b.lastError}</div>` : ''}
+        ${crashed ? `<div class="bot-error bot-crash-reason">🐕 Watchdog: ${this._escapeHtml(b.crashReason || 'nessun tick rilevato')}</div>` : ''}
+        ${!crashed && b.lastError ? `<div class="bot-error">⚠️ ${this._escapeHtml(b.lastError)}</div>` : ''}
       </div>
       <div class="bot-card-actions">
         ${mainAction}

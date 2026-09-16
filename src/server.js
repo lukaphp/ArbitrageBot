@@ -350,12 +350,15 @@ class ArbitrageBotServer {
       }
     });
 
-    // Lista mercati con leva max e mid
+    // Lista mercati con leva max e mid.
+    // Il `mid` arriva dal feed live via `getMarkets()` (issue #14): qui non serve
+    // più nessuna fetch per avere un prezzo fresco. `refreshMarkets()` resta solo
+    // per il caso in cui la cache dei METADATI sia ancora vuota (fetch fallita
+    // all'avvio), altrimenti si risponderebbe con una lista vuota per sempre.
     app.get('/api/perps/markets', async (req, res) => {
       try {
-        const markets = marketData.getMarkets().length
-          ? marketData.getMarkets()
-          : await marketData.refreshMarkets();
+        const cached = marketData.getMarkets();
+        const markets = cached.length ? cached : await marketData.refreshMarkets();
         res.json({ success: true, data: markets });
       } catch (error) {
         res.status(500).json({ success: false, error: error.message });

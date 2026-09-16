@@ -249,13 +249,40 @@ export class MarketData {
     }
   }
 
+  /**
+   * Lista mercati con il `mid` SEMPRE allineato al feed live (issue #14).
+   *
+   * `this.markets` porta due cose diverse con tempi di vita diversi:
+   *  - i metadati (coin/name/maxLeverage/szDecimals), che cambiano solo con un
+   *    nuovo listing e vanno benissimo dall'ultima `client.getMarkets()`;
+   *  - il `mid`, che è un prezzo e invecchia in secondi.
+   * Il secondo veniva scritto solo da `refreshMarkets()`, cioè all'avvio del
+   * processo e sul cambio rete manuale: in mezzo l'endpoint `/api/perps/markets`
+   * serviva per ore il prezzo del boot (misurato in produzione: SOL 101.3 /
+   * AVAX 7.401 / BTC 77802.5 fermi al decimale mentre il testnet live stava a
+   * 100.025 / 7.5219 / 77351.5 — valori di nessuna rete, solo vecchi).
+   *
+   * Qui il prezzo viene preso da `this.mids`, che WebSocket e fallback REST
+   * tengono già fresco a ~4s di distanza: nessuna richiesta di rete in più, il
+   * feed che c'è già è la fonte di verità unica del prezzo. Si ritornano copie
+   * degli elementi, non si riscrive `this.markets`: restare una query pura evita
+   * che feed e `refreshMarkets()` si contendano lo stesso campo.
+   * Se il feed non conosce il coin (listing nuovissimo, mid a "0") si tiene il
+   * valore dei metadati: vecchio è comunque meglio di `null`.
+   */
   getMarkets() {
-    return this.markets;
+    return this.markets.map(m => ({ ...m, mid: this.getMid(m.coin) ?? m.mid }));
   }
 
+  /**
+   * Ricarica i METADATI dei mercati (nuovi listing, delisting, cambi di leva
+   * max). Non è più il percorso con cui il prezzo si aggiorna — quello passa da
+   * `this.mids` — quindi serve solo su cambio rete e come rimedio al caso "la
+   * fetch dei meta all'avvio è fallita e la cache è ancora vuota".
+   */
   async refreshMarkets() {
     this.markets = await client.getMarkets();
-    return this.markets;
+    return this.getMarkets();
   }
 
   getMid(coin) {

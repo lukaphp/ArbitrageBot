@@ -24,6 +24,7 @@ import { z } from 'zod';
 import db from '../db/database.js';
 import botManager from '../perps/botManager.js';
 import logger from '../utils/logger.js';
+import { declareProcessRole, ROLE_MCP_STDIO } from '../utils/processRole.js';
 import {
   handleBotControl,
   handlePlaceOrderPaper,
@@ -179,6 +180,13 @@ if (process.argv[1] && process.argv[1].endsWith('server.js')) {
 
   (async () => {
     try {
+      // CRIT #7 — questo processo NON esegue bot. Da dichiarare PRIMA di
+      // `loadFromDb()`, che è ciò che decide se i bot `running` sul DB
+      // ripartono qui: prima ripartivano, e ogni bot gestito da Hermes aveva
+      // due tick loop attivi (uno qui, uno in Express) sulla stessa riga
+      // `positions` e sullo stesso account paper. Da qui in avanti i tool di
+      // ciclo di vita delegano a Express via `/internal/mcp/bot-control`.
+      declareProcessRole(ROLE_MCP_STDIO);
       db.init();
       botManager.loadFromDb();
       botManager.startWatchdog();

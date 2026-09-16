@@ -61,6 +61,31 @@ export function simulatedSlippage(tolerance) {
   return Math.min(tol, DEFAULT_SLIPPAGE);
 }
 
+/**
+ * Unione di due liste di fill per IDENTITÀ del fill, non "l'ultima vince".
+ *
+ * I fill non si cancellano mai (cade solo la coda oltre `MAX_PERSISTED_FILLS`),
+ * quindi l'unione non può resuscitare niente di eliminato apposta. Serve perché
+ * `bot._registerClose` legge l'oid del fill di chiusura per sapere se ha chiuso
+ * il TP o lo SL: un fill perso in una sovrascrittura è una chiusura attribuita
+ * all'ordine sbagliato.
+ */
+function mergeFills(base, mine) {
+  const a = Array.isArray(base) ? base : [];
+  const b = Array.isArray(mine) ? mine : [];
+  const idOf = (f) => `${f.time}|${f.oid}|${f.coin}|${f.dir}|${f.sz}`;
+  const seen = new Set();
+  const out = [];
+  for (const f of [...a, ...b]) {
+    const id = idOf(f);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(f);
+  }
+  out.sort((x, y) => (x.time || 0) - (y.time || 0));
+  return out.slice(-MAX_PERSISTED_FILLS);
+}
+
 export class PaperBroker {
   constructor() {
     // master(lower) -> { equity, positions: Map<coin,{side,size,entryPx,leverage}>,
@@ -69,6 +94,20 @@ export class PaperBroker {
     //                    fills: [{time,coin,dir,closedPnl,fee}], oidSeq }
     this.state = new Map();
     this._loaded = false;
+    // CRIT #7 — DELTA di QUESTO processo dall'ultimo salvataggio riuscito:
+    // key account -> { coins: Set<coin>|null (null = tutto l'account), equityDelta }.
+    // È ciò che `_save()` applica sopra al blob riletto, invece di riscriverlo
+    // intero con la propria fotografia (vedi `_save`).
+    this._delta = new Map();
+    // Account che questo processo ha toccato almeno una volta nella sua vita:
+    // rete di sicurezza per un eventuale `_save()` senza chiave.
+    this._touchedEver = new Set();
+    // Ultima equity scritta da QUESTO processo, per account: serve a distinguere
+    // «sul disco c'è quello che ho scritto io» da «qualcun altro l'ha cambiata».
+    this._lastWrittenEquity = new Map();
+    // Account su cui si è già segnalata una scrittura concorrente: il log serve
+    // una volta per episodio, non a ogni salvataggio.
+    this._concurrentWarned = new Set();
   }
 
   /**
@@ -106,6 +145,10 @@ export class PaperBroker {
           fills: Array.isArray(acc.fills) ? acc.fills : [],
           oidSeq: Number(acc.oidSeq) > 0 ? Number(acc.oidSeq) : 1
         });
+        // Punto di riferimento per il merge: questa è l'equity che c'era sul
+        // disco quando l'abbiamo letta. Se al prossimo salvataggio è diversa,
+        // l'ha cambiata un altro processo e la nostra fotografia non vale.
+        this._lastWrittenEquity.set(key, this.state.get(key).equity);
       }
       const positions = [...this.state.values()].reduce((n, a) => n + a.positions.size, 0);
       logger.info(`📝 Paper broker: stato ripristinato (${this.state.size} account, ${positions} posizioni simulate aperte)`);
@@ -117,21 +160,208 @@ export class PaperBroker {
     return this.state;
   }
 
-  /** Salva lo stato simulato. Un errore di scrittura non interrompe la simulazione. */
-  _save() {
+  /** Chiave di account: la stessa normalizzazione usata da `_acc`. */
+  _key(master) {
+    return (master || 'paper').toLowerCase();
+  }
+
+  /**
+   * Registra che questo processo ha agito su (account, coin). È l'informazione
+   * che permette a `_save()` di scrivere SOLO il proprio delta: senza, l'unica
+   * cosa che il salvataggio sa è «ecco tutto quello che ho in memoria», e
+   * quell'«tutto» comprende account e coin che un altro processo ha cambiato
+   * dopo il nostro `_load()`.
+   *
+   * `coin` null = l'intero account è da riscrivere (percorso di compatibilità).
+   */
+  _touch(master, coin = null) {
+    const key = this._key(master);
+    this._touchedEver.add(key);
+    let d = this._delta.get(key);
+    if (!d) { d = { coins: new Set(), equityDelta: 0 }; this._delta.set(key, d); }
+    if (coin == null) d.coins = null;
+    else if (d.coins) d.coins.add(coin);
+    return key;
+  }
+
+  /**
+   * Unico punto in cui l'equity simulata cambia. Passa dal delta perché
+   * sull'account CONDIVISO fra due processi l'equity non è ricostruibile
+   * dall'ultima fotografia di uno dei due: è un contatore, e si compone
+   * sommando le variazioni, non sovrascrivendo il totale.
+   */
+  _applyEquity(acc, master, amount) {
+    acc.equity += amount;
+    const key = this._touch(master);
+    this._delta.get(key).equityDelta += amount;
+  }
+
+  /**
+   * Assegna il prossimo oid CONTROLLANDO PRIMA il contatore persistito.
+   *
+   * Il merge di `_save()` tiene `oidSeq` monotono, ma arriverebbe troppo tardi:
+   * l'oid viene coniato PRIMA del salvataggio, e se la memoria di questo
+   * processo è indietro (un altro processo ha aperto/protetto posizioni dopo il
+   * nostro `_load()`) l'oid appena assegnato è già vivo altrove. È il danno
+   * concreto dell'incidente del 12/09: `oidSeq` tornato da 37 a 35 con due
+   * trigger ancora citati in `trailing_json` a quei numeri — e l'oid è ciò con
+   * cui `bot._classifyCloseFills` distingue una chiusura da TP da una da SL.
+   *
+   * Costa una lettura di `settings` per ORDINE (non per tick): il ciclo di vita
+   * di una posizione ne fa una manciata.
+   */
+  _nextOid(acc, master) {
+    const persisted = this._readPersisted();
+    const diskSeq = Number(persisted?.[this._key(master)]?.oidSeq) || 0;
+    if (diskSeq > acc.oidSeq) acc.oidSeq = diskSeq;
+    return acc.oidSeq++;
+  }
+
+  /** Il blob persistito così com'è adesso. `null` = presente ma illeggibile. */
+  _readPersisted() {
     try {
-      const out = {};
-      for (const [key, acc] of this.state) {
-        out[key] = {
-          equity: acc.equity,
-          positions: Object.fromEntries(acc.positions),
-          triggers: Object.fromEntries(acc.triggers),
-          leverage: Object.fromEntries(acc.leverage),
-          fills: acc.fills.slice(-MAX_PERSISTED_FILLS),
-          oidSeq: acc.oidSeq
-        };
+      const raw = db.getSetting(STATE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Fotografia serializzabile di un account in memoria. */
+  _serialize(acc) {
+    return {
+      equity: acc.equity,
+      positions: Object.fromEntries(acc.positions),
+      triggers: Object.fromEntries(acc.triggers),
+      leverage: Object.fromEntries(acc.leverage),
+      fills: acc.fills.slice(-MAX_PERSISTED_FILLS),
+      oidSeq: acc.oidSeq
+    };
+  }
+
+  /**
+   * Fonde lo stato in memoria di UN account con quello che c'è su disco,
+   * applicando solo ciò che questo processo ha davvero cambiato.
+   *
+   *  - `positions`/`triggers`/`leverage`: per COIN. Le coin toccate prendono la
+   *    versione in memoria (assente = rimossa davvero: una chiusura deve
+   *    cancellare, non essere ripescata dal disco); le altre restano quelle
+   *    persistite, che possono venire da un altro processo.
+   *  - `oidSeq`: MONOTONO, si prende il massimo e lo si adotta anche in memoria.
+   *    È il guasto più pericoloso dell'incidente: un contatore che retrocede
+   *    riassegna oid ancora vivi, e l'oid è ciò con cui si riconosce se a
+   *    chiudere è stato il TP o lo SL.
+   *  - `equity`: se sul disco c'è ancora il valore che abbiamo scritto noi,
+   *    vince la memoria (nessuna deriva numerica); se l'ha cambiato qualcun
+   *    altro, si applica il nostro delta sopra al suo valore.
+   *  - `fills`: unione per identità del fill. Un fill non si cancella mai (solo
+   *    la finestra di ritenzione lo lascia cadere), quindi l'unione è sicura e
+   *    preserva le chiusure registrate dall'altro processo.
+   */
+  _mergeAccount(key, acc, base) {
+    const mem = this._serialize(acc);
+    if (!base || typeof base !== 'object') return mem;
+
+    const d = this._delta.get(key);
+    const coins = d ? d.coins : null;
+    const out = {
+      positions: { ...(base.positions || {}) },
+      triggers: { ...(base.triggers || {}) },
+      leverage: { ...(base.leverage || {}) }
+    };
+    if (!coins) {
+      out.positions = mem.positions;
+      out.triggers = mem.triggers;
+      out.leverage = mem.leverage;
+    } else {
+      for (const coin of coins) {
+        for (const field of ['positions', 'triggers', 'leverage']) {
+          if (mem[field][coin] !== undefined) out[field][coin] = mem[field][coin];
+          else delete out[field][coin];
+        }
       }
+    }
+
+    const oidSeq = Math.max(Number(mem.oidSeq) || 1, Number(base.oidSeq) || 1);
+    acc.oidSeq = oidSeq;
+
+    const baseEq = Number.isFinite(Number(base.equity)) ? Number(base.equity) : mem.equity;
+    // `mine` = l'equity di questo account quando l'abbiamo letta o scritta noi
+    // l'ultima volta (`_load` la registra, `_save` la aggiorna). Indefinita =
+    // l'account è comparso sul disco dopo, cioè l'ha scritto qualcun altro.
+    const mine = this._lastWrittenEquity.get(key);
+    const changedUnderUs = mine !== undefined && Math.abs(baseEq - mine) > 1e-9;
+    const foreign = mine === undefined || changedUnderUs;
+    let equity = mem.equity;
+    if (foreign) {
+      equity = baseEq + (d ? d.equityDelta : 0);
+      acc.equity = equity; // la memoria adotta il totale vero, non la sua metà
+      if (changedUnderUs && !this._concurrentWarned.has(key)) {
+        this._concurrentWarned.add(key);
+        logger.warn(`Paper broker: l'account ${key} è scritto anche da un altro processo (equity cambiata sotto di noi). Lo stato viene fuso, ma posizioni e trigger della stessa coin restano last-writer-wins: l'esecuzione di quel bot dovrebbe stare in UN solo processo.`);
+      }
+    }
+
+    return {
+      equity,
+      positions: out.positions,
+      triggers: out.triggers,
+      leverage: out.leverage,
+      fills: mergeFills(base.fills, mem.fills),
+      oidSeq
+    };
+  }
+
+  /**
+   * Salva lo stato simulato con RELOAD-AND-MERGE (CRIT #7).
+   *
+   * Prima riscriveva il blob intero con la memoria del processo chiamante: due
+   * processi sullo stesso container (Express e MCP Stdio) si cancellavano a
+   * vicenda le scritture, e il 12/09/2026 questo ha riportato i trigger TP/SL di
+   * una posizione live ai livelli di un bot cancellato 12 minuti prima. Ora si
+   * rilegge quello che c'è, si applica sopra SOLO il delta di questo processo e
+   * si riscrive il risultato.
+   *
+   * È una rete di sicurezza allo STORAGE, non un lock: protegge anche scenari
+   * futuri con più istanze. Quello che NON può fare è decidere chi ha ragione su
+   * una coin che due processi stanno muovendo insieme — per quello serve un
+   * esecutore unico (parte 1 della stessa issue).
+   *
+   * Un errore di scrittura non interrompe la simulazione, ma non è silenzioso.
+   *
+   * @param {string|null} touchedKey account su cui il chiamante ha appena agito.
+   */
+  _save(touchedKey = null) {
+    try {
+      const persisted = this._readPersisted();
+      const keys = new Set(this._delta.keys());
+      if (touchedKey) keys.add(touchedKey);
+      // Chiamata senza chiave e senza delta (nessun chiamante interno oggi): si
+      // riscrivono gli account che questo processo ha toccato nella sua vita —
+      // mai quelli che non ha mai visto, e mai un no-op silenzioso.
+      if (!keys.size) for (const k of this._touchedEver) keys.add(k);
+
+      let out;
+      if (persisted === null) {
+        // Blob presente ma illeggibile: non c'è niente da preservare. Si riscrive
+        // lo stato di questo processo — meglio di un blob che nessuno può leggere.
+        logger.warn('Paper broker: stato persistito illeggibile, riscritto con lo stato di questo processo');
+        out = {};
+        for (const [k, acc] of this.state) out[k] = this._serialize(acc);
+      } else {
+        out = { ...persisted };
+        for (const key of keys) {
+          const acc = this.state.get(key);
+          if (!acc) continue;
+          out[key] = this._mergeAccount(key, acc, persisted[key]);
+        }
+      }
+
       db.setSetting(STATE_KEY, JSON.stringify(out));
+      for (const [k, v] of Object.entries(out)) this._lastWrittenEquity.set(k, Number(v.equity));
+      this._delta.clear();
       return true;
     } catch (error) {
       logger.warn('Paper broker: stato simulato non persistito', error.message);
@@ -141,7 +371,7 @@ export class PaperBroker {
 
   _acc(master) {
     this._load();
-    const key = (master || 'paper').toLowerCase();
+    const key = this._key(master);
     if (!this.state.has(key)) {
       this.state.set(key, { equity: START_EQUITY, positions: new Map(), triggers: new Map(), leverage: new Map(), fills: [], oidSeq: 1 });
     }
@@ -168,7 +398,7 @@ export class PaperBroker {
     const lev = Number(leverage);
     if (coin && Number.isFinite(lev) && lev > 0) {
       acc.leverage.set(coin, lev);
-      this._save();
+      this._save(this._touch(masterAddress, coin));
       return { ok: true, paper: true, leverage: lev };
     }
     // Valore non utilizzabile: non si inventa una leva e non si sporca lo stato.
@@ -214,12 +444,12 @@ export class PaperBroker {
     const fee = notional * TAKER_FEE_PCT;
     const gross = pos.side === 'long' ? (px - pos.entryPx) * pos.size : (pos.entryPx - px) * pos.size;
     const closedPnl = gross;
-    acc.equity += closedPnl - fee;
+    this._applyEquity(acc, master, closedPnl - fee);
     acc.fills.push({ time: Date.now(), coin, dir: `Close ${pos.side === 'long' ? 'Long' : 'Short'}`, px, sz: pos.size, fee, closedPnl, oid });
     acc.positions.delete(coin);
     acc.triggers.delete(coin);
     logger.debug(`📝 Paper close ${coin} @ ${px} (${reason}) pnl=${closedPnl.toFixed(2)} fee=${fee.toFixed(2)}`);
-    this._save();
+    this._save(this._touch(master, coin));
     return { closedPnl, fee };
   }
 
@@ -250,7 +480,7 @@ export class PaperBroker {
     // del chiamante (vedi `simulatedSlippage`).
     const slip = simulatedSlippage(slippage);
     const px = client.roundPx(isBuy ? mid * (1 + slip) : mid * (1 - slip));
-    const oid = acc.oidSeq++;
+    const oid = this._nextOid(acc, masterAddress);
     const existing = acc.positions.get(coin);
 
     if (reduceOnly || (existing && existing.side === (isBuy ? 'short' : 'long'))) {
@@ -266,7 +496,7 @@ export class PaperBroker {
       // tutto, cioè su posizioni aperte prima di questo fix.
       existing.leverage = existing.leverage || acc.leverage.get(coin) || 1;
       const fee = px * size * TAKER_FEE_PCT;
-      acc.equity -= fee;
+      this._applyEquity(acc, masterAddress, -fee);
       acc.fills.push({ time: Date.now(), coin, dir: `Open ${existing.side === 'long' ? 'Long' : 'Short'}`, px, sz: size, fee, closedPnl: 0, oid });
     } else {
       // Apertura nuova
@@ -275,21 +505,21 @@ export class PaperBroker {
       // se nessuno l'ha mai impostata per questa coin.
       acc.positions.set(coin, { side, size, entryPx: px, leverage: acc.leverage.get(coin) || 1 });
       const fee = px * size * TAKER_FEE_PCT;
-      acc.equity -= fee;
+      this._applyEquity(acc, masterAddress, -fee);
       acc.fills.push({ time: Date.now(), coin, dir: `Open ${side === 'long' ? 'Long' : 'Short'}`, px, sz: size, fee, closedPnl: 0, oid });
     }
-    this._save();
+    this._save(this._touch(masterAddress, coin));
     return { oid, avgPx: px, totalSz: size, error: null, paper: true };
   }
 
   async placeTriggerOrder({ masterAddress, coin, isBuy, size, triggerPx, tpsl }, network) {
     const acc = this._acc(masterAddress);
     const px = client.roundPx(triggerPx);
-    const oid = acc.oidSeq++;
+    const oid = this._nextOid(acc, masterAddress);
     const list = acc.triggers.get(coin) || [];
     list.push({ oid, tpsl, triggerPx: px, isBuy, size });
     acc.triggers.set(coin, list);
-    this._save();
+    this._save(this._touch(masterAddress, coin));
     return { oid, avgPx: null, error: null, paper: true };
   }
 
@@ -297,7 +527,7 @@ export class PaperBroker {
     const acc = this._acc(masterAddress);
     const list = (acc.triggers.get(coin) || []).filter(t => t.oid !== oid);
     acc.triggers.set(coin, list);
-    this._save();
+    this._save(this._touch(masterAddress, coin));
     return { ok: true, paper: true };
   }
 
@@ -309,7 +539,7 @@ export class PaperBroker {
     const px = client.roundPx(pos.side === 'long' ? mid * (1 - DEFAULT_SLIPPAGE) : mid * (1 + DEFAULT_SLIPPAGE));
     // L'oid si genera PRIMA del fill: deve finirci dentro, così una chiusura
     // esterna al bot resta distinguibile da un trigger scattato.
-    const oid = acc.oidSeq++;
+    const oid = this._nextOid(acc, masterAddress);
     this._fillClose(masterAddress, coin, px, 'closePosition', { oid });
     return { oid, avgPx: px, error: null, paper: true };
   }

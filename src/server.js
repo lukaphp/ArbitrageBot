@@ -1824,6 +1824,93 @@ class ArbitrageBotServer {
     });
 
     /**
+     * CRIT #7 — INTERNAL BOT CONTROL: il ciclo di vita dei bot si esegue QUI.
+     *
+     * Terzo membro della famiglia `/internal/*`, e quello che cambia il disegno:
+     * `reload` allinea lo stato, `bot-update` porta un aggiornamento ai browser,
+     * questo ESEGUE. Il processo MCP Stdio non avvia più bot da sé — avviarli
+     * anche lì significava due tick loop sulla stessa riga `positions` e sullo
+     * stesso account paper, ciascuno libero di piazzare e cancellare trigger
+     * (issue #7). Ora chiede a Express, che è il solo proprietario del loop.
+     *
+     * La risposta porta `result` oltre allo `state`: il chiamante deve poter
+     * dire a Hermes se il bot è stato avviato adesso o era già in esecuzione,
+     * invece di rispondere "ok" a due fatti diversi.
+     *
+     * `reload_config` non tocca il ciclo di vita ma la config runtime: serve
+     * quando `update_strategy_params` ha scritto sul DB da un altro processo e
+     * il loop sta ancora girando con i parametri vecchi.
+     *
+     * Sicurezza: identica alle altre rotte interne (stesso `isInternalIp`).
+     * Vale la pena dirlo esplicitamente: questa rotta AVVIA E FERMA bot che
+     * muovono denaro simulato oggi e reale domani, quindi il cancello IP è
+     * l'unica cosa che la separa dalla rete — non allargarlo senza cambiare
+     * anche il modello di autenticazione.
+     */
+    app.post('/internal/mcp/bot-control', async (req, res) => {
+      const ip = req.ip || req.socket?.remoteAddress || '';
+      if (!isInternalIp(ip)) {
+        logger.warn(`/internal/mcp/bot-control rifiutato da IP non loopback: ${ip}`);
+        return res.status(403).json({ success: false, error: 'Accesso non consentito' });
+      }
+      const { bot_id: botId, action } = req.body || {};
+      if (!botId || !['start', 'stop', 'restart', 'reload_config'].includes(action)) {
+        return res.status(400).json({ success: false, error: `Richiesta non valida: bot_id obbligatorio e action fra start/stop/restart/reload_config (ricevuto: ${action}).` });
+      }
+      try {
+        let result, state;
+        if (action === 'reload_config') {
+          state = await botManager.reloadBotFromDb(botId);
+          result = 'config_reloaded';
+        } else {
+          ({ state, result } = await botManager.applyLifecycleLocal(botId, action));
+        }
+        logger.info(`🔀 bot-control da processo MCP: ${action} su ${botId} → ${result}`);
+        // `bot.start()`/`stop()` emettono già `perps:botUpdate` da soli; qui si
+        // aggiunge il refresh generale, che nel percorso vecchio arrivava dal
+        // `reload` chiamato subito dopo l'azione.
+        if (botManager.io) {
+          botManager.io.emit('perps:dashboardRefresh', { reason: 'mcp_bot_control', botId, action });
+        }
+        return res.json({ success: true, result, state });
+      } catch (err) {
+        const notFound = /non trovato/i.test(err.message || '');
+        logger.error(`Errore /internal/mcp/bot-control (${action} su ${botId}):`, err.message);
+        return res.status(notFound ? 404 : 500).json({ success: false, error: err.message });
+      }
+    });
+
+    /**
+     * CRIT #7 — INTERNAL BOT STATES: lo stato dei bot per chi non li esegue.
+     *
+     * Da quando il processo MCP non tiene istanze ticking, il suo `botManager`
+     * locale non sa più se un bot sta girando: le istanze ci sono ma sono ferme
+     * per costruzione. `get_system_snapshot` risponderebbe a Hermes «0 bot
+     * attivi» mentre Express ne fa girare tre — una bugia peggiore di un errore.
+     *
+     * La sorgente è la memoria di Express, non il DB, perché `lastEval`,
+     * `lastTickAt` e la posizione in corso stanno solo lì: il DB conosce lo
+     * `status` e basta (resta il ripiego dichiarato quando questa rotta non
+     * risponde, vedi `handleGetSystemSnapshot`).
+     *
+     * Sola lettura: nessun effetto collaterale, si può chiamare per chiedere.
+     */
+    app.post('/internal/mcp/bot-states', (req, res) => {
+      const ip = req.ip || req.socket?.remoteAddress || '';
+      if (!isInternalIp(ip)) {
+        logger.warn(`/internal/mcp/bot-states rifiutato da IP non loopback: ${ip}`);
+        return res.status(403).json({ success: false, error: 'Accesso non consentito' });
+      }
+      try {
+        const agentId = req.body?.agent_id || null;
+        return res.json({ success: true, states: botManager.listStates(agentId) });
+      } catch (err) {
+        logger.error('Errore /internal/mcp/bot-states:', err.message);
+        return res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    /**
      * ANA-01 — performance storica aggregata (una chiamata, non un polling).
      *
      * I dati esistevano già tutti (posizioni chiuse con `close_reason`,

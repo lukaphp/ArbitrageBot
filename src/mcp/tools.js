@@ -14,7 +14,8 @@ import paperBroker from '../perps/paperBroker.js';
 import client from '../perps/hyperliquidClient.js';
 import riskAgent from '../agents/riskAgent.js';
 import logger from '../utils/logger.js';
-import { postInternal } from '../utils/internalLoopback.js';
+import { postInternal, requestInternal } from '../utils/internalLoopback.js';
+import { ownsTickLoop } from '../utils/processRole.js';
 import { mergeStrategyConfig, extractBotConfig } from '../perps/strategySchema.js';
 import {
   validateInstructionOverride,
@@ -123,6 +124,78 @@ export function validateDynamicSizingParams(source) {
  *
  * Non-blocking: il fallimento non deve interrompere la risposta MCP.
  */
+/**
+ * CRIT #7 — esegue un'azione di ciclo di vita NEL PROCESSO CHE POSSIEDE IL LOOP.
+ *
+ * Nel processo Express (o in qualunque processo che non si sia dichiarato MCP
+ * Stdio) è una chiamata diretta: nulla cambia rispetto a prima. Nel processo MCP
+ * Stdio diventa una delega HTTP su loopback: quel processo non avvia più bot, e
+ * quindi non può più esistere un secondo tick loop sulla stessa riga `positions`.
+ *
+ * L'esito che torna a Hermes è quello VERO di Express, `result` compreso. In
+ * particolare NON si finge nulla quando Express non risponde: si lancia, il
+ * chiamante risponde `success: false` e l'agente sa che l'azione non è stata
+ * eseguita da nessuno. Un successo locale in quel caso rimetterebbe in piedi
+ * esattamente la divergenza fra i due processi che questa issue chiude.
+ *
+ * Timeout generoso (15s): un `restart` attende su Express la fine del tick in
+ * volo (`whenIdle`), che può durare quanto un giro di chiamate a Hyperliquid.
+ */
+async function applyBotLifecycle(botId, action) {
+  if (ownsTickLoop()) {
+    if (action === 'reload_config') {
+      return { state: await botManager.reloadBotFromDb(botId), result: 'config_reloaded' };
+    }
+    return botManager.applyLifecycleLocal(botId, action);
+  }
+
+  const res = await requestInternal('/internal/mcp/bot-control', { bot_id: botId, action }, { timeoutMs: 15000 });
+  if (!res.reached) {
+    throw new Error(`Processo Express non raggiungibile (${res.error}): l'azione '${action}' NON è stata eseguita in nessun processo. I bot girano solo lì; riprova quando il server principale risponde.`);
+  }
+  if (!res.ok || res.body?.success !== true) {
+    throw new Error(res.body?.error || `il processo Express ha rifiutato l'azione '${action}' (HTTP ${res.status})`);
+  }
+  return { state: res.body.state, result: res.body.result, delegated: true };
+}
+
+/**
+ * Stato dei bot, letto da chi li esegue davvero.
+ *
+ * Nel processo MCP le istanze locali esistono ma sono ferme per costruzione:
+ * leggerle direttamente significherebbe raccontare a Hermes che nessun bot è
+ * attivo. Si chiede quindi a Express; se non risponde si degrada al DB — che
+ * conosce `status`, nome e coin ma non `lastEval`/`lastTickAt`/posizione — e IL
+ * DEGRADO SI DICHIARA, perché una fotografia parziale spacciata per completa è
+ * il modo in cui un agente prende decisioni sbagliate con la massima fiducia.
+ *
+ * @returns {Promise<{bots: object[], degraded: string|null}>}
+ */
+async function readBotStates() {
+  if (ownsTickLoop()) return { bots: botManager.listStates(), degraded: null };
+
+  const res = await requestInternal('/internal/mcp/bot-states', {}, { timeoutMs: 5000 });
+  if (res.reached && res.ok && Array.isArray(res.body?.states)) {
+    return { bots: res.body.states, degraded: null };
+  }
+  const reason = res.reached
+    ? `il processo Express ha risposto ${res.status}`
+    : `il processo Express non è raggiungibile (${res.error})`;
+  logger.warn(`get_system_snapshot: stato dei bot letto dal DB — ${reason}`);
+  const today = new Date().toISOString().split('T')[0];
+  const bots = db.listBots().map(row => ({
+    id: row.id,
+    name: row.name,
+    coin: row.coin,
+    status: row.status,
+    actor_label: row.actor_label,
+    is_managed_by_agent: !!row.is_managed_by_agent,
+    linked_agent_id: row.linked_agent_id,
+    dailyPnl: db.getDailyPnl(row.id, today)
+  }));
+  return { bots, degraded: reason };
+}
+
 async function notifyExpressReload() {
   // La POST loopback vive in `src/utils/internalLoopback.js`, condivisa con
   // `botManager` (che la usa per inoltrare gli update autonomi del tick loop):
@@ -153,61 +226,25 @@ export async function handleBotControl({ bot_id, action }) {
   }
 
   try {
-    let botInstance = botManager.bots.get(bot_id);
+    // CRIT #7 — l'azione la esegue il processo che possiede il tick loop. Qui
+    // non c'è più nessun `startBot()` locale incondizionato: nel processo MCP
+    // Stdio quello era il secondo esecutore, che girava in parallelo a Express
+    // sulla stessa riga `positions`.
+    const { state, result, delegated } = await applyBotLifecycle(bot_id, action);
 
-    // Se il bot non è caricato in memoria in botManager, lo carichiamo dal DB
-    if (!botInstance) {
-      botManager.loadFromDb();
-      botInstance = botManager.bots.get(bot_id);
-    }
+    logMcpAudit('bot_control', { bot_id, action, result, status: state?.status, delegated: !!delegated, success: true });
 
-    // Safeguard watchdog/crash: resetta stato anomalo al restart o start
-    if (botInstance && (action === 'restart' || action === 'start')) {
-      botInstance._crashed = false;
-      botManager.lastWatchdogAlert.delete(bot_id);
-    }
+    // Notifica il processo Express di sincronizzare botManager dal DB. Non serve
+    // quando l'azione È STATA eseguita da lui: l'ha appena fatta e lo sa già.
+    if (!delegated) notifyExpressReload().catch(() => {});
 
-    let state;
-    if (action === 'start') {
-      if (botInstance && botInstance.status === 'running') {
-        state = botInstance.getState();
-        logMcpAudit('bot_control', { bot_id, action, result: 'already_running', success: true });
-        return {
-          success: true,
-          message: `Bot '${botRow.name}' (${bot_id}) è già in esecuzione.`,
-          data: state
-        };
-      }
-      state = botManager.startBot(bot_id);
-    } else if (action === 'stop') {
-      if (botInstance && botInstance.status === 'stopped') {
-        state = botInstance.getState();
-        logMcpAudit('bot_control', { bot_id, action, result: 'already_stopped', success: true });
-        return {
-          success: true,
-          message: `Bot '${botRow.name}' (${bot_id}) è già fermo.`,
-          data: state
-        };
-      }
-      state = botManager.stopBot(bot_id);
-    } else if (action === 'restart') {
-      if (botInstance) {
-        botInstance.stop();
-        await botInstance.whenIdle();
-      }
-      state = botManager.startBot(bot_id);
-    }
+    const message = result === 'already_running'
+      ? `Bot '${botRow.name}' (${bot_id}) è già in esecuzione.`
+      : result === 'already_stopped'
+        ? `Bot '${botRow.name}' (${bot_id}) è già fermo.`
+        : `Bot '${botRow.name}' (${bot_id}) impostato su '${state?.status || action}' con successo.`;
 
-    logMcpAudit('bot_control', { bot_id, action, result: 'success', status: state?.status, success: true });
-
-    // Notifica il processo Express di sincronizzare botManager dal DB
-    notifyExpressReload().catch(() => {});
-
-    return {
-      success: true,
-      message: `Bot '${botRow.name}' (${bot_id}) impostato su '${state?.status || action}' con successo.`,
-      data: state
-    };
+    return { success: true, message, data: state };
   } catch (error) {
     const errorMsg = `Errore durante ${action} del bot: ${error.message}`;
     logMcpAudit('bot_control', { bot_id, action, error: errorMsg, success: false });
@@ -303,7 +340,13 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
     // ignoto non si apre niente.
     const paperAccount = await paperBroker.getAccount(masterAddress, network);
     const today = new Date().toISOString().split('T')[0];
-    const botInstance = botManager.bots.get(bot_id);
+    // CRIT #7 — l'istanza in memoria vale come sorgente del PnL giornaliero SOLO
+    // nel processo che esegue il bot: lì `dailyPnl` è aggiornato a ogni chiusura.
+    // Nel processo MCP l'istanza non ticca, quindi quel campo resta fermo al
+    // valore letto all'avvio del processo e il Daily Loss Limit — un guardrail
+    // sul denaro — verrebbe valutato su un numero vecchio di ore. Il DB è scritto
+    // da `bot._registerClose` ed è la sorgente condivisa.
+    const botInstance = ownsTickLoop() ? botManager.bots.get(bot_id) : null;
     const currentDailyPnl = (botInstance && typeof botInstance.dailyPnl === 'number')
       ? botInstance.dailyPnl
       : db.getDailyPnl(bot_id, today);
@@ -426,7 +469,9 @@ export async function handleGetSystemSnapshot() {
   db.ensure();
 
   try {
-    const bots = botManager.listStates();
+    // CRIT #7 — nel processo MCP i bot girano altrove: lo stato si chiede a chi
+    // li esegue (vedi `readBotStates`), e un eventuale ripiego sul DB si dichiara.
+    const { bots, degraded } = await readBotStates();
     const killSwitch = riskAgent.isKillSwitchOn();
 
     // Recupera lo stato aggregato paper
@@ -451,6 +496,13 @@ export async function handleGetSystemSnapshot() {
     const alerts = [];
     if (killSwitch) {
       alerts.push({ level: 'critical', type: 'kill_switch', message: 'Kill-switch globale attivo: trading bloccato.' });
+    }
+    if (degraded) {
+      alerts.push({
+        level: 'warning',
+        type: 'bot_states_degraded',
+        message: `Stato dei bot letto dal DB e non dal processo che li esegue (${degraded}): status attendibile, ma ultima valutazione, ultimo tick e posizione in corso NON sono in questa risposta.`
+      });
     }
 
     const now = Date.now();
@@ -554,17 +606,27 @@ export async function handleEmergencyShutdown({ threshold = null, confirmation_t
     // 1. Attiva Kill-Switch nel DB e nel RiskAgent
     riskAgent.setKillSwitch(true);
 
-    // 2. Arresta tutti i bot in esecuzione
+    // 2. Arresta tutti i bot in esecuzione.
+    //
+    // CRIT #7 — chi sono "quelli in esecuzione" dipende dal processo. In Express
+    // sono le istanze che stanno ticcando; nel processo MCP non ce n'è nessuna
+    // (i loop stanno di là), quindi il ciclo locale avrebbe contato zero e la
+    // risposta avrebbe dichiarato un arresto mai avvenuto. La lista arriva dal
+    // DB, che è la sorgente condivisa fra i due processi, e ogni arresto passa
+    // dal proprietario del loop.
+    const targets = ownsTickLoop()
+      ? [...botManager.bots.values()].filter(b => b.status === 'running').map(b => b.id)
+      : db.listBots().filter(r => r.status === 'running').map(r => r.id);
+
     let stoppedCount = 0;
-    for (const bot of botManager.bots.values()) {
-      if (bot.status === 'running') {
-        try {
-          bot.stop();
-          db.updateBot(bot.id, { status: 'stopped' });
-          stoppedCount++;
-        } catch (err) {
-          logger.warn(`Arresto bot ${bot.id} in emergency_shutdown fallito:`, err.message);
-        }
+    const failedBotIds = [];
+    for (const botId of targets) {
+      try {
+        await applyBotLifecycle(botId, 'stop');
+        stoppedCount++;
+      } catch (err) {
+        failedBotIds.push(botId);
+        logger.warn(`Arresto bot ${botId} in emergency_shutdown fallito:`, err.message);
       }
     }
 
@@ -582,9 +644,20 @@ export async function handleEmergencyShutdown({ threshold = null, confirmation_t
     const resPayload = {
       kill_switch: true,
       stopped_bots_count: stoppedCount,
+      failed_bot_ids: failedBotIds,
       threshold: threshold != null ? Number(threshold) : null,
       timestamp: Date.now()
     };
+
+    // Un arresto parziale NON è un successo: il kill-switch blocca i nuovi
+    // ingressi (è una riga di `settings`, quindi vale per tutti i processi), ma
+    // i bot che non si sono fermati continuano a gestire le posizioni aperte.
+    // Dirlo è l'unica cosa che permette a chi legge di intervenire a mano.
+    if (failedBotIds.length) {
+      const msg = `🚨 EMERGENCY SHUTDOWN PARZIALE: kill-switch ATTIVO (nessun nuovo ingresso), ma ${failedBotIds.length} bot su ${targets.length} NON sono stati arrestati: ${failedBotIds.join(', ')}. Verifica il processo che li esegue.`;
+      logMcpAudit('emergency_shutdown', { ...resPayload, success: false });
+      return { success: false, message: msg, data: resPayload };
+    }
 
     logMcpAudit('emergency_shutdown', { ...resPayload, success: true });
 
@@ -683,7 +756,27 @@ export async function handleUpdateStrategyParams({ bot_id, params, confirmation_
     // lì `botManager.io` è null e la config mostrata resterebbe quella vecchia.
     notifyExpressReload().catch(() => {});
 
-    logMcpAudit('update_strategy_params', { bot_id, updated_keys: Object.keys(params), success: true });
+    // CRIT #7 — `applyConfigPatch` ricarica l'istanza DI QUESTO processo. Da
+    // quando i bot girano solo in Express, la patch fatta dal processo MCP
+    // lascerebbe il loop vero con i parametri vecchi: `reload_config` glielo fa
+    // ricostruire dalla riga di DB appena scritta, conservando lo stato di
+    // esecuzione. `/internal/mcp/reload` non basta: aggiunge, rimuove e
+    // riconcilia lo status, ma non ricostruisce un bot già presente.
+    let runtimeWarning = null;
+    if (!ownsTickLoop()) {
+      try {
+        await applyBotLifecycle(bot_id, 'reload_config');
+      } catch (err) {
+        runtimeWarning = `Parametri SALVATI sul DB ma NON applicati al bot in esecuzione: ${err.message}. Il bot continua con la configurazione precedente finché non viene ricaricato.`;
+        logger.warn(`update_strategy_params: ${runtimeWarning}`);
+      }
+    }
+
+    logMcpAudit('update_strategy_params', { bot_id, updated_keys: Object.keys(params), runtime_reload_error: runtimeWarning, success: !runtimeWarning });
+
+    if (runtimeWarning) {
+      return { success: false, message: runtimeWarning, data: { bot_id, updated_params: params, current_config: updatedState.config } };
+    }
 
     return {
       success: true,
@@ -781,8 +874,19 @@ export async function handleRegisterBot({
     });
 
     let finalState = botState;
+    let startWarning = null;
     if (auto_start === true) {
-      finalState = botManager.startBot(botState.id);
+      // CRIT #7 — l'avvio lo fa il proprietario del tick loop. Nel processo MCP
+      // il bot esiste già sul DB a questo punto, quindi Express lo trova e lo
+      // avvia; se non risponde, il bot resta CREATO E FERMO e lo si dice — meglio
+      // di un bot dichiarato attivo che non sta girando da nessuna parte.
+      try {
+        const { state } = await applyBotLifecycle(botState.id, 'start');
+        finalState = { ...state, warning: botState.warning };
+      } catch (err) {
+        startWarning = `Bot creato ma NON avviato: ${err.message}`;
+        logger.warn(`register_bot: ${startWarning}`);
+      }
     }
 
     if (botManager.io) {
@@ -798,7 +902,7 @@ export async function handleRegisterBot({
       actor_label: finalState.actor_label || actor_label || 'Hermes',
       is_managed_by_agent: finalState.is_managed_by_agent,
       config: finalState.config,
-      warning: finalState.warning || null
+      warning: [finalState.warning, startWarning].filter(Boolean).join(' ') || null
     };
 
     logMcpAudit('register_bot', { ...resPayload, success: true });
@@ -808,7 +912,8 @@ export async function handleRegisterBot({
 
     return {
       success: true,
-      message: `Bot '${finalState.name}' (${finalState.coin}) registrato con successo (id: ${finalState.id}, status: ${finalState.status}).`,
+      message: `Bot '${finalState.name}' (${finalState.coin}) registrato con successo (id: ${finalState.id}, status: ${finalState.status}).`
+        + (startWarning ? ` ATTENZIONE: ${startWarning}` : ''),
       data: resPayload
     };
   } catch (err) {

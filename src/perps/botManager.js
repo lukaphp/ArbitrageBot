@@ -14,6 +14,7 @@ import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import db from '../db/database.js';
 import logger from '../utils/logger.js';
 import { postInternal } from '../utils/internalLoopback.js';
+import { ownsTickLoop } from '../utils/processRole.js';
 import { mergeStrategyConfig, extractBotConfig } from './strategySchema.js';
 
 class BotManager {
@@ -131,17 +132,131 @@ class BotManager {
       .finally(() => this._forwardInFlight.delete(state.id));
   }
 
-  /** Carica i bot dal DB e riavvia quelli che risultavano in esecuzione. */
+  /**
+   * Carica i bot dal DB e riavvia quelli che risultavano in esecuzione.
+   *
+   * CRIT #7 — il resume automatico avviene SOLO nel processo che possiede il
+   * tick loop. Nel processo MCP Stdio questa riga era il doppio esecutore che
+   * nasceva da solo: all'avvio faceva partire un loop per ogni bot `running`,
+   * in parallelo a quello di Express, sulla stessa riga `positions` e sullo
+   * stesso account paper. Le istanze si costruiscono lo stesso — servono a
+   * leggere config, `dailyPnl` e stato per rispondere ai tool — semplicemente
+   * non ticcano.
+   */
   loadFromDb() {
     const rows = db.listBots();
+    const owner = ownsTickLoop();
     for (const row of rows) {
       const bot = new PerpsBot(row, this._onUpdate);
       this.bots.set(bot.id, bot);
-      if (row.status === 'running') {
+      if (row.status === 'running' && owner) {
         bot.start();
       }
     }
-    logger.info(`🤖 Bot Perps caricati: ${rows.length} (${rows.filter(r => r.status === 'running').length} attivi)`);
+    const running = rows.filter(r => r.status === 'running').length;
+    logger.info(owner
+      ? `🤖 Bot Perps caricati: ${rows.length} (${running} attivi)`
+      : `🤖 Bot Perps caricati in sola lettura: ${rows.length} (${running} in esecuzione nel processo Express, nessun tick loop avviato qui)`);
+  }
+
+  /**
+   * Restituisce l'istanza del bot, costruendola dal DB se non è in memoria.
+   *
+   * Esiste per NON usare `loadFromDb()` come "ricarica": quello ricostruisce
+   * OGNI bot e rimpiazza le istanze nella Map, ma il timer di quelle sostituite
+   * continua a girare senza che nessuno lo possieda più — cioè produce
+   * esattamente i loop orfani che questa issue chiude. Qui si tocca un bot solo,
+   * e solo se manca davvero.
+   *
+   * @returns {PerpsBot|null} null se il bot non esiste nemmeno sul DB.
+   */
+  ensureLoaded(botId) {
+    const existing = this.bots.get(botId);
+    if (existing) return existing;
+    const row = db.getBot(botId);
+    if (!row) return null;
+    const bot = new PerpsBot(row, this._onUpdate);
+    this.bots.set(botId, bot);
+    return bot;
+  }
+
+  /**
+   * Applica QUI, in questo processo, un'azione di ciclo di vita (start/stop/
+   * restart). È il punto unico in cui un tick loop nasce o muore: ci passano sia
+   * la rotta interna `/internal/mcp/bot-control` (delega dal processo MCP) sia
+   * `handleBotControl` quando gira già nel processo proprietario.
+   *
+   * Restituisce anche COSA è successo, non solo lo stato finale: «era già in
+   * esecuzione» e «l'ho avviato adesso» sono due fatti diversi, e chi risponde a
+   * un agente deve poterli distinguere invece di dire "ok" a entrambi.
+   *
+   * Il guard su `ownsTickLoop()` copre solo le azioni che ACCENDONO un loop:
+   * fermare è innocuo ovunque (non c'è niente da fermare), avviare in un processo
+   * che non deve eseguire è il bug. Non c'è ripiego locale: chi non possiede il
+   * loop delega o fallisce, non fa finta.
+   *
+   * @returns {Promise<{state: object, result: 'started'|'stopped'|'restarted'|'already_running'|'already_stopped'}>}
+   */
+  async applyLifecycleLocal(botId, action) {
+    if (!['start', 'stop', 'restart'].includes(action)) {
+      throw new Error(`Azione non valida: ${action}. Usa 'start', 'stop' o 'restart'.`);
+    }
+    if ((action === 'start' || action === 'restart') && !ownsTickLoop()) {
+      throw new Error(`Questo processo non possiede il tick loop: '${action}' va delegata al processo Express, non eseguita qui.`);
+    }
+    const bot = this.ensureLoaded(botId);
+    if (!bot) throw new Error('Bot non trovato');
+
+    // Safeguard watchdog/crash: uno stato anomalo non deve sopravvivere a un
+    // riavvio esplicito. Sta qui e non nel chiamante perché il watchdog vive
+    // nello stesso processo del loop.
+    if (action === 'start' || action === 'restart') {
+      bot._crashed = false;
+      this.lastWatchdogAlert.delete(botId);
+    }
+
+    if (action === 'start') {
+      if (bot.status === 'running') return { state: bot.getState(), result: 'already_running' };
+      bot.start();
+      return { state: bot.getState(), result: 'started' };
+    }
+    if (action === 'stop') {
+      if (bot.status === 'stopped') return { state: bot.getState(), result: 'already_stopped' };
+      bot.stop();
+      return { state: bot.getState(), result: 'stopped' };
+    }
+    // restart: si attende il tick in volo prima di ripartire (DEBT-01), altrimenti
+    // per la sua durata esistono due istanze attive sullo stesso mercato.
+    bot.stop();
+    await bot.whenIdle();
+    bot.start();
+    return { state: bot.getState(), result: 'restarted' };
+  }
+
+  /**
+   * Ricostruisce l'istanza runtime di un bot dalla sua riga di DB, conservando
+   * lo stato di esecuzione.
+   *
+   * Serve quando la configurazione è stata cambiata in un ALTRO processo (un
+   * tool MCP che scrive sul DB): senza, il loop continuerebbe a girare con la
+   * config vecchia e nessuno se ne accorgerebbe — la risposta all'agente direbbe
+   * "parametri aggiornati" mentre il bot opera con i precedenti.
+   *
+   * Non scrive nulla sul DB: la patch l'ha già applicata chi chiama.
+   */
+  async reloadBotFromDb(botId) {
+    const row = db.getBot(botId);
+    if (!row) throw new Error('Bot non trovato');
+    const current = this.bots.get(botId);
+    const wasRunning = current?.status === 'running';
+    if (wasRunning) {
+      current.stop();
+      await current.whenIdle();
+    }
+    const fresh = new PerpsBot(row, this._onUpdate);
+    this.bots.set(botId, fresh);
+    if (wasRunning) fresh.start();
+    return fresh.getState();
   }
 
   /**
@@ -326,7 +441,20 @@ class BotManager {
     logger.info(`🗑️  Bot eliminato`, { id });
   }
 
+  /**
+   * Avvio "grezzo", usato dai percorsi che girano per costruzione nel processo
+   * proprietario (rotte HTTP, comandi Telegram, agenti del runtime Express).
+   *
+   * CRIT #7 — il guard non è ridondante: è il punto in cui un tick loop nasce, e
+   * un chiamante futuro dentro il processo MCP Stdio ricreerebbe da zero il
+   * doppio esecutore senza che nessuno se ne accorga. Meglio un'eccezione che
+   * dice cosa fare (delegare) di un secondo loop che piazza trigger in
+   * concorrenza col primo.
+   */
   startBot(id) {
+    if (!ownsTickLoop()) {
+      throw new Error("Questo processo non esegue bot: l'avvio va delegato al processo Express (POST /internal/mcp/bot-control).");
+    }
     const bot = this.bots.get(id);
     if (!bot) throw new Error('Bot non trovato');
     bot.start();
@@ -375,6 +503,16 @@ class BotManager {
    */
   startWatchdog() {
     if (this.watchdogTimer) return;
+    // CRIT #7 — un processo che non esegue bot non ha nulla da sorvegliare:
+    // qui le istanze esistono ma sono ferme per costruzione, quindi il watchdog
+    // sarebbe un timer inerte, e qualunque suo futuro criterio basato sul DB
+    // produrrebbe falsi crash su bot che stanno benissimo in Express. Chiude di
+    // conseguenza il buco lasciato aperto da MCP-SYNC-02 (eventi di crash emessi
+    // nel processo MCP, dove `io` è sempre null).
+    if (!ownsTickLoop()) {
+      logger.info('🐕 Watchdog non avviato: i bot girano nel processo Express, che ha il suo');
+      return;
+    }
     const CHECK_MS = 30000;
     const ALERT_THROTTLE_MS = 10 * 60 * 1000;
     this.watchdogTimer = setInterval(() => {

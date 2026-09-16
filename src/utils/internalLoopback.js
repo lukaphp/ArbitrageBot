@@ -68,6 +68,39 @@ function expressPort() {
  * @returns {Promise<boolean>} consegnato (2xx) oppure no
  */
 export async function postInternal(path, payload = null, { timeoutMs = 3000 } = {}) {
+  const res = await _request(path, payload, { timeoutMs, wantBody: false });
+  return res.ok;
+}
+
+/**
+ * POST JSON verso una rotta interna, ASPETTANDO LA RISPOSTA (CRIT #7).
+ *
+ * Il gemello "richiesta-risposta" di `postInternal`. Serve quando la chiamata
+ * non è una notifica ma una DELEGA: il processo MCP Stdio non avvia più i bot da
+ * sé, li fa avviare a Express — e quello che deve raccontare a Hermes è l'esito
+ * VERO di là, non un successo locale. Con un booleano si potrebbe solo dire «ho
+ * bussato», e «ho bussato» non è «è stato fatto».
+ *
+ * Non lancia mai. Distingue tre esiti, perché al chiamante servono diversi:
+ *  - `reached: false` → Express non risponde: l'azione non è stata eseguita DA
+ *    NESSUNO, e va detto così;
+ *  - `ok: false` con `status`/`body` → Express ha risposto e ha rifiutato;
+ *  - `ok: true` con `body` → fatto, e il corpo dice cosa è successo davvero.
+ *
+ * @returns {Promise<{reached: boolean, ok: boolean, status: number|null, body: any, error: string|null}>}
+ */
+export async function requestInternal(path, payload = null, { timeoutMs = 15000 } = {}) {
+  return _request(path, payload, { timeoutMs, wantBody: true });
+}
+
+/**
+ * Plumbing condiviso dai due lati client. `wantBody: false` NON registra
+ * handler sul corpo e si limita a `resume()`: è il comportamento storico di
+ * `postInternal`, che non deve cambiare (e che nei test è simulato da fake
+ * minimali della risposta).
+ */
+async function _request(path, payload, { timeoutMs, wantBody }) {
+  const fail = (error) => ({ reached: false, ok: false, status: null, body: null, error });
   try {
     const body = payload == null ? '' : JSON.stringify(payload);
     return await new Promise((resolve) => {
@@ -82,18 +115,31 @@ export async function postInternal(path, payload = null, { timeoutMs = 3000 } = 
         },
         timeout: timeoutMs
       }, (res) => {
-        res.resume(); // scarica il corpo, altrimenti il socket resta appeso
-        resolve(res.statusCode >= 200 && res.statusCode < 300);
+        const ok = res.statusCode >= 200 && res.statusCode < 300;
+        if (!wantBody) {
+          res.resume(); // scarica il corpo, altrimenti il socket resta appeso
+          resolve({ reached: true, ok, status: res.statusCode, body: null, error: null });
+          return;
+        }
+        let raw = '';
+        res.setEncoding?.('utf8');
+        res.on('data', (chunk) => { raw += chunk; });
+        res.on('end', () => {
+          let parsed = null;
+          try { parsed = raw ? JSON.parse(raw) : null; } catch { parsed = null; }
+          resolve({ reached: true, ok, status: res.statusCode, body: parsed, error: null });
+        });
+        res.on('error', (err) => resolve(fail(err.message)));
       });
       // Express spento o rotta assente: non è un errore per chi chiama.
-      req.on('error', () => resolve(false));
-      req.on('timeout', () => { req.destroy(); resolve(false); });
+      req.on('error', (err) => resolve(fail(err?.message || 'connessione fallita')));
+      req.on('timeout', () => { req.destroy(); resolve(fail(`nessuna risposta entro ${timeoutMs}ms`)); });
       req.end(body);
     });
-  } catch {
+  } catch (err) {
     // Serializzazione impossibile (payload ciclico) o altro: mai propagare.
-    return false;
+    return fail(err?.message || 'richiesta non inviabile');
   }
 }
 
-export default { isInternalIp, postInternal };
+export default { isInternalIp, postInternal, requestInternal };

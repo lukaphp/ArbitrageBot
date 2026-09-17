@@ -525,7 +525,40 @@ export class PaperBroker {
 
   async getAccount(master, network) {
     await this._evaluateTriggers(master, network);
-    const acc = this._acc(master);
+    return this._snapshot(this._acc(master), network);
+  }
+
+  /**
+   * LETTURA PURA dello stato simulato: stessa forma di `getAccount()`, ma
+   *
+   *  - **non valuta i trigger**, quindi non esegue nessun fill;
+   *  - **non crea l'account** se non esiste: torna `null`.
+   *
+   * Serve alle rotte HTTP aggregate (`/api/perps/account`, `/api/perps/risk`).
+   * `getAccount()` non è una query: fa scattare TP/SL simulati come effetto
+   * collaterale, ed è giusto così sul percorso del tick — è lì che
+   * `bot._registerClose` raccoglie il fill, scrive il trade e chiude la riga
+   * `positions`. Chiamarla da una rotta significherebbe invece eseguire chiusure
+   * simulate al ritmo del refresh della dashboard, anche per un bot FERMO, che
+   * di tick non ne ha: il fill resterebbe senza nessuno che lo registri.
+   *
+   * Il `null` su account sconosciuto non è un dettaglio: `_acc()` materializza
+   * un conto nuovo da `PAPER_START_EQUITY` al primo accesso, e in lettura
+   * significherebbe mostrare 10.000$ di equity simulata a qualunque wallet ci si
+   * colleghi — un numero inventato, indistinguibile da uno misurato.
+   */
+  async peekAccount(master, network) {
+    this._load();
+    const acc = this.state.get(this._key(master));
+    if (!acc) return null;
+    return this._snapshot(acc, network);
+  }
+
+  /**
+   * Fotografia marcata a mercato di un account simulato. Nessuna scrittura:
+   * è la parte in comune fra `getAccount()` e `peekAccount()`.
+   */
+  async _snapshot(acc, network) {
     const positions = [];
     let unrealized = 0;
     for (const [coin, pos] of acc.positions) {

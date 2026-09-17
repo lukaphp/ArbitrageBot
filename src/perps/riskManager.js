@@ -67,6 +67,109 @@ export function composeEquity({ accountValue = 0, spotTotal = 0, spotHold = 0 } 
 }
 
 /**
+ * Totali di UNA fonte (exchange reale o broker paper), nella stessa forma.
+ *
+ * `totalNtlPos`/`totalMarginUsed` sono il `marginSummary` dell'exchange: il
+ * paper broker non ne tiene uno e riporta `0`. Con posizioni aperte quello zero
+ * non è una misura, è un campo **assente** — e passarlo a valle darebbe "margine
+ * utilizzato 0%" su una flotta a leva 3x, cioè un rischio dichiarato nullo
+ * mentre esiste. Quando il totale dichiarato è 0 lo si ricava quindi dalle
+ * posizioni: sul conto reale l'identità `totalMarginUsed == Σ marginUsed` è
+ * verificata sull'account unificato, quindi la derivazione non contraddice mai
+ * la fonte che dichiara il totale.
+ */
+function sourceTotals(account) {
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const positions = Array.isArray(account?.positions) ? account.positions : [];
+  // `totalNtlPos` è la somma dei notional in VALORE ASSOLUTO (una short non
+  // riduce l'esposizione lorda): stessa convenzione di Hyperliquid.
+  const derivedNtl = positions.reduce((sum, p) => sum + Math.abs(num(p.positionValue)), 0);
+  const derivedMargin = positions.reduce((sum, p) => sum + num(p.marginUsed), 0);
+  return {
+    accountValue: num(account?.accountValue),
+    equity: num(account?.equity ?? account?.accountValue),
+    withdrawable: num(account?.withdrawable),
+    spotUsdc: num(account?.spotUsdc),
+    totalNtlPos: num(account?.totalNtlPos) || derivedNtl,
+    totalMarginUsed: num(account?.totalMarginUsed) || derivedMargin,
+    unrealizedPnl: positions.reduce((sum, p) => sum + num(p.unrealizedPnl), 0),
+    positionsCount: positions.length
+  };
+}
+
+/**
+ * Unisce la vista dell'account REALE e quella del broker PAPER in un'unica
+ * vista coerente per le rotte aggregate (`/api/perps/account`, `/api/perps/risk`).
+ *
+ * IL PROBLEMA CHE RISOLVE. Le due rotte leggevano solo `hyperliquid.getAccount()`:
+ * con una flotta interamente `paper: true` l'account reale ha zero posizioni, e
+ * quindi il pannello "Posizioni attive" restava vuoto e il tab Rischio
+ * descriveva un wallet fermo invece della flotta che stava davvero producendo
+ * esposizione. Le card dei singoli bot non erano toccate perché passano da
+ * `PerpsBot.position`, cioè dal broker giusto per quel bot.
+ *
+ * TRE DECISIONI, tutte sul "non affermare cose false":
+ *
+ *  1. **Niente fusione delle posizioni.** Le liste si concatenano e ogni riga
+ *     porta `source`/`isPaper`. Una posizione reale e una paper sulla stessa
+ *     coin sono due esposizioni distinte: sommarle conterebbe due volte una size
+ *     che non esiste, e tenerne una sola ne nasconderebbe un'altra. È anche la
+ *     sola forma che regge il giorno in cui sullo stesso indirizzo convivranno
+ *     bot live e bot paper.
+ *  2. **`equity`, `totalMarginUsed`, `totalNtlPos`, `unrealizedPnl` sono
+ *     l'AGGREGATO.** Non è cosmesi: `deriveRiskAlerts` calcola RAPPORTI
+ *     (margine/equity, esposizione/cap, numero posizioni/cap). Prendere le
+ *     posizioni da una fonte e l'equity da un'altra produce percentuali
+ *     inventate — un margine del 76% su un'equity che non regge quelle
+ *     posizioni, o uno 0% con la flotta a mercato.
+ *  3. **I fatti del WALLET restano reali**: `accountValue`, `withdrawable`,
+ *     `spotUsdc`, `spotAvailable`, `spotHold` descrivono denaro che si può
+ *     davvero muovere (badge del faucet, trasferimento Spot→Perp, prelievo).
+ *     Sommarci dentro equity simulata direbbe all'utente che ha fondi che non
+ *     esistono.
+ *
+ * La scomposizione resta sempre leggibile in `sources.real` / `sources.paper`
+ * (`null` = fonte assente, non "fonte a zero"), e `mode` dice in una parola di
+ * cosa si sta guardando il rischio.
+ *
+ * Funzione PURA: nessun I/O, nessun singleton. L'orchestrazione (chi interroga
+ * l'exchange, chi il broker paper) resta nel guscio che la chiama.
+ *
+ * @param real  vista di `hyperliquidClient.getAccount()`, o `null`
+ * @param paper vista di `paperBroker.peekAccount()`, o `null`
+ */
+export function mergeAccountViews({ real = null, paper = null } = {}) {
+  const tag = (account, source) => (Array.isArray(account?.positions) ? account.positions : [])
+    .map(p => ({ ...p, source, isPaper: source === 'paper' }));
+
+  const realTotals = real ? sourceTotals(real) : null;
+  const paperTotals = paper ? sourceTotals(paper) : null;
+  const sum = (field) => (realTotals?.[field] || 0) + (paperTotals?.[field] || 0);
+
+  let mode = 'none';
+  if (realTotals && paperTotals) mode = 'mixed';
+  else if (realTotals) mode = 'real';
+  else if (paperTotals) mode = 'paper';
+
+  return {
+    mode,
+    // Fatti del wallet reale: mai gonfiati dal simulato.
+    accountValue: realTotals?.accountValue ?? 0,
+    withdrawable: realTotals?.withdrawable ?? 0,
+    spotUsdc: realTotals?.spotUsdc ?? 0,
+    spotAvailable: Number.isFinite(Number(real?.spotAvailable)) ? Number(real.spotAvailable) : 0,
+    spotHold: Number.isFinite(Number(real?.spotHold)) ? Number(real.spotHold) : 0,
+    // Grandezze di rischio: aggregate, perché è su queste che si fanno i rapporti.
+    equity: sum('equity'),
+    totalMarginUsed: sum('totalMarginUsed'),
+    totalNtlPos: sum('totalNtlPos'),
+    unrealizedPnl: sum('unrealizedPnl'),
+    positions: [...tag(real, 'real'), ...tag(paper, 'paper')],
+    sources: { real: realTotals, paper: paperTotals }
+  };
+}
+
+/**
  * Default del sizing dinamico ATR. Esportati perché il valore è un contratto
  * condiviso: `bot.js` risolve lo stesso periodo per il warmup delle candele, e
  * la UI/gli agenti devono poter mostrare cosa succede quando il campo è omesso,
@@ -87,6 +190,9 @@ class RiskManager {
 
   /** CRIT-05 — anche come metodo, per i chiamanti che hanno già il singleton. */
   composeEquity(input) { return composeEquity(input); }
+
+  /** Vista reale + paper unificata, anche come metodo (vedi `mergeAccountViews`). */
+  mergeAccountViews(input) { return mergeAccountViews(input); }
 
   /**
    * Calcola la size (in unità di coin) da aprire.

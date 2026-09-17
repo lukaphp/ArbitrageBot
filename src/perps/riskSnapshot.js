@@ -97,8 +97,53 @@ export function calculateDrawdown(history = []) {
 }
 
 /**
+ * RICALCOLO del drawdown dalla sola curva equity, IGNORANDO il valore persistito.
+ *
+ * Contrappeso esplicito a `mergeDrawdownState`, che è monotono per disegno: il
+ * massimo persistito non scende mai, così un vero massimo storico non sparisce
+ * quando esce dalla finestra di campioni esposta. Il caso che restava senza
+ * risposta è l'opposto — quando si scopre che lo STORICO su cui quel massimo è
+ * stato calcolato era sbagliato (CRIT-05: doppio conteggio dell'equity che
+ * gonfiava `risk_equity_history`), il pavimento resta incollato per sempre e
+ * ripulire la storia non basta, perché `mergeDrawdownState` lo rialza al primo
+ * giro. Serve un modo per dire «riparti da questa curva».
+ *
+ * NON va usata nel percorso di lettura normale: là il persistito è l'unica
+ * memoria di ciò che la finestra non mostra più. È l'operazione di correzione,
+ * e vale solo quando si è appena stabilito che la curva corrente È la verità —
+ * se lo storico fosse stato invece potato dalla ritenzione, ricalcolare
+ * perderebbe un drawdown realmente accaduto.
+ *
+ * Ritorna `null` — e non uno stato azzerato — quando non c'è nessun campione
+ * numerico: scrivere zeri sarebbe una bugia diversa, non una correzione, e il
+ * chiamante deve potersi fermare invece di cancellare in silenzio un massimo
+ * storico che non è in grado di ricostruire.
+ *
+ * Il filtro dei campioni ha la stessa trappola descritta in
+ * `deriveExecutionStatus`: `Number(null)` vale **0** e `Number.isFinite(0)` è
+ * **true**, quindi il controllo ovvio prenderebbe per buona una curva fatta di
+ * soli `null` e restituirebbe un drawdown di zero — proprio il caso che questa
+ * funzione deve rifiutare. Il caso nullo va escluso prima, esplicitamente.
+ */
+export function recomputeDrawdownFromHistory(history = null) {
+  const usable = (point) => {
+    const value = point?.value;
+    if (value === null || value === undefined || value === '') return false;
+    return Number.isFinite(Number(value));
+  };
+  const samples = (Array.isArray(history) ? history : []).filter(usable);
+  if (!samples.length) return null;
+  return calculateDrawdown(samples);
+}
+
+/**
  * Mantiene il drawdown massimo quando la curva esposta è limitata agli ultimi
  * campioni, usando lo stato monotono persistito in SQLite.
+ *
+ * La monotonia è voluta: un blip momentaneo non deve cancellare un massimo vero.
+ * Per correggere un pavimento calcolato su uno storico poi rivelatosi sbagliato
+ * si passa da `recomputeDrawdownFromHistory` (`scripts/recompute-drawdown.js`),
+ * mai da qui.
  */
 export function mergeDrawdownState(current = {}, persisted = null) {
   if (!persisted) return { ...current, scope: 'session' };

@@ -30,17 +30,41 @@ import execQueue from './execQueue.js';
 // CRIT-05: composizione pura dell'equity. `riskManager` importa solo config e
 // logger, quindi nessun ciclo di import.
 import { composeEquity } from './riskManager.js';
-import { withRetry } from './retry.js';
+import { withRetry, withTimeout } from './retry.js';
 import metrics from './metrics.js';
 import db from '../db/database.js';
 import logger from '../utils/logger.js';
 
+/**
+ * Chiave in `readSdks` della SDK riservata alle letture "pesanti". Vive nella
+ * stessa mappa delle altre proprio perché `closeAllSdks()` la chiuda senza
+ * dover ricordarsi di una mappa in più (un'SDK mai chiusa lascia vivo il suo
+ * refresh periodico dei simboli e impedisce a un processo di terminare).
+ */
+const HEAVY_SDK_KEY = network => `${network}:heavy`;
+
 class HyperliquidClient {
   constructor() {
     this.network = HYPERLIQUID_CONFIG.defaultNetwork || 'testnet';
-    this.readSdks = new Map();   // network -> SDK (sola lettura)
+    this.readSdks = new Map();   // network (+ ':heavy') -> SDK (sola lettura)
     this.signSdks = new Map();   // `${network}:${master}` -> SDK (firma con agent key)
     this.wsSdks = new Map();     // network -> SDK con WebSocket connesso
+    // Tetti di tempo per le chiamate REST. Sono campi d'istanza e non costanti
+    // di modulo perché i test devono poterli abbassare per verificare il
+    // comportamento su una chiamata che non risponde mai, senza aspettare.
+    this.restTimeoutMs = 10000;  // letture (info): risposta sana 1-3s
+    // Le letture pesanti ritentano UNA volta sola: il tetto peggiore resta
+    // ~21s, che una rotta della dashboard può ancora spendere. Ritentarle di
+    // più non aiuta — se la causa è il secchiello prosciugato, il tentativo
+    // successivo trova la stessa situazione — e trasformerebbe un guasto in
+    // un'attesa di quasi un minuto davanti all'utente.
+    this.restRetries = 1;
+    // Le chiamate di esecuzione (firmate) hanno un tetto più largo e NESSUN
+    // retry: un reinvio rischierebbe una doppia esecuzione. Serve comunque,
+    // perché girano dentro `execQueue`, serializzata per master: una chiamata
+    // appesa per sempre bloccherebbe tutto ciò che viene dopo per quel wallet,
+    // compreso il piazzamento dello stop loss.
+    this.execTimeoutMs = 30000;
     // Listener notificati dopo un cambio rete a runtime: serve a chi ha una
     // sottoscrizione WS attiva (marketData) per ri-sottoscrivere la rete nuova
     // senza che questo modulo debba conoscerlo (nessun import circolare).
@@ -114,6 +138,45 @@ class HyperliquidClient {
       this.readSdks.set(network, sdk);
     }
     return this.readSdks.get(network);
+  }
+
+  /**
+   * SDK riservata alle letture "PESANTI": quelle che l'SDK contabilizza con
+   * peso 20 nel proprio rate limiter (`userFills`, `frontendOpenOrders`,
+   * `fundingHistory`, `predictedFundings`) invece dei 2 di tutte le altre.
+   *
+   * Perché una seconda istanza. Il rate limiter dell'SDK è un token bucket
+   * SENZA CODA (capacity 100, refill 10 token/s) condiviso da tutte le chiamate
+   * della stessa istanza. Chi chiede 2 token li prende nell'istante in cui
+   * arriva; chi ne chiede 20 e non li trova si addormenta e al risveglio trova
+   * il secchiello di nuovo svuotato da chi è passato nel frattempo. Con il
+   * traffico continuo dei bot il contatore, misurato sul processo di produzione
+   * il 17/09/2026, stava fisso a 0.02 su 100: le chiamate da 20 token non
+   * passavano MAI. E non fallivano: la loro promise restava semplicemente
+   * pendente per sempre, quindi `GET /api/perps/fills` e `GET /api/perps/orders`
+   * non rispondevano e nei log non compariva un solo errore, mentre
+   * `GET /api/perps/account` (peso 2) continuava a funzionare.
+   *
+   * Separando l'istanza, le letture pesanti hanno il loro secchiello e non
+   * competono più con il polling frequente dei bot. NON è una licenza a
+   * chiamarle spesso: il limite vero è quello di Hyperliquid, lato server, e
+   * questa separazione raddoppia il budget client-side che gli approssima.
+   * La difesa che resta valida in ogni caso è il timeout: se anche questo
+   * secchiello venisse prosciugato, la chiamata diventa un errore loggato e
+   * ritentato, non un blocco silenzioso.
+   */
+  async getHeavyReadSdk(network = this.network) {
+    const key = HEAVY_SDK_KEY(network);
+    if (!this.readSdks.has(key)) {
+      const sdk = new Hyperliquid({ enableWs: false, testnet: network === 'testnet' });
+      this.readSdks.set(key, sdk);
+    }
+    return this.readSdks.get(key);
+  }
+
+  /** Opzioni di `withRetry` per una lettura pesante (peso 20). */
+  _heavyReadOpts(label) {
+    return { label, retries: this.restRetries, timeoutMs: this.restTimeoutMs };
   }
 
   /**
@@ -291,15 +354,15 @@ class HyperliquidClient {
 
   async getMeta(network = this.network) {
     const sdk = await this.getReadSdk(network);
-    return sdk.info.perpetuals.getMeta();
+    return withRetry(() => sdk.info.perpetuals.getMeta(), { label: 'getMeta', timeoutMs: this.restTimeoutMs });
   }
 
   /** Lista mercati con leva massima e prezzo mid corrente. */
   async getMarkets(network = this.network) {
     const sdk = await this.getReadSdk(network);
     const [meta, mids] = await Promise.all([
-      sdk.info.perpetuals.getMeta(),
-      sdk.info.getAllMids()
+      withRetry(() => sdk.info.perpetuals.getMeta(), { label: 'getMarkets/meta', timeoutMs: this.restTimeoutMs }),
+      withRetry(() => sdk.info.getAllMids(), { label: 'getMarkets/mids', timeoutMs: this.restTimeoutMs })
     ]);
     return meta.universe
       .filter(u => !u.isDelisted)
@@ -319,7 +382,7 @@ class HyperliquidClient {
 
   async getAllMids(network = this.network) {
     const sdk = await this.getReadSdk(network);
-    return withRetry(() => sdk.info.getAllMids(), { label: 'getAllMids' });
+    return withRetry(() => sdk.info.getAllMids(), { label: 'getAllMids', timeoutMs: this.restTimeoutMs });
   }
 
   async getMid(coin, network = this.network) {
@@ -333,17 +396,22 @@ class HyperliquidClient {
     const sdk = await this.getReadSdk(network);
     const endTime = Date.now();
     const startTime = endTime - lookbackMs;
-    return withRetry(() => sdk.info.getCandleSnapshot(coin, interval, startTime, endTime), { label: 'getCandles' });
+    return withRetry(() => sdk.info.getCandleSnapshot(coin, interval, startTime, endTime), { label: 'getCandles', timeoutMs: this.restTimeoutMs });
   }
 
+  /** Storico funding. Lettura PESANTE (peso 20): SDK dedicata. */
   async getFundingHistory(coin, lookbackMs = 1000 * 60 * 60 * 24, network = this.network) {
-    const sdk = await this.getReadSdk(network);
-    return sdk.info.perpetuals.getFundingHistory(coin, Date.now() - lookbackMs, Date.now());
+    const sdk = await this.getHeavyReadSdk(network);
+    return withRetry(
+      () => sdk.info.perpetuals.getFundingHistory(coin, Date.now() - lookbackMs, Date.now()),
+      this._heavyReadOpts('getFundingHistory')
+    );
   }
 
+  /** Funding previsti. Lettura PESANTE (peso 20): SDK dedicata. */
   async getPredictedFundings(network = this.network) {
-    const sdk = await this.getReadSdk(network);
-    return sdk.info.perpetuals.getPredictedFundings();
+    const sdk = await this.getHeavyReadSdk(network);
+    return withRetry(() => sdk.info.perpetuals.getPredictedFundings(), this._heavyReadOpts('getPredictedFundings'));
   }
 
   /**
@@ -352,7 +420,7 @@ class HyperliquidClient {
    */
   async getMarketStats(network = this.network) {
     const sdk = await this.getReadSdk(network);
-    const res = await sdk.info.perpetuals.getMetaAndAssetCtxs();
+    const res = await withRetry(() => sdk.info.perpetuals.getMetaAndAssetCtxs(), { label: 'getMarketStats', timeoutMs: this.restTimeoutMs });
     const meta = Array.isArray(res) ? res[0] : res?.meta;
     const ctxs = Array.isArray(res) ? res[1] : res?.assetCtxs;
     if (!meta?.universe || !ctxs) return [];
@@ -380,7 +448,7 @@ class HyperliquidClient {
   async getAccount(masterAddress, network = this.network) {
     const sdk = await this.getReadSdk(network);
     const [state, spot] = await Promise.all([
-      withRetry(() => sdk.info.perpetuals.getClearinghouseState(masterAddress), { label: 'getAccount' }),
+      withRetry(() => sdk.info.perpetuals.getClearinghouseState(masterAddress), { label: 'getAccount', timeoutMs: this.restTimeoutMs }),
       // Un fallimento qui NON è silenzioso: senza lo Spot l'equity risulta pari
       // al solo `accountValue`, cioè sottostimata su account unificato — e su un
       // percorso che alimenta il sizing va detto, non ingoiato.
@@ -435,13 +503,18 @@ class HyperliquidClient {
 
   async getOpenOrders(masterAddress, network = this.network) {
     const sdk = await this.getReadSdk(network);
-    return sdk.info.getUserOpenOrders(masterAddress);
+    return withRetry(() => sdk.info.getUserOpenOrders(masterAddress), { label: 'getOpenOrders', timeoutMs: this.restTimeoutMs });
   }
 
-  /** Ordini aperti dettagliati (include trigger TP/SL con triggerPx). */
+  /**
+   * Ordini aperti dettagliati (include trigger TP/SL con triggerPx).
+   * Lettura PESANTE (peso 20): va sulla SDK dedicata — vedi `getHeavyReadSdk`.
+   * È il percorso da cui passa la garanzia di protezione di `bot._ensureStopLoss`:
+   * se resta appesa, quella garanzia smette di girare senza dirlo a nessuno.
+   */
   async getFrontendOpenOrders(masterAddress, network = this.network) {
-    const sdk = await this.getReadSdk(network);
-    const orders = await withRetry(() => sdk.info.getFrontendOpenOrders(masterAddress), { label: 'getFrontendOpenOrders' });
+    const sdk = await this.getHeavyReadSdk(network);
+    const orders = await withRetry(() => sdk.info.getFrontendOpenOrders(masterAddress), this._heavyReadOpts('getFrontendOpenOrders'));
     return (orders || []).map(o => ({
       coin: o.coin,
       side: o.side === 'B' ? 'buy' : 'sell',
@@ -455,10 +528,13 @@ class HyperliquidClient {
     }));
   }
 
-  /** Storico delle operazioni eseguite (fill), manuali e dei bot. */
+  /**
+   * Storico delle operazioni eseguite (fill), manuali e dei bot.
+   * Lettura PESANTE (peso 20): va sulla SDK dedicata — vedi `getHeavyReadSdk`.
+   */
   async getUserFills(masterAddress, network = this.network) {
-    const sdk = await this.getReadSdk(network);
-    const fills = await withRetry(() => sdk.info.getUserFills(masterAddress), { label: 'getUserFills' });
+    const sdk = await this.getHeavyReadSdk(network);
+    const fills = await withRetry(() => sdk.info.getUserFills(masterAddress), this._heavyReadOpts('getUserFills'));
     return (fills || [])
       .sort((a, b) => b.time - a.time)
       .slice(0, 200)
@@ -566,11 +642,24 @@ class HyperliquidClient {
     return parseFloat(px.toFixed(Math.min(decimals, 8)));
   }
 
-  /** Imposta la leva (cross di default) prima di aprire una posizione. */
+  /**
+   * Imposta la leva (cross di default) prima di aprire una posizione.
+   *
+   * NB sul timeout delle chiamate firmate (vale anche per i due metodi qui
+   * sotto): un timeout dice "non so l'esito", non "non è successo". L'azione
+   * può essere arrivata a Hyperliquid comunque. È il compromesso giusto perché
+   * l'alternativa è peggiore: senza tetto di tempo l'SDK non ne ha nessuno, e
+   * una chiamata appesa dentro `execQueue` — serializzata per master — blocca
+   * per sempre tutto ciò che viene dopo, incluso il piazzamento dello stop
+   * loss. Il ri-allineamento avviene comunque al tick successivo
+   * (`bot._reconcile` e `bot._ensureStopLoss`).
+   */
   async setLeverage(masterAddress, coin, leverage, mode = 'cross', network = this.network) {
     const sdk = await this.getSignSdk(masterAddress, network);
     // Serializzato per master: niente firme concorrenti che fanno collidere i nonce.
-    return execQueue.run(masterAddress, () => sdk.exchange.updateLeverage(coin, mode, leverage));
+    return execQueue.run(masterAddress, () => withTimeout(
+      () => sdk.exchange.updateLeverage(coin, mode, leverage), this.execTimeoutMs, 'setLeverage'
+    ));
   }
 
   /**
@@ -586,14 +675,14 @@ class HyperliquidClient {
       const mid = await this.getMid(coin, network);
       if (!mid) throw new Error(`Prezzo non disponibile per ${coin}`);
       const px = this.roundPx(isBuy ? mid * (1 + slippage) : mid * (1 - slippage));
-      const res = await sdk.exchange.placeOrder({
+      const res = await withTimeout(() => sdk.exchange.placeOrder({
         coin,
         is_buy: isBuy,
         sz: size,
         limit_px: px,
         order_type: { limit: { tif: 'Ioc' } },
         reduce_only: reduceOnly
-      });
+      }), this.execTimeoutMs, `placeMarketOrder ${coin}`);
       logger.info('⚡ Ordine market inviato', { coin, isBuy, size, px });
       metrics.inc('orders_placed_total');
       return this._parseOrderResult(res);
@@ -610,14 +699,14 @@ class HyperliquidClient {
     const sdk = await this.getSignSdk(masterAddress, network);
     const px = this.roundPx(triggerPx);
     return execQueue.run(masterAddress, async () => {
-      const res = await sdk.exchange.placeOrder({
+      const res = await withTimeout(() => sdk.exchange.placeOrder({
         coin,
         is_buy: isBuy,
         sz: size,
         limit_px: px,
         order_type: { trigger: { isMarket: true, triggerPx: px, tpsl } },
         reduce_only: true
-      });
+      }), this.execTimeoutMs, `placeTriggerOrder ${tpsl} ${coin}`);
       logger.info(`🎯 Ordine ${tpsl.toUpperCase()} inviato`, { coin, triggerPx: px, size });
       return this._parseOrderResult(res);
     });
@@ -625,7 +714,9 @@ class HyperliquidClient {
 
   async cancelOrder({ masterAddress, coin, oid }, network = this.network) {
     const sdk = await this.getSignSdk(masterAddress, network);
-    return execQueue.run(masterAddress, () => sdk.exchange.cancelOrder({ coin, o: oid }));
+    return execQueue.run(masterAddress, () => withTimeout(
+      () => sdk.exchange.cancelOrder({ coin, o: oid }), this.execTimeoutMs, `cancelOrder ${coin}`
+    ));
   }
 
   /** Chiude completamente una posizione con un market reduce-only. */

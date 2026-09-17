@@ -386,7 +386,12 @@ class ArbitrageBotServer {
         if (address) {
           try {
             onChainFills = await hyperliquid.getUserFills(address);
-          } catch {
+          } catch (error) {
+            // Non silenzioso: se i fill on-chain non arrivano, la risposta
+            // contiene i soli trade del DB locale e sembra semplicemente più
+            // povera. È esattamente il modo in cui questa rotta è rimasta rotta
+            // senza lasciare traccia (17/09/2026), quindi il perché va scritto.
+            logger.warn(`Fills: storico on-chain non leggibile per ${address}: ${error.message}. Rispondo con i soli trade del database.`);
             onChainFills = [];
           }
         }

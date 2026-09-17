@@ -33,6 +33,18 @@ global:
 rule_files:
   - /etc/prometheus/alerts.yml
 
+# Dove consegnare gli alert in stato `firing` (OBS-02, issue #12). Prometheus
+# valuta le regole ma non notifica nessuno: senza questo blocco un alert resta
+# un colore rosso su una pagina che nessuno sta guardando.
+# `alertmanager:9093` è il nome del servizio sulla rete Docker interna `web`,
+# esattamente come `app:3000` qui sotto — nessuna porta nuova verso l'esterno.
+# Se il profilo `monitoring` non è attivo il target non esiste e Prometheus
+# riprova in silenzio: è un errore nei log, non un avvio fallito.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
 scrape_configs:
   - job_name: arbitragebot
     metrics_path: /metrics

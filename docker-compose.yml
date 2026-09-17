@@ -87,6 +87,68 @@ services:
       - prometheus-data:/prometheus
     networks: [web]
 
+  # Alertmanager (OBS-02, issue #12) — il pezzo che trasforma una regola in
+  # stato `firing` in un messaggio che arriva a qualcuno. Senza di lui,
+  # Prometheus valuta gli alert e li mostra soltanto: il 14/09/2026 l'app è
+  # rimasta in crash-loop ~3h40m con gli alert accesi e nessuno avvisato.
+  #
+  # Stesso profilo di prometheus/grafana: chi non vuole monitoraggio non paga
+  # niente. Stessa rete `web`, così Prometheus lo raggiunge per nome
+  # (`alertmanager:9093`) come già fa con `app:3000`. Stessa esposizione solo su
+  # 127.0.0.1: la UI serve per silenziare un alert a mano durante una manutenzione.
+  alertmanager:
+    image: prom/alertmanager:v0.34.0
+    profiles: [monitoring]
+    restart: unless-stopped
+    # I due segreti arrivano da un file DEDICATO, non da `.infisical-bootstrap.env`:
+    # quello contiene anche AGENT_ENCRYPTION_KEY, SESSION_SECRET e
+    # APP_PASSWORD_HASH, che in un container di notifica non hanno niente da
+    # fare. Un container = solo i segreti che gli servono.
+    # Il file va creato A MANO sul server, root-only (0600), mai committato
+    # (è in .gitignore) — stessa disciplina di `.infisical-bootstrap.env`:
+    #
+    #   umask 077
+    #   printf 'ALERTMANAGER_TELEGRAM_BOT_TOKEN=%s\n' "$BOT"  >  deploy/monitoring/alertmanager.secrets.env
+    #   printf 'ALERTMANAGER_TELEGRAM_CHAT_ID=%s\n'  "$CHAT" >> deploy/monitoring/alertmanager.secrets.env
+    #
+    # `required: false` perché senza il file il servizio deve dare un errore
+    # LEGGIBILE (vedi il controllo nel command), non un fallimento di Compose
+    # prima ancora di partire.
+    env_file:
+      - path: ./deploy/monitoring/alertmanager.secrets.env
+        required: false
+    environment:
+      # Orari leggibili nei log e nelle scadenze dei silence, come per l'app.
+      - TZ=Europe/Rome
+    # Token e chat id in FILE, non in alertmanager.yml (versionato) né in argv.
+    # `$$` lascia il `$` alla shell DENTRO il container: con un solo `$` Compose
+    # lo espanderebbe e il token del bot finirebbe nella command line, leggibile
+    # con `docker inspect`. Identico al servizio prometheus qui sopra.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        ( umask 077
+          printf '%s' "$${ALERTMANAGER_TELEGRAM_BOT_TOKEN}" > /etc/alertmanager/telegram_bot_token
+          printf '%s' "$${ALERTMANAGER_TELEGRAM_CHAT_ID}"   > /etc/alertmanager/telegram_chat_id )
+        if [ ! -s /etc/alertmanager/telegram_bot_token ] || [ ! -s /etc/alertmanager/telegram_chat_id ]; then
+          echo "❌ Alertmanager: bot token o chat id Telegram mancanti." >&2
+          echo "   Crea deploy/monitoring/alertmanager.secrets.env (0600) con" >&2
+          echo "   ALERTMANAGER_TELEGRAM_BOT_TOKEN e ALERTMANAGER_TELEGRAM_CHAT_ID." >&2
+          exit 1
+        fi
+        exec /bin/alertmanager \
+          --config.file=/etc/alertmanager/alertmanager.yml \
+          --storage.path=/alertmanager \
+          --web.listen-address=:9093 \
+          --cluster.listen-address=
+    ports:
+      - "127.0.0.1:9093:9093"    # solo loopback: UI per silenziare/ispezionare
+    volumes:
+      - ./deploy/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks: [web]
+
   grafana:
     image: grafana/grafana:13.1.3
     profiles: [monitoring]
@@ -124,4 +186,7 @@ volumes:
   caddy-data:
   caddy-config:
   prometheus-data:               # TSDB delle metriche (profilo monitoring)
+  alertmanager-data:             # silence e notification log: senza persistenza,
+                                 # un riavvio rimanderebbe gli alert già mandati
+                                 # e cancellerebbe i silenzi di manutenzione
   grafana-data:                  # utenti, preferenze e stato di Grafana

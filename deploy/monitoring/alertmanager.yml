@@ -1,0 +1,94 @@
+# Alertmanager — inoltro degli alert su Telegram (OBS-02, issue #12)
+# ===================================================================
+#
+# PERCHÉ ESISTE
+# -------------
+# Il 14/09/2026 `app-app-1` è rimasto in crash-loop per ~3h40m senza che nessuno
+# se ne accorgesse: le regole di deploy/monitoring/alerts.yml erano in stato
+# `firing` in Prometheus, ma Prometheus da solo non notifica nessuno — serve un
+# Alertmanager a cui consegnarle. Questo file è quel pezzo mancante.
+#
+# IL SEGRETO NON STA QUI
+# ----------------------
+# Questo file è versionato. Token e chat id NON ci sono dentro: arrivano da due
+# file scritti all'avvio del container dal `command` del servizio alertmanager
+# in docker-compose.yml (stesso pattern di `metrics_token` per Prometheus:
+# `umask 077`, valore preso dall'ambiente del processo, mai su una riga di
+# comando visibile a `docker inspect`).
+#   /etc/alertmanager/telegram_bot_token   <- ALERTMANAGER_TELEGRAM_BOT_TOKEN
+#   /etc/alertmanager/telegram_chat_id     <- ALERTMANAGER_TELEGRAM_CHAT_ID
+# entrambe da deploy/monitoring/alertmanager.secrets.env (0600, gitignored,
+# creato a mano sul server). `bot_token_file` / `chat_id_file` sono opzioni
+# native di Alertmanager (v0.34 in uso qui), non un artificio locale.
+#
+# QUALE BOT TELEGRAM
+# ------------------
+# In produzione oggi è lo STESSO bot/canale delle notifiche applicative di
+# src/perps/notifier.js: un solo posto dove guardare quando qualcosa va storto,
+# e il canale è già quello che l'operatore legge davvero.
+# Quel bot è CONDIVISO con il gateway conversazionale Hermes (verificato: il
+# lock di Hermes `gateway-locks/telegram-bot-token-<sha>.lock` porta lo stesso
+# hash del token dell'app), ma la convivenza è sicura per un motivo preciso:
+# Alertmanager fa solo `sendMessage` — non fa `getUpdates` e non registra
+# webhook. Il conflitto 409 di Telegram nasce solo fra due *lettori* dello
+# stesso token, mai fra due scrittori.
+# Per separare il rumore infra dalle notifiche di trading basta mettere un bot
+# dedicato in alertmanager.secrets.env: questo file non cambia di una riga.
+
+global:
+  # Un alert che smette di essere rivalutato (es. la serie sparisce perché il
+  # target è morto) viene considerato risolto dopo questo tempo. 5m è il default
+  # ed è coerente con l'evaluation_interval di 15s: serve a non lasciare alert
+  # appesi per sempre, non a temporizzare le notifiche.
+  resolve_timeout: 5m
+
+route:
+  receiver: telegram
+  # Raggruppa per regola e per bot: due bot diversi che vanno in stallo sono due
+  # problemi da guardare separatamente, lo stesso bot che va in stallo due volte
+  # no. `instance` non serve: c'è una sola istanza dell'app.
+  group_by: [alertname, bot, coin]
+  # Tempi pensati per UN operatore che deve poter agire, non per una rotazione
+  # on-call. Il vincolo vero è: nessun messaggio ogni 15s (evaluation_interval),
+  # ma nemmeno un ritardo che renda l'alert inutile.
+  group_wait: 30s        # attesa prima del primo invio: accorpa alert che nascono insieme
+  group_interval: 5m     # nuovo messaggio solo se il gruppo CAMBIA (alert nuovo o risolto)
+  repeat_interval: 4h    # promemoria di un problema ancora aperto e non toccato
+  routes:
+    # I `critical` sono, oggi, solo ArbitrageBotTargetDown: "non sto più
+    # raccogliendo metriche", cioè lo scenario esatto del 14/09. Ha già speso
+    # `for: 2m` in Prometheus prima di arrivare qui, quindi non c'è più niente
+    # da smorzare: 10s di group_wait e un promemoria ogni ora finché è aperto.
+    - matchers: ['severity="critical"']
+      receiver: telegram
+      group_wait: 10s
+      repeat_interval: 1h
+
+inhibit_rules:
+  # Se le metriche non arrivano più, le regole sui perps sono cieche per
+  # definizione: qualunque warning ancora appeso su quella stessa istanza
+  # descrive la conseguenza, non la causa. Mandare entrambi raddoppia il rumore
+  # e non l'informazione (stessa logica già scritta in alerts.yml).
+  - source_matchers: ['severity="critical"']
+    target_matchers: ['severity="warning"']
+    equal: [instance]
+
+receivers:
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/telegram_bot_token
+        chat_id_file: /etc/alertmanager/telegram_chat_id
+        send_resolved: true
+        # TESTO SEMPLICE, NON HTML — deliberato. Con parse_mode HTML, un solo
+        # `<`, `>` o `&` finito in un'annotation di alerts.yml fa rispondere 400
+        # a Telegram e l'alert NON parte: esattamente il fallimento silenzioso
+        # che questo lavoro deve eliminare. Un canale di allarme deve consegnare
+        # sempre; il grassetto è un lusso.
+        parse_mode: ''
+        message: |-
+          {{ if eq .Status "firing" }}[ALERT{{ with .CommonLabels.severity }} {{ . | toUpper }}{{ end }}]{{ else }}[RIENTRATO]{{ end }} {{ .CommonLabels.alertname }}{{ if gt (len .Alerts) 1 }} (x{{ len .Alerts }}){{ end }}
+          {{ range .Alerts }}
+          - {{ .Annotations.summary }}
+            {{ .Annotations.description }}
+          {{ end }}
+          Cruscotto: http://127.0.0.1:9090/alerts (via tailnet o SSH tunnel)

@@ -6,15 +6,20 @@
 # lettura, Prometheus è il proprietario delle regole), e nel pannello "Alert
 # attivi" della dashboard, che interroga la serie sintetica `ALERTS`.
 #
-# NIENTE INOLTRO ESTERNO, PER SCELTA
-# ----------------------------------
-# Non c'è Alertmanager in questo stack: uno stato "firing" qui non manda niente a
-# nessuno. È deliberato per questo sprint (OBS-01: "l'inoltro esterno è un
-# raffinamento futuro") e non lascia scoperto il caso urgente, perché le due
-# condizioni che devono svegliare qualcuno sono già notificate dall'app stessa via
-# Telegram: WS giù oltre PERPS_WS_DOWN_NOTIFY_MS (marketData.js) e bot che non
-# ticca oltre la soglia del watchdog (botManager.js). Queste regole servono a
-# vedere *quando e quanto spesso* è successo, non a sostituire quelle notifiche.
+# INOLTRO ESTERNO: SÌ, VIA ALERTMANAGER → TELEGRAM (OBS-02, issue #12)
+# ---------------------------------------------------------------------
+# ATTENZIONE, questo header diceva il contrario fino al 17/09/2026: "niente
+# inoltro esterno, per scelta (OBS-01: è un raffinamento futuro)". Quel
+# raffinamento è stato fatto, e la ragione è un incidente vero: il 14/09/2026
+# l'app è rimasta in crash-loop per ~3h40m con queste regole in `firing` e
+# nessuno avvisato, perché "firing" senza Alertmanager è solo un colore su una
+# pagina. Oggi uno stato `firing` qui diventa un messaggio Telegram:
+#   prometheus.yml (blocco `alerting:`) → alertmanager:9093 → alertmanager.yml.
+#
+# Le notifiche dell'app (marketData.js per il WS giù, botManager.js per il
+# watchdog) restano e NON sono ridondanti: partono dal processo dell'app, quindi
+# tacciono proprio quando l'app è morta — cioè nel caso peggiore. Questi alert
+# arrivano da fuori il processo ed è questo che li rende utili.
 #
 # SOGLIE — perché questi numeri
 # -----------------------------

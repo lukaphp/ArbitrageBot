@@ -77,6 +77,7 @@ import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk,
 // DEBT-03: la profondità della coda di esecuzione (WARN-02) è la sola fonte reale
 // per "Queue health" nella card EXECUTION STATUS della cockpit.
 import execQueue from './perps/execQueue.js';
+import paperBroker from './perps/paperBroker.js';
 import { reconcileStalePositions } from './perps/reconciler.js';
 
 // Setup paths
@@ -107,6 +108,39 @@ function constantTimeEquals(a, b) {
   const bufB = Buffer.from(b);
   if (bufA.length !== bufB.length) return false;
   return crypto.timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Vista "account unico" delle rotte aggregate: exchange REALE + broker PAPER.
+ *
+ * Le rotte `/api/perps/account` e `/api/perps/risk` leggevano solo l'account
+ * reale. Con la flotta interamente `paper: true` quell'account ha zero
+ * posizioni: il pannello "Posizioni attive" restava vuoto e il tab Rischio
+ * misurava un wallet fermo invece della flotta esposta a mercato. Le card dei
+ * singoli bot non erano toccate perché passano dal broker del bot.
+ *
+ * Qui c'è solo I/O e nessuna aritmetica: la composizione delle due viste è
+ * `riskManager.mergeAccountViews` (pura, testabile in isolamento). Lo stato
+ * simulato si legge con `peekAccount()` e non con `getAccount()`: quest'ultima
+ * fa scattare i trigger TP/SL come effetto collaterale, e da una rotta HTTP
+ * significherebbe eseguire chiusure simulate al ritmo del refresh della
+ * dashboard — anche per bot fermi, che non hanno nessun tick per registrarle.
+ *
+ * @param real vista dell'exchange (`null` se non è stato possibile leggerla)
+ * @returns la vista unificata, con `paperError` valorizzato se la parte
+ *          simulata non è leggibile — un'assenza silenziosa qui sarebbe di
+ *          nuovo il bug che questa funzione risolve.
+ */
+async function mergeWithPaperAccount(real, address, network) {
+  let paper = null;
+  let paperError = null;
+  try {
+    paper = await paperBroker.peekAccount(address, network);
+  } catch (error) {
+    paperError = error.message;
+    logger.error(`Vista account ${address}: stato simulato non leggibile (${error.message}). Le posizioni paper NON compaiono in questa risposta.`);
+  }
+  return { ...riskManager.mergeAccountViews({ real, paper }), paperError };
 }
 
 class ArbitrageBotServer {
@@ -499,7 +533,12 @@ class ArbitrageBotServer {
       try {
         const { address } = req.query;
         if (!address) return res.status(400).json({ success: false, error: 'address richiesto' });
-        const account = await hyperliquid.getAccount(address);
+        const network = hyperliquid.getNetwork();
+        // Reale + simulato: vedi `mergeWithPaperAccount`. Un fallimento della
+        // lettura dell'exchange resta un 500 come prima — un pannello che mostra
+        // le sole posizioni paper senza dire che l'exchange non risponde
+        // affermerebbe "nient'altro è aperto", che è proprio ciò che non si sa.
+        const account = await mergeWithPaperAccount(await hyperliquid.getAccount(address, network), address, network);
 
         // Arricchisce le posizioni aperte con bot d'origine + data di apertura
         // incrociando le posizioni 'open' tracciate nel nostro DB (per coin+lato).
@@ -516,6 +555,14 @@ class ArbitrageBotServer {
         // `reconciler.js`, questa rotta si limita a fornirle i dati.
         // `.status` letto direttamente dalle istanze invece di `listStates()`:
         // serve solo sapere chi sta girando, non costruire ogni stato completo.
+        //
+        // Le posizioni confrontate sono quelle UNIFICATE (reali + paper), e non
+        // è un dettaglio cosmetico: finché erano le sole reali, la riga `open`
+        // di un bot PAPER fermo non aveva riscontro per costruzione e veniva
+        // chiusa in DB con PnL sconosciuto — una posizione simulata viva
+        // dichiarata chiusa, con tanto di notifica. Per la riconciliazione
+        // "esiste sull'exchange" e "esiste nel broker del bot" sono la stessa
+        // domanda: qual è il broker che la tiene aperta lo decide il bot.
         const runningBotIds = new Set(
           [...botManager.bots.values()].filter(b => b?.status === 'running').map(b => b.id)
         );
@@ -568,12 +615,23 @@ class ArbitrageBotServer {
       let fillsAvailable = false;
 
       if (address) {
+        let realAccount = null;
         try {
-          account = await hyperliquid.getAccount(address, network);
+          realAccount = await hyperliquid.getAccount(address, network);
         } catch (error) {
           sourceErrors.push('account');
           logger.warn('Risk snapshot: account non disponibile', error.message);
         }
+        // Vista unificata reale + paper. Gli alert di `deriveRiskAlerts` sono
+        // RAPPORTI (margine/equity, esposizione/cap, posizioni/cap): equity da
+        // una fonte e posizioni dall'altra darebbero percentuali inventate,
+        // quindi o si aggregano entrambe o non si aggrega niente.
+        const unified = await mergeWithPaperAccount(realAccount, address, network);
+        if (unified.paperError) sourceErrors.push('stato paper');
+        // `mode: 'none'` = nessuna delle due fonti ha risposto: `account` resta
+        // `null` così l'alert "Account non disponibile" continua a scattare,
+        // invece di essere sostituito da un guscio di zeri.
+        account = unified.mode === 'none' ? null : unified;
         try {
           orders = await hyperliquid.getFrontendOpenOrders(address, network);
         } catch (error) {
@@ -612,6 +670,13 @@ class ArbitrageBotServer {
       let equityHistory = address ? db.listRiskEquityHistory(network, address, 2000) : [];
       const persistedDrawdown = address ? db.getRiskDrawdownState(network, address) : null;
       if (account && Number.isFinite(Number(account.equity)) && address) {
+        // Il campione è l'equity UNIFICATA (reale + simulata): il drawdown deve
+        // misurare ciò che si muove davvero, e con la flotta tutta paper
+        // l'equity reale è una linea piatta che descriverebbe "nessun rischio"
+        // mentre i bot sono a mercato. Sulle serie già raccolte prima di questo
+        // cambio resta un GRADINO verso l'alto nel punto della transizione: è
+        // una discontinuità di definizione, non un guadagno, e non può produrre
+        // un falso drawdown (il picco sale, non scende).
         db.insertRiskEquitySample(network, address, Math.floor(now / 1000), Number(account.equity), 10000);
         equityHistory = db.listRiskEquityHistory(network, address, 2000);
       }

@@ -959,6 +959,27 @@ export class PerpsDatabase {
     return state;
   }
 
+  /**
+   * Rimuove il drawdown persistito di un account, così la lettura successiva
+   * riparte dalla sola `risk_equity_history`.
+   *
+   * Esiste perché `mergeDrawdownState` è monotono: finché la riga c'è, il suo
+   * `max_drawdown_usd/pct` è un pavimento che nessuna correzione dello storico
+   * può abbassare. È l'unico modo previsto per togliere un massimo calcolato su
+   * dati poi rivelatisi sbagliati — vedi `scripts/recompute-drawdown.js`, che è
+   * il percorso da usare (ricalcola e riscrive, invece di lasciare il vuoto).
+   *
+   * @returns true se una riga è stata rimossa, false se non c'era (idempotente).
+   */
+  deleteRiskDrawdownState(network, address) {
+    this.ensure();
+    const scope = this._riskScope(network, address);
+    const info = this.db.prepare(`
+      DELETE FROM risk_drawdown_state WHERE network = ? AND address = ?
+    `).run(scope.network, scope.address);
+    return info.changes > 0;
+  }
+
   getRiskDrawdownState(network, address) {
     this.ensure();
     const scope = this._riskScope(network, address);

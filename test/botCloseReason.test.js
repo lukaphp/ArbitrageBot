@@ -192,14 +192,30 @@ test('partialTp: scatta uno dei TP della scala → sempre bucket tp', async () =
   const posId = bot.position.id;
 
   assert.equal(bot.position.tpOids.length, 2, 'entrambi i gradini della scala sono tracciati');
+  const sizeIniziale = bot.position.size;
 
-  // Il primo gradino (a +5%) viene colpito: paperBroker chiude tutto al primo hit.
-  await moveAndReconcile(bot, master, coin, 106);
+  // ISSUE #17 — il primo gradino (+5%) chiude METÀ posizione, non tutta: il
+  // paperBroker modella la riduzione, quindi qui NON c'è ancora una chiusura da
+  // classificare. Prima di quel fix questo passaggio chiudeva già tutto, e il
+  // test verificava la classificazione su uno scenario che la strategia
+  // configurata non produce.
+  const residuo = await moveAndReconcile(bot, master, coin, 106);
+  assert.ok(residuo, 'dopo il primo gradino la posizione è ancora sull\'exchange');
+  assert.ok(Math.abs(residuo.size - sizeIniziale * 0.5) < 1e-9,
+    `size residua ${residuo.size}, attesa la metà di ${sizeIniziale}`);
+  assert.equal(rowOf(posId).status, 'open', 'nessuna chiusura registrata per un parziale');
+  assert.ok(bot.position, 'il bot continua a gestire il residuo');
+
+  // Il secondo gradino (+10%) chiude il residuo: ORA c'è una chiusura, e resta
+  // un TP anche se è arrivata da due fill su due trigger diversi della scala.
+  await moveAndReconcile(bot, master, coin, 111);
 
   const row = rowOf(posId);
+  assert.equal(row.status, 'closed');
   assert.equal(row.close_reason, 'take profit eseguito',
     'un TP è un TP anche se è un gradino della scala');
   assert.equal(db.closeReasonBucket(row.close_reason), 'tp');
+  assert.ok(row.pnl > 0, 'PnL reale positivo: somma dei due parziali, netto fee');
 });
 
 test('DUBBIO: fill di chiusura non ancora visibili → si torna alla stringa generica', async () => {

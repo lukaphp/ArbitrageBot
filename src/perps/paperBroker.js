@@ -424,33 +424,103 @@ export class PaperBroker {
           // produce un fill che porta il suo stesso oid) ed è ciò che permette
           // a `bot._registerClose` di sapere se ha chiuso il TP o lo SL.
           // Prima quest'informazione veniva scartata qui dentro.
-          this._fillClose(master, coin, t.triggerPx, `trigger ${t.tpsl}`, { oid: t.oid });
+          //
+          // ISSUE #17 — anche `t.size` va passata: con `config.partialTp` ogni
+          // gradino della scala è un trigger dimensionato su una FRAZIONE della
+          // posizione (`bot._placeTpSl`), e chiudere tutto ignorava la strategia
+          // configurata. `_fillClose` la limita comunque al residuo.
+          const res = this._fillClose(master, coin, t.triggerPx, `trigger ${t.tpsl}`,
+            { oid: t.oid, size: t.size });
+          // Un ordine eseguito non è più sul book: se restasse, al tick
+          // successivo ri-scatterebbe allo stesso prezzo e mangerebbe un'altra
+          // fetta del residuo, all'infinito. Su una chiusura totale
+          // `_fillClose` ha già rimosso l'intera lista.
+          if (res?.partial) this._removeTrigger(master, coin, t.oid);
+          // Si ferma al primo trigger colpito anche quando la chiusura è
+          // parziale: un eventuale secondo gradino già in-the-money scatta al
+          // tick seguente e, visto che il fill avviene esattamente al suo
+          // `triggerPx`, il PnL è identico — cambia solo di qualche secondo il
+          // momento in cui viene registrato.
           break;
         }
       }
     }
   }
 
+  /** Rimuove un trigger consumato senza toccare gli altri della stessa coin. */
+  _removeTrigger(master, coin, oid) {
+    const acc = this._acc(master);
+    const list = (acc.triggers.get(coin) || []).filter(t => t.oid !== oid);
+    if (list.length) acc.triggers.set(coin, list);
+    else acc.triggers.delete(coin);
+    this._save(this._touch(master, coin));
+  }
+
+  /**
+   * Quanta size chiude davvero un ordine, data quella richiesta.
+   *
+   * Tutti gli ordini di chiusura del bot sono reduce-only: su Hyperliquid non
+   * possono mai girare la posizione né aprirne una nuova, qualunque size
+   * portino. Serve perché fra un TP parziale e il primo aggiornamento del
+   * trailing lo SL sul book è ancora dimensionato sulla posizione PIENA
+   * (`bot._placeTpSl` lo piazza all'apertura, `_manageOpen` lo ridimensiona solo
+   * quando il trailing si muove): senza questo limite il paper chiuderebbe più
+   * size di quanta ne esista, inventando uno short fantasma e un PnL che sul
+   * mercato vero non si sarebbe realizzato.
+   *
+   * `size` assente o non utilizzabile = «chiudi tutto»: è il percorso storico
+   * (chiusure a mercato, e i trigger salvati prima di questo fix, che non
+   * avevano il campo).
+   */
+  _closableSize(pos, size) {
+    const want = Number(size);
+    if (!Number.isFinite(want) || want <= 0) return pos.size;
+    return Math.min(want, pos.size);
+  }
+
   /**
    * Registra la chiusura simulata e realizza il PnL (netto fee).
+   *
+   * ISSUE #17 — la chiusura può essere PARZIALE. Con `config.partialTp` il bot
+   * piazza una scala di trigger, ognuno su una frazione della posizione: quando
+   * uno scatta deve RIDURRE la posizione, non cancellarla. Il residuo conserva
+   * il suo `entryPx` (una riduzione non media niente, a differenza del DCA) e i
+   * suoi trigger rimanenti — in particolare lo stop, che resta la protezione del
+   * resto della posizione.
+   *
    * @param meta.oid oid dell'ordine che ha prodotto la chiusura (trigger scattato
    *        o ordine di mercato). Va nel fill, come su Hyperliquid.
+   * @param meta.size size da chiudere; assente = l'intera posizione. Viene
+   *        comunque limitata al residuo (vedi `_closableSize`).
+   * @returns { closedPnl, fee, size, partial } — `partial` dice al chiamante se
+   *        la posizione è ancora viva, cioè se i trigger superstiti vanno gestiti.
    */
-  _fillClose(master, coin, px, reason, { oid = null } = {}) {
+  _fillClose(master, coin, px, reason, { oid = null, size = null } = {}) {
     const acc = this._acc(master);
     const pos = acc.positions.get(coin);
     if (!pos) return null;
-    const notional = pos.size * px;
+    const closeSize = this._closableSize(pos, size);
+    const remaining = pos.size - closeSize;
+    // Il residuo che resta è polvere di arrotondamento (una scala di portion che
+    // somma a 1 non torna mai esatta dopo `roundSize`): è una chiusura totale,
+    // non una posizione aperta da 1e-15 che nessun trigger chiuderà mai.
+    const partial = remaining > 0 && remaining > pos.size * 1e-9;
+
+    const notional = closeSize * px;
     const fee = notional * TAKER_FEE_PCT;
-    const gross = pos.side === 'long' ? (px - pos.entryPx) * pos.size : (pos.entryPx - px) * pos.size;
+    const gross = pos.side === 'long' ? (px - pos.entryPx) * closeSize : (pos.entryPx - px) * closeSize;
     const closedPnl = gross;
     this._applyEquity(acc, master, closedPnl - fee);
-    acc.fills.push({ time: Date.now(), coin, dir: `Close ${pos.side === 'long' ? 'Long' : 'Short'}`, px, sz: pos.size, fee, closedPnl, oid });
-    acc.positions.delete(coin);
-    acc.triggers.delete(coin);
-    logger.debug(`📝 Paper close ${coin} @ ${px} (${reason}) pnl=${closedPnl.toFixed(2)} fee=${fee.toFixed(2)}`);
+    acc.fills.push({ time: Date.now(), coin, dir: `Close ${pos.side === 'long' ? 'Long' : 'Short'}`, px, sz: closeSize, fee, closedPnl, oid });
+    if (partial) {
+      pos.size = remaining;
+    } else {
+      acc.positions.delete(coin);
+      acc.triggers.delete(coin);
+    }
+    logger.debug(`📝 Paper close ${coin} @ ${px} (${reason}) sz=${closeSize}${partial ? `/${closeSize + remaining} (parziale, residuo ${remaining})` : ''} pnl=${closedPnl.toFixed(2)} fee=${fee.toFixed(2)}`);
     this._save(this._touch(master, coin));
-    return { closedPnl, fee };
+    return { closedPnl, fee, size: closeSize, partial };
   }
 
   async getAccount(master, network) {

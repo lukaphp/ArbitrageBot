@@ -20,6 +20,7 @@
     "dev:infisical": "infisical run -- nodemon src/server.js",
     "secrets:check": "node scripts/check-secrets.js",
     "secrets:rotate": "node scripts/rotate-encryption-key.js",
+    "drawdown:recompute": "node scripts/recompute-drawdown.js",
     "mcp": "node src/mcp/server.js",
     "rebuild:native": "npm rebuild better-sqlite3 --ignore-scripts=false"
   },

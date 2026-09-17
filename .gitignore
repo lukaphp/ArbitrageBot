@@ -75,3 +75,6 @@ data/
 
 # Segreti dell'istanza Infisical self-hosted (generati da scripts/infisical-bootstrap.sh)
 deploy/infisical/infisical.env
+
+# Bot token e chat id Telegram di Alertmanager (creato a mano sul server, 0600)
+deploy/monitoring/alertmanager.secrets.env

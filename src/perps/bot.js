@@ -393,9 +393,22 @@ export class PerpsBot {
       return;
     }
 
-    // Limiti di portafoglio (globali): posizioni concorrenti, esposizione, cooldown
+    // ---- SEZIONE CRITICA SINCRONA: da qui a `reserveOpenSlot` NESSUN `await` ----
+    // È l'unica cosa che rende atomica la coppia "verifica il cap / impegna lo
+    // slot" su un runtime a singolo thread. Inserire un `await` qui dentro
+    // riapre esattamente la race che questo blocco chiude (due bot su coin
+    // diverse che leggono lo stesso conteggio e aprono entrambi).
+
+    // Limiti di portafoglio (globali): posizioni concorrenti, esposizione, cooldown.
+    // `reservedSlots` = aperture dello stesso wallet già impegnate da altri bot ma
+    // non ancora visibili in `account.positions` (snapshot letto a inizio tick).
+    // Il lock CRIT-03 non le copre: è per (master, COIN), e queste sono su coin
+    // diverse — vedi il punto 4 in testa a execQueue.js.
     const cl = db.getConsecutiveLosses(this.id);
-    const pf = portfolio.canOpen({ account, plannedNotional: plan.notionalUsd, botId: this.id, consecutiveLosses: cl });
+    const pf = portfolio.canOpen({
+      account, plannedNotional: plan.notionalUsd, botId: this.id, consecutiveLosses: cl,
+      reservedSlots: execQueue.reservedOpenSlots(this.masterAddress)
+    });
     if (!pf.ok) {
       logger.warn(`Bot ${this.name}: apertura bloccata (portafoglio)`, pf.reason);
       this.lastEval = { action: 'hold', reason: `Portafoglio: ${pf.reason}`, ts: Date.now() };
@@ -441,6 +454,12 @@ export class PerpsBot {
       this.lastEval = { action: 'hold', reason: `Apertura ${this.coin} già in corso su questo wallet (un altro bot ha il lock)`, ts: Date.now() };
       return;
     }
+
+    // Slot del cap globale impegnato: da qui in poi gli altri bot del wallet
+    // contano questa apertura come se la posizione ci fosse già, anche se il
+    // loro snapshot `account` non la vedrà per un altro tick.
+    execQueue.reserveOpenSlot(this.masterAddress);
+    // ---- FINE SEZIONE CRITICA SINCRONA ----
 
     // SEC-08: da qui in poi la posizione può esistere sull'exchange senza essere
     // ancora in `this.position`. Il flag copre l'intera finestra (leva → fill →
@@ -548,6 +567,20 @@ export class PerpsBot {
     } finally {
       this._opening = false;
       execQueue.releaseOpenLock(this.masterAddress, this.coin);
+      // Lo slot si rilascia SEMPRE, riuscita o fallita l'apertura: se riuscita,
+      // la posizione compare nel prossimo snapshot account e viene contata da
+      // lì; se fallita, non c'è niente da contare. Uno slot trattenuto
+      // restringerebbe il cap del wallet per il resto della vita del processo.
+      //
+      // Resta scoperta una finestra molto più stretta: un bot che ha fetchato
+      // il suo `account` PRIMA di questa apertura e arriva a `canOpen()` DOPO
+      // questo rilascio non vede né la posizione (snapshot anteriore) né la
+      // riserva (già rilasciata). Richiede che l'intera apertura — leva, ordine,
+      // trigger — stia dentro i pochi decimi di secondo fra il `getAccount()` di
+      // un altro bot e la sua valutazione; l'episodio misurato (686 ms fra due
+      // aperture) è invece coperto. Chiuderla richiederebbe datare gli snapshot,
+      // con il rischio opposto di contare posizioni già chiuse: non fatto qui.
+      execQueue.releaseOpenSlot(this.masterAddress);
     }
   }
 

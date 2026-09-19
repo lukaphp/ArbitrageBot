@@ -23,7 +23,19 @@
  *     facendo cosa su quel wallet" — e avere due punti di verità su questo è
  *     esattamente il rischio segnalato in fase di planning.
  *
- *  4. PROFONDITÀ DELLA CODA (WARN-02) — solo osservabilità. La catena di Promise
+ *  4. SLOT DI APERTURA RISERVATI per master — cap globale delle posizioni.
+ *     Il lock del punto 3 è per (master, COIN) di proposito: due bot su mercati
+ *     diversi devono poter aprire in parallelo, ed è la concorrenza che vogliamo
+ *     tenere. Ma il limite `maxConcurrentPositions` è di WALLET, non di mercato:
+ *     due bot su coin diverse superavano entrambi `canOpen()` sullo stesso
+ *     snapshot stale e arrivavano a 4 posizioni su un cap di 3 (misurato in
+ *     produzione il 17/09/2026: SOL ed ETH aperte a 686 ms di distanza).
+ *     Qui si tiene solo il CONTEGGIO delle aperture in volo per wallet; chi
+ *     decide resta `portfolio.canOpen()`, che lo somma alle posizioni dello
+ *     snapshot. Un contatore e non un lock di wallet proprio per non
+ *     serializzare mercati diversi che non si disturbano.
+ *
+ *  5. PROFONDITÀ DELLA CODA (WARN-02) — solo osservabilità. La catena di Promise
  *     non contava nulla: con più bot sullo stesso master, un ordine di chiusura
  *     urgente può restare dietro N aperture senza che nessuno se ne accorga. Qui
  *     si misura e si avvisa oltre soglia; NON si prioritizza (fuori scope
@@ -51,12 +63,53 @@ class ExecQueue {
     this._depthWarned = new Set();
     // `${master}:${coin}` con un'apertura in corso (CRIT-03)
     this.openLocks = new Set();
+    // master(lowercase) -> aperture in volo, cioè slot del cap globale già
+    // impegnati ma non ancora visibili in `account.positions`
+    this.openSlots = new Map();
+  }
+
+  // ---- Slot di apertura riservati per master (cap globale posizioni) ----
+
+  _masterKey(masterAddress) {
+    return String(masterAddress || 'default').toLowerCase();
+  }
+
+  /**
+   * Quante aperture di questo wallet sono già impegnate ma non ancora riflesse
+   * nello snapshot account. Sola lettura: è l'input che `portfolio.canOpen()`
+   * somma a `account.positions.length`.
+   */
+  reservedOpenSlots(masterAddress) {
+    return this.openSlots.get(this._masterKey(masterAddress)) || 0;
+  }
+
+  /**
+   * Impegna uno slot del cap globale. SINCRONO e senza `await` dal lato del
+   * chiamante fra la verifica (`canOpen`) e questa chiamata: è ciò che rende la
+   * coppia atomica su un runtime a singolo thread. Ritorna il nuovo conteggio.
+   */
+  reserveOpenSlot(masterAddress) {
+    const key = this._masterKey(masterAddress);
+    const next = (this.openSlots.get(key) || 0) + 1;
+    this.openSlots.set(key, next);
+    return next;
+  }
+
+  /**
+   * Rilascia lo slot a fine apertura, riuscita o fallita. Mai sotto zero: un
+   * rilascio di troppo non deve regalare capacità oltre il cap.
+   */
+  releaseOpenSlot(masterAddress) {
+    const key = this._masterKey(masterAddress);
+    const next = Math.max(0, (this.openSlots.get(key) || 0) - 1);
+    this.openSlots.set(key, next);
+    return next;
   }
 
   // ---- Lock di apertura per (master, coin) — CRIT-03 ----
 
   _openKey(masterAddress, coin) {
-    return `${String(masterAddress || 'default').toLowerCase()}:${String(coin || '')}`;
+    return `${this._masterKey(masterAddress)}:${String(coin || '')}`;
   }
 
   /**

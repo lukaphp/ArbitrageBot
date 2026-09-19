@@ -198,10 +198,19 @@ export class Portfolio {
    * scaduto ma serie di perdite ancora in corso): la protezione non si allenta,
    * si sposta solo il punto in cui viene scritta.
    *
-   * @param {object} p { account, plannedNotional, botId, consecutiveLosses }
+   * `reservedSlots` sono le aperture dello stesso wallet già impegnate ma non
+   * ancora presenti in `account.positions` (lo snapshot è letto a inizio tick e
+   * non vede le aperture in volo degli altri bot). Contarle qui è ciò che rende
+   * `maxConcurrentPositions` un limite di WALLET e non di singolo mercato: senza,
+   * due bot su coin diverse leggono entrambi "2 su 3" e arrivano a 4. Resta un
+   * parametro del chiamante — chi non ha aperture in volo da dichiarare (il
+   * backtester, il gate advisory) passa 0 e la funzione resta pura e
+   * deterministica.
+   *
+   * @param {object} p { account, plannedNotional, botId, consecutiveLosses, reservedSlots }
    * @returns { ok, reason, cooldownUntil? }
    */
-  canOpen({ account, plannedNotional = 0, botId, consecutiveLosses = 0 }) {
+  canOpen({ account, plannedNotional = 0, botId, consecutiveLosses = 0, reservedSlots = 0 }) {
     const L = this.getLimits();
 
     const until = this.cooldownInfo(botId);
@@ -214,8 +223,13 @@ export class Portfolio {
     }
 
     const positions = account.positions || [];
-    if (positions.length >= L.maxConcurrentPositions) {
-      return { ok: false, reason: `Max posizioni concorrenti (${L.maxConcurrentPositions}) raggiunto` };
+    const pending = Math.max(0, reservedSlots);
+    if (positions.length + pending >= L.maxConcurrentPositions) {
+      // La ragione distingue i due addendi: "3 su 3" con una posizione ancora in
+      // volo non è lo stesso caso di "3 su 3" già a book, e in diagnosi la
+      // differenza conta.
+      const detail = pending > 0 ? ` — ${positions.length} aperte + ${pending} in apertura` : '';
+      return { ok: false, reason: `Max posizioni concorrenti (${L.maxConcurrentPositions}) raggiunto${detail}` };
     }
 
     const totalNotional = positions.reduce((s, p) => s + (p.positionValue || 0), 0) + plannedNotional;

@@ -670,7 +670,7 @@ class ArbitrageBotServer {
       const marketStatus = marketData.getStatus();
       let equityHistory = address ? db.listRiskEquityHistory(network, address, 2000) : [];
       const persistedDrawdown = address ? db.getRiskDrawdownState(network, address) : null;
-      if (account && Number.isFinite(Number(account.equity)) && address) {
+      if (account && Number.isFinite(Number(account.equity)) && address && !sourceErrors.includes('account')) {
         // Il campione è l'equity UNIFICATA (reale + simulata): il drawdown deve
         // misurare ciò che si muove davvero, e con la flotta tutta paper
         // l'equity reale è una linea piatta che descriverebbe "nessun rischio"
@@ -678,6 +678,13 @@ class ArbitrageBotServer {
         // cambio resta un GRADINO verso l'alto nel punto della transizione: è
         // una discontinuità di definizione, non un guadagno, e non può produrre
         // un falso drawdown (il picco sale, non scende).
+        //
+        // `sourceErrors.includes('account')` esclude il caso in cui la lettura
+        // REALE sia fallita (es. l'exchange risponde 502): `account` resta
+        // comunque non-null se il paper ha risposto, ma la sua equity è
+        // mancante, non zero. Sommarla come zero deflazionerebbe il totale e
+        // scriverebbe in `risk_equity_history` un calo mai avvenuto — che
+        // `mergeDrawdownState`, monotono per disegno, renderebbe permanente.
         db.insertRiskEquitySample(network, address, Math.floor(now / 1000), Number(account.equity), 10000);
         equityHistory = db.listRiskEquityHistory(network, address, 2000);
       }

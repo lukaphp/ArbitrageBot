@@ -152,6 +152,13 @@ class PerpsApp {
     this.perfMlCoin = null;
     this.dashboardEquityRange = 'all';
     this.perfEquityRange = 'all';
+    // Osservatore Jev (JEV-OBS-01). `null` = mai caricato, `[]` = caricato e
+    // vuoto: sono due stati diversi e il pannello li racconta in modo diverso.
+    this.jevEvaluations = null;
+    this.jevError = null;
+    this.jevInFlight = false;
+    this.jevTimer = null;
+    this._jevLastHtml = null;
     // Stato del wallet MetaMask (ex app.isConnected / app.walletAddress)
     this.walletAddress = null;
     this.isConnected = false;
@@ -348,6 +355,9 @@ class PerpsApp {
     await this.loadAgents();
     await this.refreshRiskSnapshot();
     await this.loadFills();
+    // Dopo `loadBots()`: così le righe portano subito il nome del bot invece
+    // dell'id corto.
+    await this.loadJevEvaluations();
     if (!this.accountTimer) {
       this.accountTimer = setInterval(() => {
         if (!document.getElementById('view-perps').classList.contains('hidden')) {
@@ -362,6 +372,17 @@ class PerpsApp {
       this.riskTimer = setInterval(() => {
         if (!document.getElementById('view-perps').classList.contains('hidden')) this.refreshRiskSnapshot();
       }, 15000);
+    }
+    if (!this.jevTimer) {
+      // 5s, ma solo con il pannello davvero a schermo: fuori dal tab SYSTEM
+      // nessuno guarda il log, e una rotta che legge dal DB non va interrogata
+      // ogni 5s per niente. Il rientro nel tab ricarica subito
+      // (`switchCockpitTab`), quindi non si vede mai un pannello fermo.
+      this.jevTimer = setInterval(() => {
+        if (document.getElementById('view-perps')?.classList.contains('hidden')) return;
+        if (this.cockpitTab !== 'system') return;
+        this.loadJevEvaluations();
+      }, 5000);
     }
     this.shown = true;
   }
@@ -658,6 +679,10 @@ class PerpsApp {
     // sezione. Nessun timer la richiama (ANA-01).
     if (nextTab === 'performance') this.loadPerformance();
     if (nextTab === 'risk') this.refreshRiskSnapshot();
+    // Il log dell'osservatore si aggiorna in polling solo mentre è a schermo:
+    // all'apertura del tab va riletto subito, altrimenti si mostrerebbe per
+    // qualche secondo ciò che era vero l'ultima volta che si è guardato.
+    if (nextTab === 'system') this.loadJevEvaluations();
   }
 
   async refreshRiskSnapshot() {
@@ -3077,6 +3102,381 @@ class PerpsApp {
         <td>${txLink}</td>
       </tr>`;
     }).join('');
+  }
+
+  // ==== Osservatore Jev (JEV-OBS-01) ====
+  //
+  // Pannello di SOLA LETTURA su `GET /api/perps/jev-evaluations`. Quando un bot
+  // produce un segnale vero (apertura/chiusura) il backend chiede un giudizio
+  // tipizzato a un modello esterno e lo registra; qui si mostra cosa ne pensava.
+  //
+  // ⚠️ Il vincolo di disegno che governa OGNI scelta di resa qui sotto: Jev non
+  // decide niente. Non blocca, non ritarda e non raccomanda un'operazione — i
+  // limiti operativi sono e restano `riskManager.js`/`portfolio.js`. Da questo
+  // discendono tre regole di presentazione che non vanno "migliorate":
+  //   • niente verde/rosso sui numeri e nessuna soglia evidenziata: un semaforo
+  //     si legge come un ordine operativo ("entra"/"non entrare"), e le domande
+  //     poste a Jev non sono nemmeno direttive (chiedono la coerenza col
+  //     contesto, non la convenienza dell'operazione);
+  //   • il pannello sta nel tab SYSTEM, non in RISK & ALERTS;
+  //   • ogni riga è al passato: racconta un segnale già eseguito, non uno da
+  //     valutare.
+  //
+  // Perché POLLING e non un aggancio a `perps:fill`/`perps:position`: la riga di
+  // audit viene scritta DOPO il segnale, in modo asincrono (fino al tetto di
+  // attesa di Jev, ~2,5s, più la scrittura su DB). Un refresh innescato dal fill
+  // arriverebbe quindi sistematicamente PRIMA che la riga esista: non
+  // anticiperebbe niente e mostrerebbe un istante in cui il segnale c'è e
+  // l'osservazione "manca", che è la lettura sbagliata. I 5s del timer la
+  // raccolgono comunque.
+
+  async loadJevEvaluations() {
+    if (this.jevInFlight) return;
+    this.jevInFlight = true;
+    try {
+      const data = await this.api('/api/perps/jev-evaluations?limit=50');
+      this.jevEvaluations = Array.isArray(data) ? data : [];
+      this.jevError = null;
+    } catch (e) {
+      // Un elenco NON LETTO non è un elenco vuoto: il primo dice "non lo so", il
+      // secondo dice "nessuna osservazione". Tenerli separati è tutto il punto di
+      // questo pannello, che esiste per raccontare uno stato incerto senza mentire.
+      this.jevError = e.message;
+    } finally {
+      this.jevInFlight = false;
+    }
+    this._renderJevEvaluations();
+  }
+
+  _renderJevEvaluations() {
+    const box = document.getElementById('jevLog');
+    if (!box) return;
+    const updated = document.getElementById('jevUpdated');
+    const setNote = (text) => { if (updated) updated.textContent = text; };
+    const now = new Date().toLocaleTimeString('it-IT', { hour12: false });
+    let html;
+    if (this.jevError != null) {
+      html = `<div class="jev-empty jev-empty-error">Elenco non disponibile: ${this._escapeHtml(this.jevError)}</div>`;
+      setNote('lettura fallita');
+    } else if (!Array.isArray(this.jevEvaluations)) {
+      html = '<div class="jev-empty">Caricamento…</div>';
+      setNote('—');
+    } else if (!this.jevEvaluations.length) {
+      html = this._jevEmptyHtml();
+      setNote(`nessuna osservazione · ${now}`);
+    } else {
+      html = this.jevEvaluations.map((row) => this._jevEntryHtml(row)).join('');
+      setNote(`${this.jevEvaluations.length} osservazioni · ${now}`);
+    }
+    // Riscrivere `innerHTML` a ogni tick azzererebbe lo scroll del log e
+    // richiuderebbe gli "Stato inviato a Jev" che l'utente ha aperto. Con un
+    // polling a 5s e un evento raro, il markup è quasi sempre identico: se non è
+    // cambiato niente non si tocca il DOM.
+    if (html === this._jevLastHtml) return;
+    this._jevLastHtml = html;
+    box.innerHTML = html;
+  }
+
+  /**
+   * Stato vuoto — la condizione normale oggi, e va detta per quello che è.
+   *
+   * Un elenco vuoto ha DUE cause che da qui non si distinguono: l'osservatore è
+   * spento (nessuna chiave API configurata: in quel caso nessun giudizio viene
+   * mai chiesto e nessuna riga viene scritta), oppure è acceso e nessun bot ha
+   * ancora prodotto un segnale vero. Il server la differenza la conosce
+   * (`jevStatus()` in `src/agents/jev.js`) ma non la espone su nessuna rotta:
+   * finché non lo fa, questo pannello dichiara entrambe le ipotesi invece di
+   * sceglierne una a caso. Scrivere "osservatore spento" sarebbe un'affermazione
+   * che nessuno ha verificato.
+   */
+  _jevEmptyHtml() {
+    return `<div class="jev-empty">
+      <strong>Nessuna osservazione Jev ancora registrata.</strong>
+      <span>Può voler dire due cose, e da qui non si distinguono: l'osservatore è spento (nessuna chiave API configurata) oppure è acceso e nessun bot ha ancora prodotto un segnale vero.</span>
+      <span>In entrambi i casi i bot lavorano esattamente come sempre: Jev non fa parte del percorso di trading.</span>
+    </div>`;
+  }
+
+  _jevEntryHtml(row) {
+    const ts = this._jevNumber(row?.ts);
+    const when = ts != null && ts > 0
+      ? new Date(ts).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+      : '—';
+    const failed = row?.error != null && String(row.error).trim() !== '';
+    const head = `<div class="jev-entry-head">
+        <span class="jev-time">${this._escapeHtml(when)}</span>
+        <span class="jev-coin">${this._escapeHtml(row?.coin || '—')}</span>
+        <span class="jev-action">${this._escapeHtml(this._jevActionLabel(row?.action))}</span>
+        <span class="jev-bot">${this._escapeHtml(this._jevBotLabel(row?.botId))}</span>
+        <span class="jev-model">${this._escapeHtml(row?.model || '—')}</span>
+      </div>`;
+    const body = `${failed ? this._jevFailedHtml(row) : ''}${this._jevAnswersHtml(row)}`;
+    return `<article class="jev-entry${failed ? ' jev-entry-failed' : ''}">${head}${body}${this._jevStateHtml(row)}${this._jevMetaHtml(row)}</article>`;
+  }
+
+  /**
+   * `error` non-null è un DATO, non un guasto della dashboard: l'osservatore ha
+   * provato e non ha risposto (timeout, HTTP, risposta illeggibile). Mostrarlo
+   * come una riga rotta nasconderebbe l'informazione più interessante che questa
+   * tabella possa dare — quanto spesso il giudizio esterno non arriva.
+   */
+  _jevFailedHtml(row) {
+    return `<div class="jev-failed">
+      <span class="jev-failed-tag">nessun giudizio</span>
+      <span class="jev-failed-reason">${this._escapeHtml(row.error)}</span>
+      <span class="jev-failed-note">L'osservatore ha provato e non ha risposto. Il segnale è stato eseguito secondo le regole del bot: Jev non fa parte del percorso di trading.</span>
+    </div>`;
+  }
+
+  /**
+   * Le tre domande hanno id fissi (`_jevPrompt` in `src/perps/bot.js`) e per
+   * ognuna c'è una resa dedicata. Due cautele deliberate:
+   *  - se la resa dedicata non sa decodificare la risposta (campo assente, tipo
+   *    diverso da quello atteso), si ripiega sul riassunto grezzo invece di
+   *    saltare il blocco: un giudizio chiesto e pagato non deve sparire dalla
+   *    dashboard perché la forma è cambiata;
+   *  - le domande che questa UI non conosce (versione futura del prompt) escono
+   *    comunque, con la loro chiave come etichetta.
+   */
+  _jevAnswersHtml(row) {
+    const answers = row?.answers;
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+      // Né risposte né (eventualmente) errore: la riga esiste ma l'audit non
+      // contiene un JSON di risposte leggibile. È diverso da "Jev non ha
+      // risposto" e va detto in modo diverso.
+      return row?.error != null && String(row.error).trim() !== ''
+        ? ''
+        : '<div class="jev-note">Nessuna risposta leggibile in questa riga di audit.</div>';
+    }
+    const questions = (row?.questions && typeof row.questions === 'object' && !Array.isArray(row.questions))
+      ? row.questions : {};
+    const known = ['coerenza_segnale', 'contesto_sfavorevole', 'fattore_dominante'];
+    const blocks = [];
+    const add = (id, renderer) => {
+      const answer = answers[id];
+      if (answer == null) return;
+      blocks.push(renderer.call(this, answer, questions[id]) || this._jevGenericAnswerHtml(id, answer));
+    };
+    add('coerenza_segnale', this._jevNoulHtml);
+    add('contesto_sfavorevole', this._jevScoreHtml);
+    add('fattore_dominante', this._jevChoiceHtml);
+    for (const [id, answer] of Object.entries(answers)) {
+      if (known.includes(id)) continue;
+      blocks.push(this._jevGenericAnswerHtml(id, answer));
+    }
+    if (!blocks.length) return '<div class="jev-note">Nessuna risposta leggibile in questa riga di audit.</div>';
+    return `<div class="jev-answers">${blocks.join('')}</div>`;
+  }
+
+  /**
+   * `coerenza_segnale` — probabilità calibrata (tipo `noul`), il numero
+   * principale. La barra è monocroma di proposito: vedi il vincolo in testa alla
+   * sezione. `noul` non porta una `confidence` perché la probabilità È il
+   * giudizio.
+   */
+  _jevNoulHtml(answer) {
+    const ratio = this._jevRatio(answer?.noul);
+    const pct = this._jevPct(answer?.noul);
+    if (pct == null) return '';
+    const bar = ratio == null ? ''
+      : `<span class="jev-bar"><span class="jev-bar-fill" style="width:${Math.round(ratio * 100)}%"></span></span>`;
+    return `<div class="jev-judgement">
+      <span class="jev-j-label">coerenza col contesto</span>
+      <span class="jev-j-value">${this._escapeHtml(pct)}</span>
+      ${bar}
+    </div>`;
+  }
+
+  /** `contesto_sfavorevole` — livello su una scala ordinata (tipo `score`). */
+  _jevScoreHtml(answer, question) {
+    const level = this._jevScoreLevel(answer, question);
+    if (!level) return '';
+    const value = level.ratio != null ? `${Math.round(level.ratio * 100)}%` : this.fmtNum(level.score, 2);
+    return `<div class="jev-judgement">
+      <span class="jev-j-label">contesto sfavorevole</span>
+      <span class="jev-j-value">${this._escapeHtml(value)}</span>
+      ${level.label ? `<span class="jev-j-level">${this._escapeHtml(level.label)}</span>` : ''}
+      ${this._jevConfidenceHtml(answer)}
+    </div>`;
+  }
+
+  /**
+   * Etichetta del livello per una risposta `score`.
+   *
+   * ⚠️ La forma esatta di `legend` non è verificabile da qui: nessuna risposta di
+   * tipo `score` esiste oggi in questo repo (l'osservatore è spento e le fixture
+   * dei test coprono solo `noul`). Quindi si prova a decodificarla, e se non
+   * torna NON si inventa un'etichetta: si ripiega sui `criteria` della domanda —
+   * che sono l'unica fonte certa, perché li scrive `_jevPrompt` in bot.js — e in
+   * ultima istanza si mostra il solo numero.
+   *
+   * Due convenzioni possibili per `score`, entrambe gestite: valore normalizzato
+   * in 0..1 (si mostra come percentuale) oppure indice del livello sulla lista
+   * dei criteri (> 1: si mostra il numero grezzo, mai una percentuale > 100%).
+   */
+  _jevScoreLevel(answer, question) {
+    const score = this._jevNumber(answer?.score);
+    if (score == null) return null;
+    const ratio = score >= 0 && score <= 1 ? score : null;
+    let label = null;
+
+    const legend = answer?.legend;
+    if (legend && typeof legend === 'object' && !Array.isArray(legend)) {
+      const levels = Object.entries(legend)
+        .map(([key, text]) => [Number(key), text])
+        .filter(([key, text]) => Number.isFinite(key) && typeof text === 'string' && text.trim())
+        .sort((a, b) => a[0] - b[0]);
+      if (levels.length) {
+        let best = levels[0];
+        for (const entry of levels) { if (entry[0] <= score + 1e-9) best = entry; }
+        label = best[1];
+      }
+    }
+
+    if (label == null && Array.isArray(question?.criteria) && question.criteria.length) {
+      const n = question.criteria.length;
+      const idx = ratio != null ? Math.round(ratio * (n - 1)) : Math.round(score);
+      const pick = question.criteria[Math.min(n - 1, Math.max(0, idx))];
+      if (typeof pick === 'string' && pick.trim()) label = pick;
+    }
+    return { score, ratio, label };
+  }
+
+  /** `fattore_dominante` — categoria (tipo `choice`). */
+  _jevChoiceHtml(answer, question) {
+    const choice = answer?.choice;
+    if (typeof choice !== 'string' || !choice.trim()) return '';
+    // La descrizione dell'opzione la conosce la domanda (`criteria` è una mappa
+    // opzione → descrizione): se c'è finisce nel tooltip, così l'etichetta resta
+    // corta senza perdere il significato.
+    const criteria = question?.criteria;
+    const desc = (criteria && typeof criteria === 'object' && !Array.isArray(criteria)) ? criteria[choice] : null;
+    const title = typeof desc === 'string' && desc.trim() ? ` title="${this._escapeHtml(desc)}"` : '';
+    return `<div class="jev-judgement">
+      <span class="jev-j-label">fattore dominante</span>
+      <span class="jev-choice"${title}>${this._escapeHtml(this._jevHumanize(choice))}</span>
+      ${this._jevConfidenceHtml(answer)}
+    </div>`;
+  }
+
+  /**
+   * Confidenza, solo se dichiarata. Assente ⇒ si tace: un "confidenza —" farebbe
+   * sembrare mancante un dato che questa risposta non promette (stesso criterio
+   * di `_proposalConfidenceHtml`).
+   */
+  _jevConfidenceHtml(answer) {
+    const pct = this._jevPct(answer?.confidence);
+    return pct == null ? '' : `<span class="jev-j-conf">confidenza ${this._escapeHtml(pct)}</span>`;
+  }
+
+  /**
+   * Risposta che questa UI non sa rendere in modo specifico: riassunto leggibile
+   * di tutti i campi, `type` escluso (è già implicito nella forma). Mai nascosta.
+   */
+  _jevGenericAnswerHtml(id, answer) {
+    let summary;
+    if (answer && typeof answer === 'object' && !Array.isArray(answer)) {
+      summary = Object.entries(answer)
+        .filter(([key]) => key !== 'type')
+        .map(([key, value]) => `${key}: ${value !== null && typeof value === 'object' ? JSON.stringify(value) : value}`)
+        .join(' · ');
+    } else {
+      summary = String(answer ?? '');
+    }
+    return `<div class="jev-judgement jev-judgement-raw">
+      <span class="jev-j-label">${this._escapeHtml(this._jevHumanize(id))}</span>
+      <span class="jev-j-value">${this._escapeHtml(summary || '—')}</span>
+    </div>`;
+  }
+
+  /**
+   * Lo stato giudicato, in un blocco richiudibile perché è lungo (fino a 4000
+   * caratteri) e serve solo a chi vuole capire *su cosa* Jev si è espresso.
+   *
+   * Escaping non negoziabile: lo compone `bot.js` e la prima riga contiene il
+   * NOME DEL BOT, cioè testo scritto dall'utente (o da un agente esterno) e
+   * salvato in DB. È la stessa XSS stored della card bot (issue #9), che arriva
+   * qui di rimbalzo da una feature backend.
+   */
+  _jevStateHtml(row) {
+    const state = row?.state;
+    if (typeof state !== 'string' || !state.trim()) return '';
+    return `<details class="jev-state"><summary>Stato inviato a Jev</summary><pre>${this._escapeHtml(state)}</pre></details>`;
+  }
+
+  _jevMetaHtml(row) {
+    const bits = [];
+    const latency = this._jevNumber(row?.latencyMs);
+    if (latency != null) bits.push(`${Math.round(latency)} ms`);
+    const tokensIn = this._jevNumber(row?.tokensIn);
+    const tokensOut = this._jevNumber(row?.tokensOut);
+    if (tokensIn != null || tokensOut != null) {
+      bits.push(`${tokensIn ?? '—'}→${tokensOut ?? '—'} token`);
+    }
+    const cost = this._jevCost(row?.costUsd);
+    if (cost) bits.push(cost);
+    if (!bits.length) return '';
+    return `<div class="jev-meta">${this._escapeHtml(bits.join(' · '))}</div>`;
+  }
+
+  /**
+   * Costo di una singola osservazione. Non usa `_fmtCost`, che tronca a 4
+   * decimali: un'osservazione costa nell'ordine di $0,000015 e uscirebbe come
+   * "$0.0000", cioè un costo reale mostrato come zero. `_fmtCost` resta com'è
+   * per le proposte dell'analyst, dove gli importi sono di un altro ordine.
+   */
+  _jevCost(n) {
+    const v = this._jevNumber(n);
+    if (v == null) return null;
+    if (v === 0) return '$0';
+    return v < 0.01 ? `$${v.toFixed(6)}` : `$${v.toFixed(2)}`;
+  }
+
+  /**
+   * Numero finito, oppure `null` se il campo non c'è.
+   *
+   * ⚠️ Non è pignoleria: `Number(null)` e `Number('')` valgono **0** e
+   * `Number(true)` vale **1**. Con un `Number()` nudo uno `score` assente
+   * diventerebbe uno score di 0, cioè l'etichetta "contesto favorevole" — un
+   * giudizio che nessuno ha espresso, stampato con la stessa faccia di uno vero.
+   * Un dato ignoto non è un dato pari a zero.
+   */
+  _jevNumber(value) {
+    if (value == null || value === '' || typeof value === 'boolean') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  _jevRatio(value) {
+    const n = this._jevNumber(value);
+    if (n == null) return null;
+    return Math.min(1, Math.max(0, n));
+  }
+
+  _jevPct(value) {
+    const n = this._jevNumber(value);
+    if (n == null) return null;
+    return `${Math.round(n * 100)}%`;
+  }
+
+  /** Chiave tecnica → etichetta leggibile, senza mappa esaustiva: una chiave che
+   *  questa UI non conosce deve comparire col suo nome tecnico, mai sparire. */
+  _jevHumanize(key) {
+    return String(key ?? '').replace(/_/g, ' ');
+  }
+
+  _jevActionLabel(action) {
+    if (typeof action !== 'string' || !action.trim()) return '—';
+    const labels = { open_long: 'apertura long', open_short: 'apertura short', close: 'chiusura' };
+    return labels[action] || this._jevHumanize(action);
+  }
+
+  /** Il nome del bot se è ancora in elenco, altrimenti l'id corto: stessa forma
+   *  dello storico fill, così la stessa operazione si riconosce nei due pannelli. */
+  _jevBotLabel(botId) {
+    if (!botId) return '—';
+    const bot = (this.bots || []).find((b) => b.id === botId);
+    return bot?.name || `Bot #${String(botId).slice(0, 4)}`;
   }
 
   // ---- Manual order ----

@@ -689,3 +689,104 @@
   flex-shrink: 0;
 }
 .crash-alert-dismiss:hover { opacity: 1; background: rgba(229,62,62,0.1); }
+
+/* ===== Osservatore Jev (JEV-OBS-01) — log di sola osservazione =====
+ * Palette deliberatamente NEUTRA (grigio/indaco), senza verde né rosso: un
+ * semaforo su questi numeri li farebbe leggere come una raccomandazione
+ * operativa, che è esattamente ciò che il disegno di Jev vieta. L'unica
+ * variante cromatica è l'ambra delle righe senza giudizio, e segnala un fatto
+ * tecnico ("l'osservatore non ha risposto"), non un rischio di mercato. */
+.jev-updated { font-size: 12px; color: #718096; font-family: ui-monospace, monospace; }
+.jev-intro { font-size: 13px; color: #4a5568; line-height: 1.5; margin: 0 0 12px; }
+
+.jev-log {
+  max-height: 420px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.03);
+}
+
+.jev-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: #718096;
+  line-height: 1.5;
+}
+.jev-empty strong { color: #4a5568; font-size: 14px; }
+.jev-empty-error { color: #975a16; }
+
+.jev-entry {
+  border: 1px solid var(--border, #e2e8f0);
+  border-left: 3px solid #6366f1;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--card-bg, #fff);
+}
+.jev-entry-failed { border-left-color: #d69e2e; }
+
+.jev-entry-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+.jev-time { color: #718096; }
+.jev-coin { font-weight: 700; color: #2d3748; }
+.jev-action { color: #4f46e5; background: rgba(99, 102, 241, 0.12); padding: 1px 7px; border-radius: 6px; }
+.jev-bot { color: #4a5568; }
+.jev-model { margin-left: auto; color: #a0aec0; }
+
+.jev-answers { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; }
+.jev-judgement { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+.jev-j-label { color: #718096; min-width: 150px; }
+.jev-j-value { font-family: ui-monospace, monospace; font-weight: 700; color: #2d3748; }
+.jev-j-level { color: #4a5568; }
+.jev-j-conf { color: #a0aec0; font-size: 11px; }
+.jev-judgement-raw .jev-j-value { font-weight: 400; word-break: break-word; }
+
+.jev-bar { flex: 1; min-width: 60px; max-width: 160px; height: 5px; border-radius: 3px; background: rgba(99, 102, 241, 0.15); overflow: hidden; }
+.jev-bar-fill { display: block; height: 100%; background: #6366f1; }
+
+.jev-choice {
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  color: #4f46e5;
+  background: rgba(99, 102, 241, 0.1);
+  padding: 1px 7px;
+  border-radius: 6px;
+}
+
+.jev-failed { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin-top: 8px; font-size: 12px; }
+.jev-failed-tag { font-weight: 700; color: #975a16; background: rgba(214, 158, 46, 0.14); padding: 1px 7px; border-radius: 6px; }
+.jev-failed-reason { font-family: ui-monospace, monospace; color: #4a5568; }
+.jev-failed-note { flex-basis: 100%; color: #a0aec0; font-size: 11px; }
+.jev-note { margin-top: 8px; font-size: 12px; color: #a0aec0; }
+
+.jev-state { margin-top: 8px; font-size: 12px; }
+.jev-state summary { cursor: pointer; color: #718096; }
+.jev-state pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #4a5568;
+  background: rgba(15, 23, 42, 0.04);
+  border-radius: 6px;
+}
+
+.jev-meta { margin-top: 6px; font-size: 11px; color: #a0aec0; font-family: ui-monospace, monospace; }

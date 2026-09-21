@@ -299,6 +299,22 @@
                         </div>
                     </div>
                 </section>
+
+                <!-- Osservatore Jev (JEV-OBS-01) — SOLA OSSERVAZIONE.
+                     Sta nel tab SYSTEM e non in RISK & ALERTS di proposito: il tab
+                     rischio raccoglie ciò che può fermare o bloccare un'operazione, e
+                     Jev non ferma e non blocca niente. Metterlo lì lo farebbe leggere
+                     come un guardrail, che è esattamente il contrario del suo disegno. -->
+                <section class="card jev-card" id="jevCard">
+                    <div class="card-header">
+                        <h2>🔭 Osservatore Jev</h2>
+                        <span class="jev-updated" id="jevUpdated">—</span>
+                    </div>
+                    <div class="card-content">
+                        <p class="jev-intro">A ogni <strong>segnale vero</strong> di un bot (apertura o chiusura) viene chiesto un giudizio tipizzato a un modello esterno indipendente, e lo si registra qui. È <strong>solo osservazione</strong>: non entra nelle decisioni di trading, non blocca e non raccomanda nulla — i limiti operativi restano quelli del gate di rischio.</p>
+                        <div class="jev-log" id="jevLog"></div>
+                    </div>
+                </section>
                 </div><!-- /cockpit-panel-system -->
 
                 <div id="cockpit-panel-execution" class="cockpit-panel" role="tabpanel" aria-labelledby="cockpit-tab-execution" hidden>

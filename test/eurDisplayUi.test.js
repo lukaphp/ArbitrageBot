@@ -254,10 +254,12 @@ test('PnL per posizione: EUR presente a tasso fresco, assente altrimenti', async
 
 test('nessun timer nuovo: il ricontrollo del tasso è una verifica di TTL, non un intervallo', () => {
   const src = fs.readFileSync(PERPS_JS, 'utf8');
-  // Gli intervalli esistenti sono quelli di prima: account, rischio, monitor bot,
-  // grafico posizione. CUR-01 non ne aggiunge nessuno.
+  // Censimento degli intervalli del file: account, rischio, monitor bot, grafico
+  // posizione e — da JEV-OBS-01 — il log dell'osservatore Jev. CUR-01 non ne
+  // aggiunge nessuno, ed è questo che il test difende: il numero è un censimento,
+  // non un tetto. Chi ne aggiunge uno con una ragione lo aggiorna e la scrive qui.
   const intervals = src.match(/setInterval\(/g) || [];
-  assert.equal(intervals.length, 4, `attesi 4 setInterval, trovati ${intervals.length}`);
+  assert.equal(intervals.length, 5, `attesi 5 setInterval, trovati ${intervals.length}`);
   assert.match(src, /_maybeRefreshFxRate\(\)/);
   assert.equal(/setInterval\([^)]*loadFxRate/.test(src), false, 'il tasso non va in polling dedicato');
 });

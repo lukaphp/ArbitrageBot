@@ -353,7 +353,10 @@ test('il pulsante Aggiorna rifà la chiamata; niente timer la richiama da sola',
 
   const src = fs.readFileSync(PERPS_JS, 'utf8');
   assert.equal(/setInterval\([^)]*loadPerformance/.test(src), false, 'nessun intervallo sulla performance');
-  assert.equal((src.match(/setInterval\(/g) || []).length, 4, 'ANA-01 non aggiunge intervalli');
+  // Censimento, non tetto: i cinque sono account, rischio, monitor bot, grafico
+  // posizione e il log dell'osservatore Jev (JEV-OBS-01). Quello che ANA-01
+  // difende è la riga sopra — la Performance non va in polling.
+  assert.equal((src.match(/setInterval\(/g) || []).length, 5, 'ANA-01 non aggiunge intervalli');
 });
 
 test('index.html: tab e pannello Performance con tutti gli id che perps.js cerca', () => {

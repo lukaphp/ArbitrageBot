@@ -29,7 +29,7 @@ import { ADVISOR_SYSTEM_PROMPT, stateHeader } from './prompts.js';
 import { buildApiMessages, normalizeAlternation } from './session.js';
 import {
   priceOf, simulateRun, moveCacheBreakpoint, summarizeUsage, accumulateUsage, emptyUsage,
-  TOOL_RESULT_CHAR_CAP, TOOL_RESULT_TOKENS
+  TOOL_RESULT_CHAR_CAP, TOOL_RESULT_TOKENS, monthKey, monthStart, nextMonthStart
 } from '../usage.js';
 import riskAgent from '../riskAgent.js';
 import db from '../../db/database.js';
@@ -40,21 +40,10 @@ const MAX_TOKENS_PER_TURN = 1500;   // risposta in prosa, non un report
 const MAX_MESSAGE_CHARS = 4000;     // un messaggio umano, non un incollaggio di log
 const BUDGET_SETTING = 'advisor_monthly_budget_usd';
 
-/** Chiave del contatore cumulativo di spesa del mese (YYYY-MM in UTC). */
-function monthKey(now = Date.now()) {
-  const d = new Date(now);
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-}
-
-function monthStart(now = Date.now()) {
-  const d = new Date(now);
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0);
-}
-
-function nextMonthStart(now = Date.now()) {
-  const d = new Date(now);
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1, 0, 0, 0, 0);
-}
+// I confini del mese di budget (`monthKey`/`monthStart`/`nextMonthStart`) vivono
+// in `../usage.js`: da JEV-OBS-01 in poi non è più l'unico budget mensile del
+// sistema, e due definizioni di "questo mese" che divergono sono un budget che
+// non frena. Nessun cambio di comportamento: sono le stesse funzioni, spostate.
 
 /** Titolo della conversazione dalla prima domanda: fatto, non generato. */
 function titleFrom(text) {

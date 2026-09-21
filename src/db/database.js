@@ -204,6 +204,38 @@ export class PerpsDatabase {
         cost_usd   REAL
       );
 
+      -- JEV-OBS-01 — Giudizi dell'osservatore asincrono TypeSafe Jev.
+      --
+      -- TABELLA PROPRIA, non righe in "audit". La tabella audit è il registro di
+      -- ciò che gli agenti hanno PROPOSTO, DECISO o ESEGUITO: ogni sua riga
+      -- corrisponde a qualcosa che ha avuto (o poteva avere) un effetto sul conto.
+      -- Jev per progetto non ha nessun effetto — è un osservatore che non può
+      -- bloccare né ritardare un ordine — e mescolarlo lì renderebbe più difficile
+      -- rispondere alla domanda per cui audit esiste ("chi ha toccato i miei
+      -- soldi?"). In più servono colonne che audit non ha e che qui sono il punto:
+      -- latency_ms ed error (un osservatore MUTO è il caso interessante, e dentro
+      -- detail_json non sarebbe interrogabile), e i token/costo per il budget.
+      --
+      -- error NULL = risposta ricevuta; answers_json NULL con error valorizzato =
+      -- valutazione tentata e non risposta. Le chiamate MAI PARTITE (chiave
+      -- assente, budget esaurito) non finiscono qui: non sono valutazioni.
+      CREATE TABLE IF NOT EXISTS jev_evaluations (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id         TEXT,
+        coin           TEXT,
+        ts             INTEGER NOT NULL,
+        action         TEXT,
+        model          TEXT,
+        state          TEXT,
+        questions_json TEXT,
+        answers_json   TEXT,
+        latency_ms     INTEGER,
+        tokens_in      INTEGER,
+        tokens_out     INTEGER,
+        cost_usd       REAL,
+        error          TEXT
+      );
+
       CREATE INDEX IF NOT EXISTS idx_positions_bot ON positions(bot_id);
       CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id);
       CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
@@ -212,6 +244,8 @@ export class PerpsDatabase {
       CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id);
       CREATE INDEX IF NOT EXISTS idx_chat_messages_ts ON chat_messages(ts);
       CREATE INDEX IF NOT EXISTS idx_chat_sessions_last ON chat_sessions(last_at);
+      CREATE INDEX IF NOT EXISTS idx_jev_eval_ts ON jev_evaluations(ts);
+      CREATE INDEX IF NOT EXISTS idx_jev_eval_bot ON jev_evaluations(bot_id, ts);
     `);
     this._migrate();
   }
@@ -1325,6 +1359,72 @@ export class PerpsDatabase {
        FROM chat_messages WHERE ts >= ? AND cost_usd IS NOT NULL`
     ).get(Math.floor(Number(sinceTs) || 0));
     return { spentUsd: row.total || 0, turns: row.turns || 0 };
+  }
+
+  // ---- Valutazioni dell'osservatore Jev (JEV-OBS-01) ----
+
+  /**
+   * Registra UNA valutazione (riuscita o fallita). Ritorna l'id della riga.
+   *
+   * `ts` è un parametro e non `Date.now()` interno: chi chiama misura l'istante
+   * della DECISIONE del bot, non quello della scrittura, che arriva fino a
+   * qualche secondo dopo — e su una tabella che serve a ricostruire "cosa
+   * pensava l'osservatore quando ho aperto" i due istanti non sono la stessa cosa.
+   */
+  insertJevEvaluation({
+    botId = null, coin = null, action = null, model = null, state = null,
+    questions = null, answers = null, latencyMs = null, tokensIn = null,
+    tokensOut = null, costUsd = null, error = null, ts = Date.now()
+  } = {}) {
+    this.ensure();
+    const info = this.db.prepare(`
+      INSERT INTO jev_evaluations
+        (bot_id, coin, ts, action, model, state, questions_json, answers_json,
+         latency_ms, tokens_in, tokens_out, cost_usd, error)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      botId, coin, Math.floor(Number(ts) || Date.now()), action, model, state,
+      questions ? JSON.stringify(questions) : null,
+      answers ? JSON.stringify(answers) : null,
+      latencyMs == null ? null : Math.round(latencyMs),
+      tokensIn ?? null, tokensOut ?? null, costUsd ?? null, error
+    );
+    return info.lastInsertRowid;
+  }
+
+  /**
+   * Ultime valutazioni, più recenti prima. Il tie-break su `id` non è cosmetico:
+   * due bot che segnalano nello stesso millisecondo darebbero un ordine non
+   * specificato, e una lista che cambia forma tra due refresh della dashboard è
+   * indistinguibile da un dato che cambia (stessa trappola già vista su
+   * `ml_history`).
+   */
+  listJevEvaluations({ limit = 100, botId = null, coin = null } = {}) {
+    this.ensure();
+    const where = [];
+    const args = [];
+    if (botId) { where.push('bot_id = ?'); args.push(botId); }
+    if (coin) { where.push('coin = ?'); args.push(coin); }
+    const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    args.push(Math.max(1, Math.min(500, parseInt(limit) || 100)));
+    return this.db.prepare(
+      `SELECT * FROM jev_evaluations ${clause} ORDER BY ts DESC, id DESC LIMIT ?`
+    ).all(...args);
+  }
+
+  /**
+   * Speso con Jev da un istante in poi. Controllo di coerenza del contatore
+   * cumulativo in `settings`: le due fonti possono divergere se una scrittura in
+   * questa tabella fallisce (la spesa è comunque avvenuta), ed è per questo che
+   * il budget legge il MASSIMO tra le due — mai il minimo.
+   */
+  getJevSpend(sinceTs) {
+    this.ensure();
+    const row = this.db.prepare(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS total, COUNT(*) AS calls
+       FROM jev_evaluations WHERE ts >= ? AND cost_usd IS NOT NULL`
+    ).get(Math.floor(Number(sinceTs) || 0));
+    return { spentUsd: row.total || 0, calls: row.calls || 0 };
   }
 
   // ---- PnL giornaliero persistito (per-bot, per-giorno) ----

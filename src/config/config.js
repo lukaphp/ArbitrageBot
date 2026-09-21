@@ -348,6 +348,37 @@ export const HYPERLIQUID_CONFIG = {
           in: parseFloat(process.env.PRICE_SONNET_5_IN) || 2,
           out: parseFloat(process.env.PRICE_SONNET_5_OUT) || 10
         }
+      },
+
+      // JEV-OBS-01 — TypeSafe Jev, tariffa di FAMIGLIA (per pattern sul nome),
+      // non una voce di `models`.
+      //
+      // Perché qui e non lì. `pricing.models` ha un significato preciso, fissato
+      // da LLM-PRICE-01: è l'elenco dei **modelli LLM che questo progetto intende
+      // poter usare**, e `pricingModels.test.js` lo confronta con una specifica
+      // scritta a mano per intercettare gli ID aggiunti o ritirati di nascosto.
+      // Jev non è un fornitore LLM e non può essere costruito da `getProvider`:
+      // metterlo in `models` lo farebbe classificare come un modello DeepSeek dal
+      // guardiano di Joshua e renderebbe ambigua proprio la tabella che serve a
+      // togliere ambiguità. La risoluzione per pattern è lo stesso meccanismo dei
+      // tier opus/haiku/sonnet qui sopra, quindi la MATEMATICA del costo resta
+      // una sola (`agents/usage.js`), come deve essere.
+      //
+      // Copre sia il nome chiesto (`jev-latest`) sia quello risolto che l'API
+      // dichiara nella risposta (`jev-1.13.0` sulle chiamate reali osservate):
+      // senza, il gate `hasPricing` passerebbe in preventivo e il consuntivo
+      // varrebbe 0.
+      //
+      // ⚠️ NUMERI NON VERIFICATI SU UN LISTINO UFFICIALE — a differenza di ogni
+      // altra tariffa di questo blocco (riverificate il 2026-08-12), qui una fonte
+      // non ce l'ho: il CONTRATTO dell'API è stato validato con chiamate reali, il
+      // PREZZO no. Sono deliberatamente alti, per la stessa regola già applicata
+      // al tier Anthropic: su un numero incerto che alimenta un budget a soglia
+      // dura, sovrastimare fa frenare presto (e si nota), sottostimare fa non
+      // frenare mai. Da sostituire col valore puntuale alla prima fattura reale.
+      jev: {
+        in: parseFloat(process.env.PRICE_JEV_IN) || 10,
+        out: parseFloat(process.env.PRICE_JEV_OUT) || 30
       }
     },
 
@@ -365,6 +396,36 @@ export const HYPERLIQUID_CONFIG = {
         baseURL: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
         apiKeyEnv: 'OPENROUTER_API_KEY'
       }
+    },
+    // JEV-OBS-01 — TypeSafe Jev, osservatore asincrono dei segnali dei bot.
+    //
+    // NON è un fornitore LLM e non sta in `providers`: non produce conversazione
+    // né tool-use, prende uno stato testuale + domande tipizzate e restituisce
+    // giudizi con probabilità calibrate. Ha però la stessa proprietà che conta
+    // qui — si paga a token — e quindi passa dalla stessa contabilità
+    // (`agents/usage.js`) e dallo stesso gate di listino di LLM-01: un canale di
+    // spesa senza tariffa è un budget che non frena mai.
+    //
+    // ⚠️ NESSUNA CHIAVE È OBBLIGATORIA. Senza `JEV_API_KEY` l'osservatore è
+    // semplicemente non disponibile: nessuna chiamata parte, i bot si comportano
+    // esattamente come oggi, e il motivo viene detto una volta sola (stesso
+    // trattamento di DEEPSEEK_API_KEY/OPENROUTER_API_KEY in LLM-01).
+    jev: {
+      endpoint: process.env.JEV_ENDPOINT || 'https://api.typesafe.ai/v1/systemone',
+      apiKeyEnv: 'JEV_API_KEY',
+      model: process.env.JEV_MODEL || 'jev-latest',
+      // Tetto di attesa della singola chiamata. 2,5s: l'esito non è mai atteso da
+      // nessuno sul percorso di trading, quindi il tetto non serve a proteggere
+      // una latenza — serve a non lasciare socket e promise appese all'infinito
+      // su un endpoint che non risponde. Sotto i 2s si butterebbero via risposte
+      // valide e lente, sopra i 3s si accumulerebbero richieste in volo sui bot
+      // più attivi senza che nessuno ne tragga vantaggio.
+      timeoutMs: parseInt(process.env.JEV_TIMEOUT_MS) || 2500,
+      // Budget mensile a soglia dura, stesso meccanismo di ADV-03. Il valore
+      // effettivo può essere sovrascritto dalla riga `jev_monthly_budget_usd` in
+      // `settings` (nessuna rotta web la scrive: si cambia deliberatamente, fuori
+      // banda, come il budget del consulente).
+      monthlyBudgetUsd: parseFloat(process.env.JEV_MONTHLY_BUDGET_USD) || 3
     },
     // Fornitore usato dal consulente conversazionale: 'anthropic' (default),
     // 'deepseek' o 'openrouter'. Cambiare questo NON cambia il modello di

@@ -23,6 +23,7 @@ import notifier from './notifier.js';
 import predictor from './predictor.js';
 import * as ind from './indicators.js';
 import metrics from './metrics.js';
+import jev from '../agents/jev.js';
 import db from '../db/database.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
@@ -224,11 +225,22 @@ export class PerpsBot {
       const decision = strategyEngine.evaluate(this.config, snapshot, state);
       this.lastEval = { ...decision, price: snapshot.price, ts: Date.now() };
 
+      // Fotografia della posizione PRIMA di agire: dopo `_manageOpen` una
+      // chiusura ha già azzerato `this.position`, e l'osservatore deve poter
+      // raccontare da dove si veniva.
+      const posBefore = this.position
+        ? { side: this.position.side, size: this.position.size, entryPx: this.position.entryPx, unrealized: this.position.lastUnrealized }
+        : null;
+
       if (this.position) {
         await this._manageOpen(snapshot, account, decision);
       } else if (decision.action === 'open_long' || decision.action === 'open_short') {
         await this._openPosition(decision.action === 'open_long' ? 'long' : 'short', snapshot, account);
       }
+
+      // JEV-OBS-01 — osservatore asincrono. DOPO il blocco di esecuzione e
+      // SENZA `await`: vedi `_observeWithJev` per il perché di entrambe le cose.
+      if (decision.action !== 'hold') this._observeWithJev(decision, snapshot, account, posBefore);
 
       this.lastError = null;
     } catch (error) {
@@ -241,6 +253,145 @@ export class PerpsBot {
       this.busy = false;
       this._emit();
     }
+  }
+
+  /**
+   * JEV-OBS-01 — chiede a TypeSafe Jev un giudizio sul segnale appena eseguito.
+   *
+   * TRE DECISIONI DI PROGETTO, tutte e tre vincolanti.
+   *
+   * **1. Solo sui segnali veri, mai a ogni tick.** Il chiamante filtra `hold`,
+   * che è lo stato della quasi totalità dei tick: un bot con loop da pochi
+   * secondi produrrebbe altrimenti migliaia di chiamate al giorno per non dire
+   * niente. `open_long`/`open_short`/`close` sono eventi rari, ed è lì che un
+   * giudizio ha un contenuto.
+   *
+   * **2. Dopo l'esecuzione, non prima.** Non è una sfumatura: è la differenza tra
+   * un osservatore e un guardrail. Chiamato qui, l'esito di Jev non può
+   * materialmente arrivare prima che l'ordine sia già partito — nemmeno il primo
+   * byte della richiesta compete con la firma dell'ordine sull'event loop — e in
+   * più lo stato può raccontare com'è ANDATA (posizione aperta? bloccata da un
+   * limite di rischio? chiusa?), che è l'informazione che serve davvero a chi
+   * rilegge l'audit. Il rovescio, dichiarato: un tick che esplode dentro
+   * `_openPosition` non produce osservazione, perché l'eccezione porta al catch di
+   * `_runTick`. È accettato — quel caso è già loggato, contato in `tick_errors_total`
+   * e visibile in `lastError`, e anticipare la chiamata per coprirlo
+   * significherebbe rimettere Jev davanti all'ordine.
+   *
+   * **3. Nessun `await`, e nessuna promise scoperta.** L'esito interessa solo alla
+   * riga di audit che `askJev` scrive da sé. `askJev` non lancia mai e non rigetta
+   * mai (per contratto, verificato in `jevObserver.test.js`), ma qui c'è comunque
+   * un `.catch()` e un `try` sincrono attorno alla composizione: nel server un
+   * `unhandledRejection` ARRESTA il processo, cioè il supervisore spegnerebbe il
+   * sistema che deve sorvegliare. Una rete di sicurezza che oggi non serve, e che
+   * serve il giorno in cui qualcuno cambia `askJev`.
+   */
+  _observeWithJev(decision, snapshot, account, posBefore) {
+    try {
+      const { state, questions } = this._jevPrompt(decision, snapshot, account, posBefore);
+      const p = jev.askJev({ state, questions, botId: this.id, coin: this.coin, action: decision.action });
+      // `askJev` può essere sostituita (test, futuri refactor): se non tornasse
+      // una promise, un `.catch` su undefined sarebbe l'eccezione che stiamo
+      // cercando di evitare.
+      if (p && typeof p.catch === 'function') {
+        p.catch(err => logger.warn(`Bot ${this.name}: osservazione Jev fallita (nessun effetto sul trading)`, err?.message || err));
+      }
+    } catch (error) {
+      logger.warn(`Bot ${this.name}: impossibile comporre l'osservazione Jev (nessun effetto sul trading)`, error?.message || error);
+    }
+  }
+
+  /**
+   * Compone lo STATO testuale e le DOMANDE per Jev.
+   *
+   * Sulle domande, che sono una scelta di progetto e non un dettaglio: sono tre,
+   * una per tipo, e **nessuna è direttiva**. Non si chiede «devo entrare?» né
+   * «conviene?» — si chiede quanto il segnale sia coerente col contesto
+   * (`noul`, probabilità calibrata: il numero che va in dashboard), quanto sia
+   * sfavorevole il contesto (`score`, scala ordinata: confrontabile nel tempo) e
+   * quale sia il fattore dominante (`choice`: raggruppabile). Una domanda
+   * direttiva produrrebbe una risposta che SEMBRA un ordine operativo, e
+   * inviterebbe qualcuno, fra sei mesi, a collegarla al percorso di trading —
+   * cioè esattamente ciò che questo disegno vieta.
+   *
+   * Tre domande e non una perché l'evento è raro (solo i segnali veri) e il costo
+   * marginale di output è minimo, mentre una sola probabilità senza il "perché"
+   * sarebbe un numero che nessuno saprebbe usare.
+   */
+  _jevPrompt(decision, snapshot, account, posBefore) {
+    const candles = snapshot.candles || [];
+    const price = snapshot.price;
+    const closeAt = (n) => {
+      const c = candles[candles.length - 1 - n];
+      return c ? parseFloat(c.c) : null;
+    };
+    const variazione = (n) => {
+      const past = closeAt(n);
+      if (!past || !price) return 'n/d';
+      return `${(((price - past) / past) * 100).toFixed(2)}%`;
+    };
+
+    const rsi = ind.rsi(candles, 14);
+    const atrVal = ind.atr(candles, this.config.atrPeriod || 14);
+    const equity = account?.equity ?? account?.accountValue ?? null;
+
+    // L'ESITO, letto dallo stato reale dopo l'esecuzione. `lastEval` può essere
+    // stato riscritto da `_openPosition` con il motivo del blocco: è proprio
+    // quella la riga più interessante quando un segnale non diventa un ordine.
+    let esito;
+    if (decision.action === 'close') {
+      esito = this.position
+        ? `chiusura richiesta ma la posizione risulta ancora aperta (${this.position.side} ${this.position.size})`
+        : 'posizione chiusa';
+    } else if (this.position) {
+      esito = `posizione ${this.position.side} ${this.position.size} ${this.coin} aperta a ${this.position.entryPx} (TP ${this.position.tpPx ?? '—'} · SL ${this.position.slPx ?? '—'})`;
+    } else {
+      esito = `nessuna posizione aperta — ${this.lastEval?.reason || 'motivo non registrato'}`;
+    }
+
+    const righe = [
+      `Bot "${this.name}" sul mercato ${this.coin} (rete ${this.network}, esecuzione ${this.paper ? 'simulata/paper' : 'reale'}).`,
+      `Strategia: leva ${this.config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage}x, direzione consentita ${this.config.direction || 'both'}, combinazione regole ${this.config.logic || 'any'}.`,
+      `Segnale prodotto: ${decision.action} — ${decision.reason}`,
+      `Prezzo corrente: ${price}. Variazione: ${variazione(1)} sull'ultima barra, ${variazione(5)} su 5 barre, ${variazione(20)} su 20 barre.`,
+      `RSI(14): ${rsi == null ? 'n/d (candele insufficienti)' : rsi.toFixed(1)} · ATR(${this.config.atrPeriod || 14}): ${atrVal == null ? 'n/d' : atrVal.toFixed(4)} · funding: ${snapshot.funding ?? 'n/d'} · candele disponibili: ${candles.length}.`,
+      `Posizione prima del segnale: ${posBefore ? `${posBefore.side} ${posBefore.size} @ ${posBefore.entryPx} (PnL non realizzato ${posBefore.unrealized ?? 'n/d'})` : 'nessuna'}.`,
+      `Esito dell'esecuzione: ${esito}.`,
+      `Conto: equity ${equity ?? 'n/d'} USD, ${account?.positions?.length ?? 0} posizioni aperte in totale, PnL di giornata ${this.dailyPnl.toFixed(2)} USD, perdite consecutive di questa strategia ${db.getConsecutiveLosses(this.id)}.`
+    ];
+
+    return {
+      state: righe.join('\n'),
+      questions: {
+        coerenza_segnale: {
+          type: 'noul',
+          instructions: 'Quanto il segnale descritto risulta coerente con il contesto di mercato riportato (prezzo, variazioni recenti, indicatori, funding)? Valuta solo la coerenza interna tra segnale e dati, non la convenienza dell\'operazione.'
+        },
+        contesto_sfavorevole: {
+          type: 'score',
+          instructions: 'Quanto il contesto di mercato descritto è sfavorevole a un\'operazione in questa direzione, indipendentemente dal fatto che sia già stata eseguita?',
+          criteria: [
+            'contesto favorevole: dati coerenti e volatilità ordinaria',
+            'contesto neutro: nessun segnale contrario evidente',
+            'contesto incerto: indicatori discordanti o dati insufficienti',
+            'contesto sfavorevole: movimento contrario o volatilità anomala',
+            'contesto molto sfavorevole: più elementi contrari nello stesso momento'
+          ]
+        },
+        fattore_dominante: {
+          type: 'choice',
+          instructions: 'Qual è l\'elemento che pesa di più nel giudizio sul contesto appena descritto?',
+          criteria: {
+            nessuno: 'niente di rilevante: contesto ordinario',
+            dati_insufficienti: 'candele o indicatori non disponibili o in warmup',
+            controtendenza: 'il segnale va contro il movimento recente del prezzo',
+            volatilita: 'ampiezza dei movimenti anomala rispetto al periodo',
+            funding: 'il costo di finanziamento è rilevante per questa direzione',
+            esposizione: 'numero di posizioni o perdite recenti del conto'
+          }
+        }
+      }
+    };
   }
 
   /**

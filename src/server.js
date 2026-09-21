@@ -73,6 +73,7 @@ import advisor from './agents/advisor/advisor.js';
 import proposals from './agents/proposals.js';
 import riskAgent from './agents/riskAgent.js';
 import mlTrainer from './agents/mlTrainer.js';
+import jev from './agents/jev.js';
 import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk, deriveExecutionStatus, RISK_ALERT_THRESHOLDS, toRiskBotView } from './perps/riskSnapshot.js';
 // DEBT-03: la profondità della coda di esecuzione (WARN-02) è la sola fonte reale
 // per "Queue health" nella card EXECUTION STATUS della cockpit.
@@ -1345,6 +1346,55 @@ class ArbitrageBotServer {
     });
 
 
+    // --- JEV-OBS-01: audit dell'osservatore asincrono, SOLA LETTURA ---
+    //
+    // GET /api/perps/jev-evaluations?bot_id=&coin=&limit=
+    //
+    // Non esiste (e non deve esistere) nessun metodo di scrittura su questo
+    // percorso: le righe le scrive solo `agents/jev.js` quando una risposta
+    // arriva. Sta sotto /api/perps/* e quindi passa dallo stesso gate di
+    // autenticazione di tutte le altre API — nessuna eccezione nella allowlist
+    // pubblica di setupMiddleware().
+    //
+    // Il JSON di domande e risposte viene restituito già PARSATO: la UI non deve
+    // fare JSON.parse su un campo che, se malformato, farebbe esplodere il
+    // rendering della dashboard per colpa di un osservatore che non può fare
+    // danni da nessun'altra parte.
+    app.get('/api/perps/jev-evaluations', (req, res) => {
+      try {
+        const rows = db.listJevEvaluations({
+          limit: req.query.limit,
+          botId: req.query.bot_id || null,
+          coin: req.query.coin || null
+        });
+        const parse = (raw) => {
+          if (!raw) return null;
+          try { return JSON.parse(raw); } catch { return null; }
+        };
+        res.json({
+          success: true,
+          data: rows.map(r => ({
+            id: r.id,
+            botId: r.bot_id,
+            coin: r.coin,
+            ts: r.ts,
+            action: r.action,
+            model: r.model,
+            state: r.state,
+            questions: parse(r.questions_json),
+            answers: parse(r.answers_json),
+            latencyMs: r.latency_ms,
+            tokensIn: r.tokens_in,
+            tokensOut: r.tokens_out,
+            costUsd: r.cost_usd,
+            error: r.error
+          }))
+        });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     app.post('/api/perps/order', async (req, res) => {
       try {
         const { masterAddress, coin, side, sizeUsd, size, leverage, tp, sl, slippage } = req.body;
@@ -2310,6 +2360,14 @@ class ArbitrageBotServer {
           getBots: () => botManager.listStates()
         }));
         await agentRuntime.startAll();
+        // JEV-OBS-01 — una riga all'avvio che dice se l'osservatore è attivo e,
+        // se non lo è, PERCHÉ. Senza, l'unico sintomo di una chiave mancante
+        // sarebbe una tabella `jev_evaluations` vuota, indistinguibile da "i bot
+        // non hanno ancora prodotto nessun segnale". Non è un agente del runtime:
+        // non ha una cadenza propria, parte solo quando un bot segnala.
+        const jevSt = jev.jevStatus();
+        if (jevSt.available) logger.info(`🔭 Osservatore Jev attivo (${jevSt.model}) — solo osservazione, nessun effetto sulle decisioni di trading`);
+        else logger.info(`🔭 Osservatore Jev non attivo: ${jevSt.reason}`);
         logger.info('🤖 Sottosistema Perps + agenti pronto');
       } catch (perpsError) {
         logger.error('⚠️ Errore inizializzazione Perps:', perpsError.message);

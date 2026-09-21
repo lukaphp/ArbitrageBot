@@ -147,9 +147,12 @@ const warnedUnpriced = new Set();
  *
  *  1. **listino per MODELLO** (`pricing.models`, LLM-01) — match esatto, poi per
  *     prefisso più lungo (copre le varianti datate tipo `deepseek-v4-pro-2026-08`);
- *  2. **tier Anthropic per sottostringa** del nome (opus/haiku/sonnet) — il
- *     comportamento storico, che resta per non dover elencare ogni versione di
- *     Claude.
+ *  2. **tier per pattern sul nome** — opus/haiku/sonnet (il comportamento
+ *     storico, che resta per non dover elencare ogni versione di Claude) e
+ *     `jev-*` (JEV-OBS-01), che non è un modello LLM ma è un canale di spesa a
+ *     token e passa dalla stessa contabilità. Tenerlo fuori da `pricing.models`
+ *     è deliberato: quella tabella è la specifica dei modelli LLM utilizzabili
+ *     da `getProvider` (LLM-PRICE-01), e Jev non lo è.
  *
  * Ritorna `null` se il modello non è coperto da nessuno dei due. Il fallback
  * implicito su Sonnet che c'era prima era comodo e sbagliato: un modello di un
@@ -168,10 +171,40 @@ export function resolvePricing(model) {
     .sort((a, b) => b.length - a.length)[0];
   if (prefix) return { rate: models[prefix], source: 'model-prefix', key: prefix };
 
+  // JEV-OBS-01 — ancorato all'INIZIO del nome, non per sottostringa come i tier
+  // Claude: "jev" è una sillaba corta e un match ovunque nel nome prezzerebbe
+  // come Jev un eventuale modello altrui che se la ritrova dentro.
+  if (/^jev-/i.test(name) && pricing.jev) return { rate: pricing.jev, source: 'tier', key: 'jev' };
   if (/opus/i.test(name) && pricing.opus) return { rate: pricing.opus, source: 'tier', key: 'opus' };
   if (/haiku/i.test(name) && pricing.haiku) return { rate: pricing.haiku, source: 'tier', key: 'haiku' };
   if (/sonnet/i.test(name) && pricing.sonnet) return { rate: pricing.sonnet, source: 'tier', key: 'sonnet' };
   return null;
+}
+
+/**
+ * CONFINI DEL MESE DI BUDGET, in UTC.
+ *
+ * Stanno qui e non dentro il singolo agente perché ogni budget mensile a soglia
+ * dura (ADV-03 per il consulente, JEV-OBS-01 per l'osservatore) deve rispondere
+ * alla stessa domanda "siamo ancora nello stesso mese?" nello stesso identico
+ * modo. Due copie divergerebbero al primo che usa l'ora locale: su un container
+ * in fuso non-UTC il budget si azzererebbe a un'ora diversa da quella in cui la
+ * chiave di spesa cambia nome, e per qualche ora la spesa verrebbe scritta su una
+ * chiave e letta da un'altra — cioè un budget che non frena.
+ */
+export function monthKey(now = Date.now()) {
+  const d = new Date(now);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+export function monthStart(now = Date.now()) {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0);
+}
+
+export function nextMonthStart(now = Date.now()) {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1, 0, 0, 0, 0);
 }
 
 /** True se esiste un listino per questo modello. Gate di attivazione (LLM-01). */
@@ -245,5 +278,6 @@ export function summarizeUsage(model, acc) {
 export default {
   CACHE_WRITE_MULT, CACHE_READ_MULT, TOOL_RESULT_CHAR_CAP, TOOL_RESULT_TOKENS, CHARS_PER_TOKEN,
   moveCacheBreakpoint, simulateRun, priceOf, resolvePricing, hasPricing,
-  accumulateUsage, emptyUsage, summarizeUsage, estimatePromptTokens
+  accumulateUsage, emptyUsage, summarizeUsage, estimatePromptTokens,
+  monthKey, monthStart, nextMonthStart
 };

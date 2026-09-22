@@ -13,9 +13,17 @@
  *   - external  : { signal }  → soddisfatta da un segnale webhook in coda
  *
  * Combinazione regole d'ingresso: config.logic = 'any' (default) | 'all'.
+ *
+ * FORMA DELLE REGOLE (OPS-FLEET-02): `evaluate` canonicalizza la config prima di
+ * valutarla — `normalizeStrategyConfig` in `strategySchema.js`. Motivo: una
+ * regola in forma non canonica veniva scartata con `match:false`, cioè un bot
+ * che non può aprire e che da fuori è indistinguibile da un bot in attesa del
+ * segnale. Quello che resta NON valutabile non viene indovinato: viene detto,
+ * nel log e nel `reason` dell'hold.
  */
 
 import * as ind from './indicators.js';
+import { normalizeStrategyConfig } from './strategySchema.js';
 import logger from '../utils/logger.js';
 
 function applyOp(a, op, b) {
@@ -34,6 +42,47 @@ class StrategyEngine {
   constructor() {
     // Coda di segnali esterni (webhook) per coin: coin -> { signal, ts }
     this.externalSignals = new Map();
+    // OPS-FLEET-02 — esito della normalizzazione per OGGETTO config. Memoizzare
+    // serve a due cose: non rifare il lavoro a ogni tick (e per ogni barra del
+    // backtester), e soprattutto LOGGARE UNA VOLTA SOLA per config invece che a
+    // ogni valutazione. Un bot con loop di pochi secondi riempirebbe altrimenti
+    // il log con la stessa riga per sempre — e un avviso ripetuto all'infinito
+    // è rumore, cioè di nuovo silenzio.
+    //
+    // Chiave = identità dell'oggetto config, non il suo contenuto: `bot.config`
+    // resta lo stesso oggetto per tutta la vita dell'istanza, e ogni percorso
+    // che cambia la configurazione (`botManager.updateBot`, `mergeStrategyConfig`)
+    // produce un oggetto NUOVO — quindi una config modificata viene rivalutata
+    // e ri-segnalata da sé. WeakMap: nessuna ritenzione di config morte.
+    this._normalized = new WeakMap();
+  }
+
+  /**
+   * Config canonica per la valutazione (OPS-FLEET-02).
+   *
+   * Vedi `normalizeStrategyConfig` in `strategySchema.js` per COSA viene
+   * corretto e perché. Qui c'è la parte non pura: dirlo. Una regola che il
+   * motore non sa valutare è un bot che non può aprire una posizione — cioè un
+   * guasto sul percorso dei soldi che, prima di questo fix, era indistinguibile
+   * da «il mercato non ha ancora dato il segnale». Si logga a `error` proprio
+   * perché il sintomo è l'assenza di eventi: non c'è nient'altro da guardare.
+   */
+  _canonical(config) {
+    if (!config || typeof config !== 'object') return { config, unevaluable: [] };
+    const cached = this._normalized.get(config);
+    if (cached) return cached;
+
+    const { config: normalized, changes, unevaluable } = normalizeStrategyConfig(config);
+    if (changes.length) {
+      logger.warn('⚠️  Regole di strategia in formato non canonico, interpretate comunque', { correzioni: changes });
+    }
+    if (unevaluable.length) {
+      logger.error('🚨 Regole di strategia NON valutabili: finché restano così il bot non potrà aprire su quelle regole', { regole: unevaluable });
+    }
+
+    const entry = { config: normalized, unevaluable };
+    this._normalized.set(config, entry);
+    return entry;
   }
 
   pushExternalSignal(coin, signal) {
@@ -79,6 +128,19 @@ class StrategyEngine {
       return null;
     }
     return s.signal;
+  }
+
+  /**
+   * Motivo di un `hold`, con in coda le regole che non potevano essere valutate.
+   *
+   * `lastEval.reason` è ciò che l'operatore legge nella card del bot e in
+   * `getMonitor`. «Nessun segnale d'ingresso» su una regola rotta è una risposta
+   * vera e inutile: descrive il mercato quando il problema è la configurazione.
+   * È la frase che ha coperto OPS-FLEET-02 per 46 ore.
+   */
+  _holdReason(base, unevaluable = []) {
+    if (!unevaluable.length) return base;
+    return `${base} — ATTENZIONE: ${unevaluable.length} regola/e non valutabile/i: ${unevaluable.join(' ')}`;
   }
 
   /** Valuta una singola regola. Ritorna { match, signal }. */
@@ -135,14 +197,19 @@ class StrategyEngine {
   }
 
   /**
-   * @param {object} config  configurazione bot
+   * @param {object} rawConfig configurazione bot, in qualunque forma sia stata
+   *   persistita: viene canonicalizzata qui (vedi `_canonical`).
    * @param {object} snapshot { coin, price, candles, funding }
    * @param {object} state    { inPosition, side }
    * @param {object} opts     { consume } — `consume: false` per una valutazione di
    *   sola lettura (diagnostica): stesso verdetto, nessuna modifica alla coda dei
    *   segnali esterni. Default `true`: il loop reale non cambia comportamento.
    */
-  evaluate(config, snapshot, state = {}, { consume = true } = {}) {
+  evaluate(rawConfig, snapshot, state = {}, { consume = true } = {}) {
+    // OPS-FLEET-02 — unico punto di passaggio di OGNI decisione (bot live,
+    // backtester, ottimizzatore, diagnostica): normalizzare qui vuol dire che
+    // nessun consumatore può vedere una forma di regola diversa dagli altri.
+    const { config, unevaluable } = this._canonical(rawConfig);
     const ctx = {
       price: snapshot.price,
       candles: snapshot.candles,
@@ -164,7 +231,7 @@ class StrategyEngine {
       if (ctx.external === 'close') {
         return { action: 'close', reason: 'Segnale esterno: close' };
       }
-      return { action: 'hold', reason: 'In posizione, nessuna regola di uscita soddisfatta' };
+      return { action: 'hold', reason: this._holdReason('In posizione, nessuna regola di uscita soddisfatta', unevaluable) };
     }
 
     // --- Flat: valuta le regole d'ingresso ---
@@ -195,7 +262,7 @@ class StrategyEngine {
     }
 
     if (!chosenSignal) {
-      return { action: 'hold', reason: 'Nessun segnale d\'ingresso' };
+      return { action: 'hold', reason: this._holdReason('Nessun segnale d\'ingresso', unevaluable) };
     }
 
     // Rispetta la direzione consentita
@@ -206,7 +273,19 @@ class StrategyEngine {
     if (chosenSignal === 'short' && dir !== 'long') {
       return { action: 'open_short', reason };
     }
-    return { action: 'hold', reason: `Segnale ${chosenSignal} non consentito (direzione: ${dir})` };
+    // Qui ci si arriva in due casi molto diversi, e confonderli è costato caro:
+    // un segnale VALIDO bloccato dalla direzione consentita, oppure un segnale
+    // che il motore non riconosce affatto. Con `direction: 'both'` il primo caso
+    // è impossibile — dire «non consentito (direzione: both)» era letteralmente
+    // falso, e mandava a cercare il problema nella direzione invece che nella
+    // regola (OPS-FLEET-02).
+    const noto = chosenSignal === 'long' || chosenSignal === 'short';
+    return {
+      action: 'hold',
+      reason: noto
+        ? `Segnale ${chosenSignal} non consentito (direzione: ${dir})`
+        : `Segnale "${chosenSignal}" non riconosciuto (attesi: long, short): la regola non potrà mai aprire una posizione.`
+    };
   }
 }
 

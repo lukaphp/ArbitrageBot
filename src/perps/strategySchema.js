@@ -343,6 +343,95 @@ function validatePartialTp(ladder, prefix = '') {
   return errors;
 }
 
+/**
+ * SINONIMI DI SEGNALE ACCETTATI — OPS-FLEET-02
+ *
+ * `evaluate()` RESTITUISCE `open_long`/`open_short` come azione, ma si ASPETTA
+ * `long`/`short` nel campo `signal` di una regola. Sono due vocabolari diversi a
+ * un carattere di distanza, e chi scrive la config (in produzione: un agente)
+ * ha usato quello sbagliato per tutta la flotta. La mappatura è univoca: non c'è
+ * nessuna lettura alternativa di `signal: 'open_long'` su una regola d'ingresso.
+ */
+const SIGNAL_ALIASES = { open_long: 'long', open_short: 'short' };
+
+/**
+ * NORMALIZZAZIONE DELLA FORMA DI UNA REGOLA — OPS-FLEET-02
+ * =======================================================
+ *
+ * Perché esiste. La flotta OPS-FLEET-02 è rimasta ~46 ore senza produrre un solo
+ * segnale mentre l'RSI reale attraversava le soglie decine di volte per coin. La
+ * causa non era il mercato né le soglie: le regole persistite in
+ * `bots.config_json` deviavano dal formato canonico su due campi, e in entrambi
+ * i casi `strategyEngine` le scartava restituendo `match:false` — cioè un bot che
+ * non può aprire, che si comporta esattamente come un bot in attesa.
+ *
+ * Cosa si corregge, e soltanto questo:
+ *  - `type` assente ma `indicator` presente → `type: 'indicator'`. Deduzione
+ *    univoca: nessun altro tipo di regola ha un campo `indicator`.
+ *  - `signal: 'open_long'|'open_short'` → `'long'|'short'` (vedi SIGNAL_ALIASES).
+ *
+ * Cosa NON si corregge, di proposito: una regola senza `type` e senza
+ * `indicator` (per esempio solo `op`+`value`) potrebbe essere `price` o
+ * `funding`. Indovinare significherebbe far operare il bot con una regola che
+ * nessuno ha scritto — la stessa ragione per cui `validateStrategyConfig`
+ * rifiuta invece di aggiustare. Quelle regole finiscono in `unevaluable`.
+ *
+ * Non è un "aggiustaggio silenzioso": ogni correzione è elencata in `changes` e
+ * ogni regola inservibile in `unevaluable`, e il chiamante è tenuto a dirlo
+ * (vedi `strategyEngine.evaluate` e `PerpsBot.start`). Il silenzio è il difetto
+ * che stiamo riparando, non solo la forma sbagliata.
+ *
+ * Funzione PURA: non muta la config ricevuta, ritorna copie.
+ *
+ * @returns {{ config: object, changes: string[], unevaluable: string[] }}
+ */
+export function normalizeStrategyConfig(config) {
+  const changes = [];
+  const unevaluable = [];
+  if (!isPlainObject(config)) return { config, changes, unevaluable };
+
+  let touched = false;
+  const out = { ...config };
+
+  for (const scope of ['entryRules', 'exitRules']) {
+    const rules = config[scope];
+    if (!Array.isArray(rules)) continue;
+    let scopeTouched = false;
+    const label = scope === 'entryRules' ? 'ingresso' : 'uscita';
+
+    const normalized = rules.map((rule, i) => {
+      const where = `regola d'${label} ${i + 1}`;
+      if (!isPlainObject(rule)) {
+        unevaluable.push(`${where}: non è un oggetto, sarà ignorata.`);
+        return rule;
+      }
+      let r = rule;
+      const copy = () => { if (r === rule) r = { ...rule }; return r; };
+
+      if (!VALID_RULE_TYPES.has(r.type) && VALID_INDICATORS.has(r.indicator)) {
+        copy().type = 'indicator';
+        changes.push(`${where}: campo "type" assente, dedotto "indicator" da indicator="${rule.indicator}".`);
+      }
+      if (SIGNAL_ALIASES[r.signal] && r.type !== 'external') {
+        const canon = SIGNAL_ALIASES[r.signal];
+        copy().signal = canon;
+        changes.push(`${where}: signal "${rule.signal}" interpretato come "${canon}".`);
+      }
+      if (!VALID_RULE_TYPES.has(r.type)) {
+        unevaluable.push(`${where}: tipo "${r.type}" non riconosciuto (ammessi: ${[...VALID_RULE_TYPES].join(', ')}), non potrà MAI essere soddisfatta.`);
+      } else if (r.type === 'indicator' && !VALID_INDICATORS.has(r.indicator)) {
+        unevaluable.push(`${where}: indicatore "${r.indicator}" non riconosciuto (ammessi: ${[...VALID_INDICATORS].join(', ')}), non potrà MAI essere soddisfatta.`);
+      }
+      if (r !== rule) scopeTouched = true;
+      return r;
+    });
+
+    if (scopeTouched) { out[scope] = normalized; touched = true; }
+  }
+
+  return { config: touched ? out : config, changes, unevaluable };
+}
+
 function validateRule(rule, where, at) {
   if (!isPlainObject(rule)) return at(`${where}: non è un oggetto.`);
   if (!VALID_RULE_TYPES.has(rule.type)) {
@@ -474,5 +563,5 @@ export default {
   EXPORT_KIND, EXPORT_VERSION, VALID_INTERVALS, VALID_RULE_TYPES, VALID_INDICATORS,
   buildEnvelope, historyExportItem, botExportItem, exportFileName,
   validateStrategyConfig, validateItem, validateEnvelope, validateItemList,
-  extractBotConfig, mergeStrategyConfig
+  extractBotConfig, mergeStrategyConfig, normalizeStrategyConfig
 };

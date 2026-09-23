@@ -103,6 +103,7 @@ export class PerpsBot {
     this.startedAt = null;
     this.tickErrors = 0;       // contatore errori di tick (metriche)
     this._lastCooldownNotifyUntil = null; // episodio di cooldown già notificato (una notifica per episodio, non per tick)
+    this._lastSizingBlockReason = null;   // ultimo motivo di size nulla già notificato (stesso principio, BUG-SIZECAP-01)
     this.dailyKey = this._todayKey();
     // PnL giornaliero PERSISTITO: sopravvive ai riavvii (il limite di perdita
     // giornaliera non riparte da zero dopo un restart a metà giornata).
@@ -181,6 +182,20 @@ export class PerpsBot {
     if (this._configChanges?.length) {
       logger.warn(`Bot ${this.name} (${this.coin}): regole in formato non canonico, interpretate comunque`, { correzioni: this._configChanges });
     }
+
+    // BUG-SIZECAP-01 — parametri di rischio DICHIARATI in un percorso che
+    // nessun controllo legge (`sizing.maxPositionUsd`, `strategyParams.leverage`,
+    // un tetto scritto due volte con due valori). Non si indovina quale sia
+    // quello buono: si dice, una volta per avvio come per le regole, perché il
+    // sintomo altrimenti è muto — la config PROMETTE un limite che non esiste.
+    const avvisiRischio = riskManager.auditRiskConfig(this.config);
+    if (avvisiRischio.length) {
+      logger.error(`Bot ${this.name} (${this.coin}): ${avvisiRischio.length} parametro/i di rischio dichiarato/i ma non applicato/i`, { avvisi: avvisiRischio });
+      notifier.notify(
+        `⚠️ <b>Parametri di rischio non applicati</b>\nBot <b>${this.name}</b> (${this.coin}):\n• ${avvisiRischio.join('\n• ')}`
+      );
+    }
+
     if (!this._unevaluableRules?.length) return;
     const dettaglio = this._unevaluableRules.join('\n• ');
     logger.error(`Bot ${this.name} (${this.coin}): ${this._unevaluableRules.length} regola/e NON valutabile/i — su quelle regole il bot non potrà mai operare`, { regole: this._unevaluableRules });
@@ -565,9 +580,22 @@ export class PerpsBot {
       return;
     }
     if (plan.size <= 0) {
-      logger.warn(`Bot ${this.name}: size calcolata nulla`);
+      // BUG-SIZECAP-01 — una size nulla su un segnale valido è un'apertura
+      // MANCATA, non un non-evento: senza motivo e senza notifica l'operatore
+      // vede un bot che "non apre mai" e nessun appiglio per capire perché
+      // (`plan.blocked` dice quale parametro di config lo impedisce). Una
+      // notifica per EPISODIO e non per tick: il segnale persiste e il tick è
+      // ogni 10s, la stessa ragione del cooldown qui sotto.
+      const motivo = plan.blocked || `size calcolata nulla (notional ${plan.notionalUsd}, prezzo ${snapshot.price})`;
+      logger.warn(`Bot ${this.name}: nessuna apertura — ${motivo}`);
+      this.lastEval = { action: 'hold', reason: `Sizing: ${motivo}`, ts: Date.now() };
+      if (this._lastSizingBlockReason !== motivo) {
+        this._lastSizingBlockReason = motivo;
+        notifier.notify(`⚠️ <b>${this.name}</b> (${this.coin}): segnale <b>${side.toUpperCase()}</b> non eseguito — ${motivo}`);
+      }
       return;
     }
+    this._lastSizingBlockReason = null;
 
     // Conferma multi-timeframe (gate): salta se il TF superiore non concorda
     if (!(await this._mtfConfirm(side))) {

@@ -25,6 +25,7 @@ import * as ind from './indicators.js';
 import metrics from './metrics.js';
 import jev from '../agents/jev.js';
 import db from '../db/database.js';
+import { normalizeStrategyConfig } from './strategySchema.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
 
@@ -43,9 +44,27 @@ export class PerpsBot {
     this.coin = record.coin;
     this.network = record.network;
     this.masterAddress = record.master_address || record.masterAddress;
-    this.config = typeof record.config_json === 'string'
+    const rawConfig = typeof record.config_json === 'string'
       ? JSON.parse(record.config_json)
       : (record.config || {});
+    // OPS-FLEET-02 — la config viene canonicalizzata QUI, una volta, all'ingresso
+    // nell'istanza. Non basta normalizzare dentro `strategyEngine.evaluate`:
+    // il bot legge le regole anche altrove, e lì la forma sbagliata produceva
+    // danni diversi dallo stesso difetto —
+    //   · `needFunding` (`_runTick`) non si accorge di una regola funding e non
+    //     chiede il funding rate: la regola resta a `null` per sempre;
+    //   · `ind.warmupCandles` conta 0 candele necessarie per una regola senza
+    //     `type`, e `getMonitor` dichiara `warmingUp.ready: true` su un bot che
+    //     non è pronto affatto;
+    //   · `_diagRule` cade sul ramo finale e restituisce `label: undefined,
+    //     hint: ''` — la card Monitor, che esiste apposta «per capire perché è
+    //     fermo», era vuota proprio nel caso in cui serviva.
+    // Solo l'oggetto in memoria: `bots.config_json` NON viene riscritto di
+    // nascosto: la correzione si legge nei log e nella notifica di `start()`.
+    const normalized = normalizeStrategyConfig(rawConfig);
+    this.config = normalized.config;
+    this._configChanges = normalized.changes;
+    this._unevaluableRules = normalized.unevaluable;
     this.onUpdate = onUpdate || (() => {});
 
     // AGENT-AWARE: chi controlla questo bot.
@@ -145,10 +164,36 @@ export class PerpsBot {
     }
   }
 
+  /**
+   * OPS-FLEET-02 — un bot che parte con regole che non possono essere
+   * soddisfatte è un guasto SILENZIOSO per costruzione: il sintomo è l'assenza
+   * di eventi, quindi non c'è niente in cui inciampare. Sei bot così sono
+   * rimasti «running» per 46 ore senza che nessun log, nessuna metrica e nessuna
+   * card dicesse che non avrebbero potuto aprire nemmeno una posizione.
+   *
+   * Quindi: log E notifica, una volta per avvio del bot (non per tick), come per
+   * ogni altro fallimento sul percorso dei soldi. Le correzioni di forma già
+   * applicate (`_configChanges`) sono solo un `warn`: lì il bot opera, ma
+   * l'operatore deve sapere che la config scritta e la config eseguita non
+   * coincidono carattere per carattere.
+   */
+  _reportConfigIssues() {
+    if (this._configChanges?.length) {
+      logger.warn(`Bot ${this.name} (${this.coin}): regole in formato non canonico, interpretate comunque`, { correzioni: this._configChanges });
+    }
+    if (!this._unevaluableRules?.length) return;
+    const dettaglio = this._unevaluableRules.join('\n• ');
+    logger.error(`Bot ${this.name} (${this.coin}): ${this._unevaluableRules.length} regola/e NON valutabile/i — su quelle regole il bot non potrà mai operare`, { regole: this._unevaluableRules });
+    notifier.notify(
+      `🚨 <b>Configurazione non eseguibile</b>\nBot <b>${this.name}</b> (${this.coin}) è avviato ma ha ${this._unevaluableRules.length} regola/e che il motore non sa valutare:\n• ${dettaglio}\nSu quelle regole non aprirà né chiuderà nulla.`
+    );
+  }
+
   start() {
     if (this.status === 'running') return;
     this.status = 'running';
     this.startedAt = Date.now();
+    this._reportConfigIssues();
     db.setBotStatus(this.id, 'running');
     const interval = this.config.loopInterval || HYPERLIQUID_CONFIG.botLoopInterval;
     this.tick(); // primo giro immediato

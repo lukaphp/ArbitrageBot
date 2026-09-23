@@ -181,6 +181,116 @@ export const DYNAMIC_SIZING_DEFAULTS = {
   atrPeriod: 14
 };
 
+/**
+ * BUG-SIZECAP-01 — DOVE si legge il tetto di notional per bot.
+ *
+ * Il problema che risolve. `maxPositionUsd` ha DUE percorsi legittimi nella
+ * config di un bot, scritti da due sorgenti diverse:
+ *  - `config.risk.maxPositionUsd` — la forma prodotta dalla UI (`public/perps.js`);
+ *  - `config.maxPositionUsd` (radice) — la forma documentata e validata sul
+ *    percorso MCP/agenti (`register_bot`, `update_strategy_params`, e la
+ *    skill di Hermes), ed è anche quella che finisce in `bots.max_allocation_usd`.
+ * Il sizing leggeva SOLO la prima. Un bot creato da un agente con
+ * `maxPositionUsd: 500` veniva quindi dimensionato con il solo cap GLOBALE
+ * (`HYPERLIQUID_CONFIG.risk.maxPositionUsd`, 5.000$ di default): il 23/09/2026
+ * quattro bot della flotta hanno proposto aperture da 2.700$ a 5.000$ — tre
+ * delle quali incollate al cap globale al centesimo — con un tetto dichiarato
+ * di 500$. Nessuna è stata eseguita, perché il Budget Ceiling di `bot.js` legge
+ * la colonna `max_allocation_usd` (cioè l'altro percorso) e le ha bloccate
+ * tutte; ma bloccare a valle significa ricalcolare e ritentare a ogni tick.
+ *
+ * Perché il più restrittivo e non "il primo che trovo": un tetto di rischio non
+ * si rilassa per una divergenza di formato. Se le due forme dicono numeri
+ * diversi, l'unica lettura sicura è la più prudente — e la divergenza viene
+ * comunque segnalata da `auditRiskConfig`, non nascosta dalla scelta.
+ *
+ * Un valore inservibile (stringa, 0, negativo) NON vale come "nessun tetto":
+ * viene ignorato e riportato in `ignored`, restando il cap globale. Prima
+ * `notionalUsd > 'abc'` era semplicemente falso, cioè il cap spariva.
+ *
+ * Funzione PURA ed esportata: la usano `sizePosition` e `checkLimits` — che
+ * devono per forza applicare lo stesso numero, altrimenti il controllo a valle
+ * approva ciò che il calcolo a monte non avrebbe dovuto produrre.
+ *
+ * @returns {{ maxPositionUsd: number, sources: object, ignored: string[] }}
+ */
+export function resolveMaxPositionUsd(config) {
+  const cfg = config && typeof config === 'object' ? config : {};
+  const ignored = [];
+  const sources = {};
+
+  const leggi = (valore, percorso) => {
+    if (valore === undefined || valore === null) return null;
+    const n = Number(valore);
+    if (!Number.isFinite(n) || n <= 0) {
+      ignored.push(`${percorso}: valore non utilizzabile (${JSON.stringify(valore)}), ignorato — resta il cap globale`);
+      return null;
+    }
+    sources[percorso] = n;
+    return n;
+  };
+
+  const dichiarati = [
+    leggi(cfg.maxPositionUsd, 'maxPositionUsd'),
+    leggi(cfg.risk?.maxPositionUsd, 'risk.maxPositionUsd')
+  ].filter(v => v !== null);
+
+  const globale = Number(HYPERLIQUID_CONFIG.risk.maxPositionUsd);
+  const maxPositionUsd = Math.min(
+    Number.isFinite(globale) && globale > 0 ? globale : Infinity,
+    ...(dichiarati.length ? dichiarati : [Infinity])
+  );
+
+  return { maxPositionUsd, sources, ignored };
+}
+
+/**
+ * BUG-SIZECAP-01 — campi di rischio che il motore NON legge.
+ *
+ * Stessa disciplina di `normalizeStrategyConfig` per le regole non canoniche
+ * (BUG-RULESHAPE-01): ciò che è ambiguo si SEGNALA, non si indovina. Qui però
+ * non si corregge nulla, perché non c'è una lettura univoca — `sizing.maxPositionUsd`
+ * potrebbe voler dire "tetto del sizing" o essere un doppione del tetto di
+ * rischio, e `strategyParams.leverage` contraddice `config.leverage` senza che
+ * si sappia quale delle due l'operatore considerava viva. Indovinare qui
+ * significherebbe far operare il bot con una leva o un tetto che nessuno ha
+ * scritto in quel campo.
+ *
+ * Sono nati da `update_strategy_params` (merge di un livello, commit 39fec01):
+ * un agente che passa `{ sizing: { maxPositionUsd } }` crea un percorso nuovo
+ * invece di aggiornare quello canonico, e la config risultante DICHIARA un
+ * parametro che nessuno applica. Il sintomo è muto per costruzione, quindi
+ * l'unico rimedio è dirlo all'avvio del bot (`PerpsBot._reportConfigIssues`).
+ *
+ * Funzione PURA: nessun log, nessuna notifica — restituisce le righe e lascia
+ * al chiamante I/O il compito di dirle.
+ */
+export function auditRiskConfig(config) {
+  const cfg = config && typeof config === 'object' ? config : {};
+  const avvisi = [];
+
+  const { sources, ignored } = resolveMaxPositionUsd(cfg);
+  avvisi.push(...ignored);
+
+  const radice = sources['maxPositionUsd'];
+  const annidato = sources['risk.maxPositionUsd'];
+  if (radice != null && annidato != null && radice !== annidato) {
+    avvisi.push(`maxPositionUsd dichiarato due volte con valori diversi (maxPositionUsd=${radice}, risk.maxPositionUsd=${annidato}): si applica il più restrittivo (${Math.min(radice, annidato)}$).`);
+  }
+
+  if (cfg.sizing && typeof cfg.sizing === 'object' && cfg.sizing.maxPositionUsd !== undefined) {
+    avvisi.push(`sizing.maxPositionUsd=${JSON.stringify(cfg.sizing.maxPositionUsd)} NON è letto da nessun controllo di rischio: il tetto applicato è maxPositionUsd/risk.maxPositionUsd.`);
+  }
+
+  const levAnnidata = cfg.strategyParams && typeof cfg.strategyParams === 'object'
+    ? cfg.strategyParams.leverage : undefined;
+  if (levAnnidata !== undefined && Number(levAnnidata) !== Number(cfg.leverage ?? HYPERLIQUID_CONFIG.risk.defaultLeverage)) {
+    avvisi.push(`strategyParams.leverage=${JSON.stringify(levAnnidata)} NON è la leva usata: il motore applica leverage=${cfg.leverage ?? HYPERLIQUID_CONFIG.risk.defaultLeverage}.`);
+  }
+
+  return avvisi;
+}
+
 class RiskManager {
   /** Arrotonda la size al numero di decimali consentito dal mercato. */
   roundSize(size, szDecimals = 3) {
@@ -193,6 +303,10 @@ class RiskManager {
 
   /** Vista reale + paper unificata, anche come metodo (vedi `mergeAccountViews`). */
   mergeAccountViews(input) { return mergeAccountViews(input); }
+
+  /** BUG-SIZECAP-01 — anche come metodi, per i chiamanti che hanno il singleton. */
+  resolveMaxPositionUsd(config) { return resolveMaxPositionUsd(config); }
+  auditRiskConfig(config) { return auditRiskConfig(config); }
 
   /**
    * Calcola la size (in unità di coin) da aprire.
@@ -266,21 +380,34 @@ class RiskManager {
     }
 
     if (notionalUsd === null) {
+      // BUG-SIZECAP-01 — un blocco `sizing` senza `value` utilizzabile dava
+      // `equity × (undefined/100)` = NaN, e un NaN attraversa OGNI guardia a
+      // valle (ogni confronto con NaN è falso: `size <= 0`, `notional > cap`,
+      // Budget Ceiling) fino ad arrivare a `placeMarketOrder`. È il caso reale
+      // dei bot con `sizing: { maxPositionUsd: … }` scritto da un agente.
+      // Fail-closed e rumoroso: size 0, motivo nel piano e nei log.
+      const valore = Number(sizing.value);
+      if (!Number.isFinite(valore) || valore <= 0) {
+        const blocked = `sizing non utilizzabile (mode=${JSON.stringify(sizing.mode)}, value=${JSON.stringify(sizing.value)}): impossibile calcolare una size, nessuna apertura`;
+        logger.error(`sizePosition: ${blocked}`);
+        return { size: 0, notionalUsd: 0, marginUsd: 0, maxPositionUsd: null, blocked };
+      }
       const marginUsd = sizing.mode === 'fixed'
-        ? sizing.value                    // margine fisso in USD
-        : equity * (sizing.value / 100);  // % dell'equity
+        ? valore                    // margine fisso in USD
+        : equity * (valore / 100);  // % dell'equity
       notionalUsd = marginUsd * leverage;
     }
 
-    // Cap di sicurezza
-    const maxPos = Math.min(
-      config.risk?.maxPositionUsd ?? Infinity,
-      HYPERLIQUID_CONFIG.risk.maxPositionUsd
-    );
+    // Cap di sicurezza. Il tetto si risolve da ENTRAMBI i percorsi legittimi
+    // (radice e `risk`), prendendo il più restrittivo: vedi resolveMaxPositionUsd.
+    const { maxPositionUsd: maxPos, ignored } = resolveMaxPositionUsd(config);
+    for (const riga of ignored) logger.warn(`sizePosition: ${riga}`);
     if (notionalUsd > maxPos) notionalUsd = maxPos;
 
     const size = this.roundSize(notionalUsd / price, szDecimals);
-    return { size, notionalUsd: size * price, marginUsd: (size * price) / leverage };
+    // `maxPositionUsd` è additivo nel ritorno: serve al chiamante I/O per dire
+    // NEL messaggio quale tetto ha agito, senza ricalcolarlo per conto suo.
+    return { size, notionalUsd: size * price, marginUsd: (size * price) / leverage, maxPositionUsd: maxPos };
   }
 
   /**
@@ -447,10 +574,11 @@ class RiskManager {
     if (equity <= 0) {
       return { ok: false, reason: 'Equity nullo o insufficiente' };
     }
-    const maxPos = Math.min(
-      config.risk?.maxPositionUsd ?? Infinity,
-      HYPERLIQUID_CONFIG.risk.maxPositionUsd
-    );
+    // BUG-SIZECAP-01 — stesso tetto di `sizePosition`, risolto dalla stessa
+    // funzione: due letture diverse significherebbero che il controllo approva
+    // ciò che il calcolo non avrebbe dovuto produrre (ed è esattamente quello
+    // che succedeva con il tetto scritto alla radice).
+    const { maxPositionUsd: maxPos } = resolveMaxPositionUsd(config);
     if (plan.notionalUsd > maxPos * 1.001) {
       return { ok: false, reason: `Notional ${plan.notionalUsd.toFixed(0)}$ oltre il massimo (${maxPos}$)` };
     }

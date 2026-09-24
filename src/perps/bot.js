@@ -1790,6 +1790,12 @@ export class PerpsBot {
       return {
         lastHour: db.countOpensSince(this.id, now - 60 * 60000),
         last4h: db.countOpensSince(this.id, now - 240 * 60000),
+        // Conteggio nella STESSA finestra del freno (`_overtradingBlock`), non
+        // un'altra a fianco: è il numero che confrontato con `maxOpensPerWindow`
+        // dice davvero "quanto manca al blocco", cosa che `lastHour`/`last4h` da
+        // soli non possono dire perché vivono su finestre diverse (60/240 min
+        // contro `windowMinutes`, di default 30).
+        inWindow: db.countOpensSince(this.id, now - limits.windowMinutes * 60000),
         windowMinutes: limits.windowMinutes,
         maxOpensPerWindow: limits.maxOpensPerWindow,
         enabled: limits.enabled

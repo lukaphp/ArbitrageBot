@@ -3654,10 +3654,14 @@ class PerpsApp {
    * primo che lo fa. Se mancano, il badge dichiara "sconosciuta" invece di
    * indovinarle.
    *
-   * Sul testo del giallo: `lastHour` è un conteggio su 60 minuti, la soglia vale
-   * su `windowMinutes` (30 di default). Scrivere "3/4 aperture/30min" affermerebbe
-   * che le 3 aperture stanno dentro la mezz'ora, cosa che il dato non dice: le due
-   * grandezze sono quindi etichettate ciascuna con la propria finestra.
+   * Sul testo del giallo: il confronto con la soglia usa `inWindow` — il
+   * conteggio nella STESSA finestra del freno (`_overtradingBlock` in
+   * `bot.js`), non `lastHour`/`last4h` che vivono su finestre fisse di 60/240
+   * minuti. Scrivere "3/4 aperture/30min" partendo da `lastHour` affermerebbe
+   * che quelle 3 aperture stanno dentro la mezz'ora, cosa che il dato non
+   * direbbe. Con `inWindow` il badge mostra "N/soglia in Xmin" — esattamente
+   * il numero che decide il blocco — e `lastHour`/`last4h` restano solo come
+   * contesto supplementare nel `title`.
    */
   _tradeVelocityBadge(b) {
     const ignoto = (motivo) =>
@@ -3683,23 +3687,33 @@ class PerpsApp {
 
     // `_jevNumber` e non `Number()`: `Number(null)` vale 0, cioè trasformerebbe
     // proprio il dato mancante nel "zero aperture" che stiamo evitando.
-    const lastHour = this._jevNumber(rate.lastHour);
-    const last4h = this._jevNumber(rate.last4h);
+    //
+    // Il confronto con la soglia usa `inWindow` — il conteggio nella STESSA
+    // finestra del freno (`windowMinutes`) — non `lastHour`/`last4h`: quelle
+    // vivono su finestre fisse di 60/240 minuti, diverse da `windowMinutes`
+    // (default 30), e non possono dire "quanto manca al blocco". `lastHour`/
+    // `last4h` restano solo come contesto supplementare nel `title`.
+    const inWindow = this._jevNumber(rate.inWindow);
     const max = this._jevNumber(rate.maxOpensPerWindow);
     const win = this._jevNumber(rate.windowMinutes);
-    if (lastHour == null || max == null || win == null) {
+    if (inWindow == null || max == null || win == null) {
       return ignoto('Ritmo di apertura non confrontabile con la soglia: uno dei valori non è leggibile.');
     }
 
     // 4) Ritmo elevato. Il minimo a 1 evita che un bot con soglia 1 risulti
     //    "elevato" con zero aperture (`max - 1` varrebbe 0).
     const allerta = Math.max(1, max - 1);
-    if (lastHour < allerta) return '';
+    if (inWindow < allerta) return '';
 
     const apr = (n) => `${n} apertur${n === 1 ? 'a' : 'e'}`;
-    const coda4h = last4h == null ? '' : `, ${last4h} nelle ultime 4 ore`;
-    const title = `Ritmo di apertura vicino al freno: ${apr(lastHour)} nell'ultima ora${coda4h}. Le nuove aperture si fermano a ${max} in ${win} minuti.`;
-    return `<span class="bot-alert-badge bot-velocity-badge is-elevated" title="${this._escapeHtml(title)}">⚡ ${apr(lastHour)}/1h · max ${max}/${win}min</span>`;
+    const lastHour = this._jevNumber(rate.lastHour);
+    const last4h = this._jevNumber(rate.last4h);
+    const extra = [];
+    if (lastHour != null) extra.push(`${apr(lastHour)} nell'ultima ora`);
+    if (last4h != null) extra.push(`${last4h} nelle ultime 4 ore`);
+    const coda = extra.length ? ` (${extra.join(', ')})` : '';
+    const title = `Ritmo di apertura vicino al freno: ${apr(inWindow)} negli ultimi ${win} min${coda}. Le nuove aperture si fermano a ${max}.`;
+    return `<span class="bot-alert-badge bot-velocity-badge is-elevated" title="${this._escapeHtml(title)}">⚡ ${inWindow}/${max} in ${win}min</span>`;
   }
 
   /**

@@ -362,6 +362,8 @@ test('getState espone il ritmo di apertura su 1h e 4h', () => {
   assert.equal(state.openRate.maxOpensPerWindow, OVERTRADING_DEFAULTS.maxOpensPerWindow,
     'la soglia viaggia col dato: il badge non deve indovinarla');
   assert.equal(state.openRate.windowMinutes, OVERTRADING_DEFAULTS.windowMinutes);
+  assert.equal(state.openRate.inWindow, 1,
+    'conteggio nella STESSA finestra del freno (30 min default): solo l\'apertura di 5 min fa, non lastHour/last4h che sono finestre diverse');
 });
 
 test('metriche non disponibili: null, non zero (un guasto non è "nessuna apertura")', () => {

@@ -76,7 +76,10 @@ function loadUi() {
 
 /** `openRate` come lo produce `_openRateView()` in src/perps/bot.js. */
 function openRate(overrides = {}) {
-  return { lastHour: 0, last4h: 0, windowMinutes: 30, maxOpensPerWindow: 4, enabled: true, ...overrides };
+  return {
+    lastHour: 0, last4h: 0, inWindow: 0, windowMinutes: 30, maxOpensPerWindow: 4, enabled: true,
+    ...overrides
+  };
 }
 
 function bot(overrides = {}) {
@@ -129,11 +132,14 @@ test('un solo campo illeggibile basta per dichiarare ignoto', () => {
   const perps = loadUi();
   // Senza soglia non c'è niente con cui confrontare il conteggio: inventarla
   // duplicando i default del backend è esattamente ciò che va evitato.
-  assert.match(perps._botCardHtml(bot({ openRate: openRate({ lastHour: 9, maxOpensPerWindow: null }) })),
+  // Il confronto con la soglia usa `inWindow` (stessa finestra del freno),
+  // non `lastHour`/`last4h`: sono finestre diverse (60/240 min contro
+  // `windowMinutes`) e non dicono "quanto manca al blocco".
+  assert.match(perps._botCardHtml(bot({ openRate: openRate({ inWindow: 9, maxOpensPerWindow: null }) })),
     /bot-velocity-badge is-unknown/);
-  assert.match(perps._botCardHtml(bot({ openRate: openRate({ lastHour: null }) })),
+  assert.match(perps._botCardHtml(bot({ openRate: openRate({ inWindow: null }) })),
     /bot-velocity-badge is-unknown/);
-  assert.match(perps._botCardHtml(bot({ openRate: openRate({ lastHour: 3, windowMinutes: 'mezz\'ora' }) })),
+  assert.match(perps._botCardHtml(bot({ openRate: openRate({ inWindow: 3, windowMinutes: 'mezz\'ora' }) })),
     /bot-velocity-badge is-unknown/);
 });
 
@@ -143,9 +149,13 @@ test('un solo campo illeggibile basta per dichiarare ignoto', () => {
 
 test('ritmo vicino alla soglia: badge giallo con i numeri del payload', () => {
   const perps = loadUi();
-  const html = perps._botCardHtml(bot({ openRate: openRate({ lastHour: 3, last4h: 6 }) }));
+  // `inWindow` è il conteggio nella STESSA finestra del freno (30 min qui):
+  // è il numero che confrontato con la soglia dice davvero "quanto manca".
+  // `lastHour`/`last4h` restano come contesto supplementare nel title.
+  const html = perps._botCardHtml(bot({ openRate: openRate({ inWindow: 3, lastHour: 3, last4h: 6 }) }));
   assert.match(html, /bot-velocity-badge is-elevated/);
-  assert.match(html, /⚡ 3 aperture\/1h · max 4\/30min/);
+  assert.match(html, /⚡ 3\/4 in 30min/);
+  assert.match(html, /title="[^"]*3 aperture negli ultimi 30 min[^"]*"/);
   // L'apostrofo di "nell'ultima" esce come `&#39;`: è `_escapeHtml` applicata
   // all'intero title, non un caso particolare.
   assert.match(html, /title="[^"]*3 aperture nell&#39;ultima ora, 6 nelle ultime 4 ore[^"]*"/);
@@ -155,25 +165,25 @@ test('soglia e finestra vengono dal payload, non dai default riscritti lato UI',
   const perps = loadUi();
   // Bot con `overtrading` sovrascritto in config: 2 aperture ogni 10 minuti.
   const html = perps._botCardHtml(bot({
-    openRate: openRate({ lastHour: 1, last4h: 1, maxOpensPerWindow: 2, windowMinutes: 10 })
+    openRate: openRate({ inWindow: 1, lastHour: 1, last4h: 1, maxOpensPerWindow: 2, windowMinutes: 10 })
   }));
-  assert.match(html, /⚡ 1 apertura\/1h · max 2\/10min/,
-    'la soglia mostrata deve essere quella del bot, non il default 4/30');
-  assert.equal(html.includes('max 4/30min'), false);
+  assert.match(html, /⚡ 1\/2 in 10min/,
+    'la soglia e la finestra mostrate devono essere quelle del bot, non il default 4/30');
+  assert.equal(html.includes('4/30min'), false);
 });
 
 test('soglia 1: zero aperture non è "elevato"', () => {
   const perps = loadUi();
   // `maxOpensPerWindow - 1` varrebbe 0 e renderebbe elevato qualunque bot fermo.
-  const fermo = perps._botCardHtml(bot({ openRate: openRate({ maxOpensPerWindow: 1, lastHour: 0 }) }));
+  const fermo = perps._botCardHtml(bot({ openRate: openRate({ maxOpensPerWindow: 1, inWindow: 0 }) }));
   assert.equal(fermo.includes('bot-velocity-badge'), false);
-  const attivo = perps._botCardHtml(bot({ openRate: openRate({ maxOpensPerWindow: 1, lastHour: 1 }) }));
+  const attivo = perps._botCardHtml(bot({ openRate: openRate({ maxOpensPerWindow: 1, inWindow: 1 }) }));
   assert.match(attivo, /bot-velocity-badge is-elevated/);
 });
 
 test('freno disattivato per il bot: nessun badge, neanche con un ritmo alto', () => {
   const perps = loadUi();
-  const html = perps._botCardHtml(bot({ openRate: openRate({ enabled: false, lastHour: 12, last4h: 40 }) }));
+  const html = perps._botCardHtml(bot({ openRate: openRate({ enabled: false, inWindow: 12, lastHour: 12, last4h: 40 }) }));
   assert.equal(html.includes('bot-velocity-badge'), false,
     'senza freno non c\'è nessuna soglia da avvicinare: il badge affermerebbe un rischio inesistente');
 });

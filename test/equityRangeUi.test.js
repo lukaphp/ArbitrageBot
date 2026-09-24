@@ -133,7 +133,10 @@ function chartStub(record) {
   return {
     createChart: () => ({
       addAreaSeries: series, addLineSeries: series,
-      timeScale: () => ({ fitContent: () => {} }), resize: () => {}
+      // `applyOptions` sul timeScale è nell'API reale di Lightweight Charts
+      // (usato da `_equityChartTimeVisible` per tenere l'asse coerente col
+      // range): lo stub deve rispecchiarla, non solo `fitContent`.
+      timeScale: () => ({ fitContent: () => {}, applyOptions: () => {} }), resize: () => {}
     }),
     CrosshairMode: { Normal: 0 }
   };

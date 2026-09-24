@@ -190,6 +190,9 @@ if (process.argv[1] && process.argv[1].endsWith('server.js')) {
       db.init();
       botManager.loadFromDb();
       botManager.startWatchdog();
+      // Come il watchdog, si autoesclude in questo processo (CRIT #7): la
+      // chiamata resta qui perché il ruolo si decide a runtime, non dal file.
+      botManager.startReconciliationWatcher();
 
       const server = createArbitrageBotMcpServer();
       const transport = new StdioServerTransport();

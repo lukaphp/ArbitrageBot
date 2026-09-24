@@ -22,7 +22,9 @@ class BotManager {
     this.bots = new Map(); // id -> PerpsBot
     this.io = null;
     this.watchdogTimer = null;
-    this.lastWatchdogAlert = new Map(); // botId -> ts (throttle alert)
+    this.reconciliationTimer = null;
+    this.lastWatchdogAlert = new Map(); // botId -> ts (throttle alert "è fermo da troppo")
+    this.lastReconciliationAlert = new Map(); // botId -> ts (throttle alert "l'ho ripreso")
     this._forwardInFlight = new Set(); // botId con una POST loopback ancora in volo
     this._forwardFailures = 0;         // consecutive: serve al log per episodio, non per tentativo
   }
@@ -213,6 +215,7 @@ class BotManager {
     if (action === 'start' || action === 'restart') {
       bot._crashed = false;
       this.lastWatchdogAlert.delete(botId);
+      this.lastReconciliationAlert.delete(botId);
     }
 
     if (action === 'start') {
@@ -581,10 +584,125 @@ class BotManager {
     logger.info('🐕 Watchdog bot avviato');
   }
 
+  /**
+   * RECONCILIATION WATCHER: il DB dice `running`, ma qui non ticchetta nessuno.
+   *
+   * Gemello strutturale di `startWatchdog()`, che però ALLERTA soltanto: un bot
+   * senza loop resta senza loop finché una persona non se ne accorge e riavvia
+   * a mano. `loadFromDb()` ripara lo stesso disallineamento, ma solo all'avvio
+   * del processo; `reconciler.js` lavora nel verso opposto (chiude in DB le
+   * posizioni orfane di bot FERMI). Nel mezzo restava scoperto il caso peggiore:
+   * intento `running` e nessuno che valuta — una posizione aperta smette di
+   * essere gestita (niente trailing, niente uscite da regola) mentre la UI
+   * continua a mostrare un bot attivo.
+   *
+   * UNA SOLA DIREZIONE, ed è un vincolo di sicurezza, non un'omissione: si
+   * riavvia solo ciò che il DB dà per `running`. Un bot `stopped` non viene
+   * toccato NEMMENO se ha una posizione aperta — è la situazione tipica di chi
+   * ferma il bot apposta per gestire l'uscita a mano, e riaccenderglielo sotto
+   * le mani significherebbe piazzare trigger che nessuno ha chiesto su denaro
+   * vero. Quel caso è di `reconciler.js` o di un'azione esplicita.
+   *
+   * Il DB è l'unica fonte di verità sull'INTENTO (lo scrivono tutti i percorsi
+   * di mutazione, anche da un altro processo); la memoria è l'unica fonte di
+   * verità sul FATTO (`bot.isTicking()`: `status` da solo mentirebbe, vedi lì).
+   */
+  startReconciliationWatcher() {
+    if (this.reconciliationTimer) return;
+    // CRIT #7 — stessa ragione del watchdog, aggravata: qui non si osserva, si
+    // AVVIA. In un processo che non possiede il tick loop questo giro vedrebbe
+    // ogni bot `running` come disallineato (lì sono fermi per costruzione) e
+    // ricreerebbe il doppio esecutore, senza che nessuno l'abbia chiesto.
+    if (!ownsTickLoop()) {
+      logger.info('🔁 Riallineamento bot non avviato: i bot girano nel processo Express, che ha il suo');
+      return;
+    }
+    const CHECK_MS = 60000;
+    this.reconciliationTimer = setInterval(() => this.reconcileRunningBotsOnce(), CHECK_MS);
+    this.reconciliationTimer.unref?.();
+    logger.info('🔁 Riallineamento bot avviato (controllo ogni 60s)');
+  }
+
+  /**
+   * Un giro del reconciliation watcher. Separato dal timer perché è la sola
+   * parte che si possa osservare in un test senza aspettare un minuto.
+   *
+   * Non contiene codice di avvio proprio: `ensureLoaded` + `start()` sono lo
+   * stesso percorso già collaudato da Boot Sync e `applyLifecycleLocal`. In
+   * particolare `start()` emette già lo stato (`_emit()`), quindi il push verso
+   * la UI dopo il riavvio arriva da sé.
+   *
+   * Notifica UNA VOLTA PER EPISODIO, non per tentativo: la riparazione si
+   * ritenta ogni giro (è un tentativo che costa poco e a volte riesce al
+   * secondo giro), il messaggio no — altrimenti un bot che non riparte
+   * produrrebbe un Telegram al minuto, per sempre, e le notifiche diventerebbero
+   * rumore proprio quando contano. Throttle con chiave PROPRIA, distinta da
+   * quella del watchdog: «l'ho ripreso» e «è fermo da troppo» sono due eventi
+   * diversi, condividere la chiave ne farebbe sparire uno.
+   *
+   * @returns {{checked: number, repaired: string[], failed: string[]}}
+   */
+  reconcileRunningBotsOnce() {
+    const ALERT_THROTTLE_MS = 10 * 60 * 1000;
+    const now = Date.now();
+    const repaired = [];
+    const failed = [];
+    let rows = [];
+    try {
+      rows = db.listBots();
+    } catch (e) {
+      logger.error('🔁 Riallineamento bot: impossibile leggere i bot dal DB', e.message);
+      return { checked: 0, repaired, failed };
+    }
+
+    // SOLO `running`: vedi il vincolo di direzione in startReconciliationWatcher().
+    const intended = rows.filter(r => r.status === 'running');
+    for (const row of intended) {
+      const known = this.bots.get(row.id);
+      if (known && known.isTicking()) continue;
+
+      const alertable = now - (this.lastReconciliationAlert.get(row.id) || 0) > ALERT_THROTTLE_MS;
+      const motivo = !known
+        ? 'nessuna istanza in memoria'
+        : (known.status !== 'running' ? `istanza in stato '${known.status}'` : 'timer di tick assente');
+      try {
+        const bot = this.ensureLoaded(row.id);
+        if (!bot) {
+          // La riga è sparita tra `listBots()` e ora (delete concorrente):
+          // non è un guasto, non c'è più niente da riallineare.
+          continue;
+        }
+        bot._crashed = false;
+        bot.start();
+        repaired.push(row.id);
+        logger.warn(`🔁 Riallineamento: bot ${bot.name} (${bot.coin}) risultava in esecuzione sul DB ma non ticcava (${motivo}) — riavviato`);
+        if (alertable) {
+          this.lastReconciliationAlert.set(row.id, now);
+          notifier.notify(
+            `🔁 <b>Bot riallineato</b>: <b>${bot.name}</b> (${bot.coin}) risultava in esecuzione ` +
+            `ma non stava girando (${motivo}). L'ho riavviato automaticamente.`
+          );
+        }
+      } catch (e) {
+        failed.push(row.id);
+        logger.error(`🔁 Riallineamento FALLITO per il bot ${row.name} (${row.coin}): ${e.message}`, e);
+        if (alertable) {
+          this.lastReconciliationAlert.set(row.id, now);
+          notifier.notify(
+            `🚨 <b>Riallineamento fallito</b>: il bot <b>${row.name}</b> (${row.coin}) risulta in esecuzione ` +
+            `ma non gira, e il riavvio automatico non è riuscito: ${e.message}\n` +
+            'Finché resta così non valuta nulla: una posizione aperta non viene gestita da nessuno.'
+          );
+        }
+      }
+    }
+    return { checked: intended.length, repaired, failed };
+  }
 
   /** Shutdown del server: ferma i timer senza cambiare lo stato persistito. */
   stopAll() {
     if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
+    if (this.reconciliationTimer) { clearInterval(this.reconciliationTimer); this.reconciliationTimer = null; }
     for (const bot of this.bots.values()) bot.shutdown();
   }
 }

@@ -2344,6 +2344,10 @@ class ArbitrageBotServer {
         botManager.setIo(this.io);
         botManager.loadFromDb();
         botManager.startWatchdog();
+        // Il watchdog ALLERTA e basta: se un bot `running` a DB smette di
+        // ticcare dopo il boot, nessuno lo rimette in moto. Questo lo fa —
+        // solo in quella direzione, mai riavviando un bot fermato apposta.
+        botManager.startReconciliationWatcher();
         // ADV-02: retention dei transcript di chat applicata all'avvio (oltre che
         // alla creazione di una nuova conversazione), così un deploy fermo per
         // settimane non si ritrova con mesi di storico oltre la soglia.

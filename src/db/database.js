@@ -237,6 +237,11 @@ export class PerpsDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS idx_positions_bot ON positions(bot_id);
+      -- Le letture "per bot, in una finestra di tempo" (gate di overtrading,
+      -- ritmo di apertura esposto alla UI) filtrano su bot_id E opened_at, e
+      -- girano su ogni tentativo di apertura: l'indice composto evita di
+      -- scorrere tutta la storia del bot per contare gli ultimi 30 minuti.
+      CREATE INDEX IF NOT EXISTS idx_positions_bot_opened ON positions(bot_id, opened_at);
       CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id);
       CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
       CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
@@ -808,6 +813,44 @@ export class PerpsDatabase {
       `SELECT opened_at FROM positions WHERE bot_id = ? ORDER BY opened_at DESC LIMIT 1`
     ).get(botId);
     return row ? row.opened_at : null;
+  }
+
+  /**
+   * OVERTRADING — quante volte il bot è ENTRATO a mercato da `sinceTs` (ms) a
+   * oggi. Conta le righe `positions` per `opened_at`, quindi:
+   *
+   *  - include le posizioni ancora APERTE (un ingresso è un ingresso anche se
+   *    non è ancora stato chiuso);
+   *  - non guarda il PnL: è una misura di frequenza, non di esito. I due
+   *    cooldown esistenti guardano già le perdite, questo serve al caso che
+   *    loro non vedono (aperture ravvicinate che chiudono in pari o in utile).
+   *
+   * Vive in DB e non in un contatore in memoria di proposito: un riavvio del
+   * processo non deve riaprire la finestra di re-entry impulsivo — è lo stesso
+   * motivo per cui il cooldown di portafoglio è stato persistito.
+   */
+  countOpensSince(botId, sinceTs) {
+    this.ensure();
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS n FROM positions WHERE bot_id = ? AND opened_at >= ?`
+    ).get(botId, Math.floor(Number(sinceTs) || 0));
+    return row ? row.n : 0;
+  }
+
+  /**
+   * `opened_at` dell'apertura più VECCHIA ancora dentro la finestra, o null.
+   *
+   * È il dato da cui si deriva quando la finestra scorrevole tornerà sotto
+   * soglia (quella apertura ne esce a `opened_at + finestra`). Derivato dal DB
+   * a ogni lettura, mai memorizzato: non esiste nessun "pausedUntil" da tenere
+   * sincronizzato, e il blocco si scioglie da sé.
+   */
+  oldestOpenedAtSince(botId, sinceTs) {
+    this.ensure();
+    const row = this.db.prepare(
+      `SELECT MIN(opened_at) AS oldest FROM positions WHERE bot_id = ? AND opened_at >= ?`
+    ).get(botId, Math.floor(Number(sinceTs) || 0));
+    return row && row.oldest != null ? row.oldest : null;
   }
 
   /** Conta le perdite consecutive più recenti di un bot. */

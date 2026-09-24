@@ -49,6 +49,10 @@ class HyperliquidClient {
     this.readSdks = new Map();   // network (+ ':heavy') -> SDK (sola lettura)
     this.signSdks = new Map();   // `${network}:${master}` -> SDK (firma con agent key)
     this.wsSdks = new Map();     // network -> SDK con WebSocket connesso
+    // Letture di peso 20 attualmente in volo, per `${network}:${tipo}:${master}`.
+    // Serve a non chiedere sei volte la stessa risposta quando sei bot dello
+    // stesso wallet ticchettano insieme — vedi `_coalesceHeavyRead`.
+    this.heavyReadsInFlight = new Map();
     // Tetti di tempo per le chiamate REST. Sono campi d'istanza e non costanti
     // di modulo perché i test devono poterli abbassare per verificare il
     // comportamento su una chiamata che non risponde mai, senza aspettare.
@@ -177,6 +181,39 @@ class HyperliquidClient {
   /** Opzioni di `withRetry` per una lettura pesante (peso 20). */
   _heavyReadOpts(label) {
     return { label, retries: this.restRetries, timeoutMs: this.restTimeoutMs };
+  }
+
+  /**
+   * UNISCE le letture pesanti IDENTICHE già in volo (P0 del 24/09/2026).
+   *
+   * `getFrontendOpenOrders(master)` e `getUserFills(master)` sono per WALLET,
+   * non per mercato: sei bot sullo stesso account chiedono sei volte la stessa
+   * identica risposta. A 20 token l'una su un secchiello con refill 10/s
+   * (misurato sull'SDK installata: capacity 100, refillRate 10) sono 120 token
+   * per giro di flotta contro i 20 che il secchiello produce nello stesso
+   * tempo: il prosciugamento non era un caso sfortunato, era aritmetica.
+   *
+   * Quello che si condivide è la richiesta IN VOLO, non una cache a scadenza:
+   * nessun consumatore riceve mai un dato più vecchio di una richiesta partita
+   * adesso, e appena la risposta arriva la chiave sparisce. È una proprietà che
+   * conta su un percorso che decide se una posizione è protetta — una cache con
+   * TTL avrebbe potuto far credere vivo uno stop loss cancellato un istante
+   * prima. In compenso è efficace proprio quando serve: più il secchiello è in
+   * sofferenza, più le richieste restano in volo a lungo, più si sovrappongono.
+   *
+   * Ogni chiamante rimappa la risposta grezza per conto suo, quindi nessuno
+   * riceve l'array di un altro e nessuno può mutarglielo sotto.
+   */
+  _coalesceHeavyRead(kind, masterAddress, network, run) {
+    const key = `${network}:${kind}:${String(masterAddress).toLowerCase()}`;
+    const inFlight = this.heavyReadsInFlight.get(key);
+    if (inFlight) {
+      metrics.inc('heavy_reads_coalesced_total');
+      return inFlight;
+    }
+    const promise = run().finally(() => this.heavyReadsInFlight.delete(key));
+    this.heavyReadsInFlight.set(key, promise);
+    return promise;
   }
 
   /**
@@ -513,8 +550,10 @@ class HyperliquidClient {
    * se resta appesa, quella garanzia smette di girare senza dirlo a nessuno.
    */
   async getFrontendOpenOrders(masterAddress, network = this.network) {
-    const sdk = await this.getHeavyReadSdk(network);
-    const orders = await withRetry(() => sdk.info.getFrontendOpenOrders(masterAddress), this._heavyReadOpts('getFrontendOpenOrders'));
+    const orders = await this._coalesceHeavyRead('frontendOpenOrders', masterAddress, network, async () => {
+      const sdk = await this.getHeavyReadSdk(network);
+      return withRetry(() => sdk.info.getFrontendOpenOrders(masterAddress), this._heavyReadOpts('getFrontendOpenOrders'));
+    });
     return (orders || []).map(o => ({
       coin: o.coin,
       side: o.side === 'B' ? 'buy' : 'sell',
@@ -533,8 +572,10 @@ class HyperliquidClient {
    * Lettura PESANTE (peso 20): va sulla SDK dedicata — vedi `getHeavyReadSdk`.
    */
   async getUserFills(masterAddress, network = this.network) {
-    const sdk = await this.getHeavyReadSdk(network);
-    const fills = await withRetry(() => sdk.info.getUserFills(masterAddress), this._heavyReadOpts('getUserFills'));
+    const fills = await this._coalesceHeavyRead('userFills', masterAddress, network, async () => {
+      const sdk = await this.getHeavyReadSdk(network);
+      return withRetry(() => sdk.info.getUserFills(masterAddress), this._heavyReadOpts('getUserFills'));
+    });
     return (fills || [])
       .sort((a, b) => b.time - a.time)
       .slice(0, 200)

@@ -37,6 +37,21 @@ import logger from '../utils/logger.js';
  */
 const CLOSE_REASON_UNRESOLVED = 'chiusa (TP/SL o esterna)';
 
+/**
+ * Quante volte DI FILA il ri-piazzamento di uno stop loss ASSENTE può fallire
+ * prima di chiudere la posizione per sicurezza.
+ *
+ * Non è un numero estetico. Il 24/09/2026 la guardia chiudeva al PRIMO errore
+ * di qualunque natura — compreso un timeout di lettura — e ha liquidato 23
+ * posizioni su 24 in 23 minuti. La chiusura di sicurezza resta giusta, ma solo
+ * quando è sostenuta da prove RIPETUTE: una singola chiamata andata in timeout
+ * non dice nulla sullo stato del book, dice solo che non siamo riusciti a
+ * leggerlo. Tre tentativi consecutivi su un tick da 10s significano ~30s di
+ * incapacità di ripristinare la protezione su una posizione che sappiamo
+ * scoperta: a quel punto chiudere è la scelta prudente.
+ */
+const MAX_SL_RESTORE_ATTEMPTS = 3;
+
 export class PerpsBot {
   constructor(record, onUpdate) {
     this.id = record.id;
@@ -104,6 +119,17 @@ export class PerpsBot {
     this.tickErrors = 0;       // contatore errori di tick (metriche)
     this._lastCooldownNotifyUntil = null; // episodio di cooldown già notificato (una notifica per episodio, non per tick)
     this._lastSizingBlockReason = null;   // ultimo motivo di size nulla già notificato (stesso principio, BUG-SIZECAP-01)
+    // Guardia SL — stato dei due contatori, tenuti DISTINTI di proposito perché
+    // contano due cose diverse (vedi `_ensureStopLoss`):
+    //  - `_slVerifyFailures`: quante volte di fila NON siamo riusciti a leggere
+    //    il book. È assenza di conoscenza: non chiude mai niente, fa rumore.
+    //  - `_slRestoreFailures`: quante volte di fila, con l'assenza dello SL già
+    //    CONFERMATA da una lettura riuscita, il ri-piazzamento è fallito. È
+    //    conoscenza di un problema reale: dopo MAX_SL_RESTORE_ATTEMPTS chiude.
+    this._slVerifyFailures = 0;
+    this._slRestoreFailures = 0;
+    this._ordersReadEpisode = false;      // episodio di cecità già notificato (una notifica per episodio, non per tick)
+    this._lastReportedReadError = null;   // guasto di lettura già contato: i due consumatori della lettura condivisa lo vedono entrambi
     this.dailyKey = this._todayKey();
     // PnL giornaliero PERSISTITO: sopravvive ai riavvii (il limite di perdita
     // giornaliera non riparte da zero dopo un restart a metà giornata).
@@ -989,24 +1015,103 @@ export class PerpsBot {
     }
   }
 
+  /**
+   * Lettore CONDIVISO degli ordini aperti, valido per un solo tick.
+   *
+   * `getFrontendOpenOrders` è la chiamata più cara che l'SDK Hyperliquid
+   * conosca: pesa 20 token su un secchiello da 100 con refill 10/s (misurato
+   * sull'SDK installata), cioè al massimo mezza chiamata al secondo in regime
+   * stazionario. Fino al 24/09/2026 un singolo tick su posizione aperta ne
+   * faceva DUE indipendenti sullo stesso wallet e sullo stesso istante — una
+   * per la guardia SL, una per lo sweep dei TP — che tornavano per definizione
+   * lo stesso book. Con 6 bot con posizione aperta e tick da 10s sono 24 token/s
+   * richiesti contro 10 disponibili: il secchiello non poteva che prosciugarsi,
+   * e le letture andavano in timeout. Da lì partiva la chiusura di sicurezza.
+   *
+   * Il lettore memoizza la PROMISE, non il risultato: se la lettura fallisce,
+   * tutti i consumatori del tick ricevono lo stesso rigetto senza che nessuno
+   * ne inneschi una seconda. È importante quanto il caso felice — ritentare
+   * sotto saturazione aggiunge pressione proprio quando ce n'è troppa.
+   *
+   * Non è una cache tra tick: l'istantanea nasce e muore dentro il tick, e i
+   * due consumatori leggono insiemi disgiunti (stop vs non-stop), quindi
+   * nessuno dei due può invalidare ciò che vede l'altro. Chi modifica il book e
+   * poi deve rileggerlo (`_replaceTpSl`, la verifica dopo un ri-piazzamento)
+   * non usa il lettore condiviso e fa la sua lettura fresca.
+   */
+  _sharedOrderReader() {
+    let pending = null;
+    return () => (pending ??= this.broker.getFrontendOpenOrders(this.masterAddress, this.network));
+  }
+
+  /** Legge il book dal lettore condiviso del tick, o direttamente se non ce n'è uno. */
+  async _readOpenOrders(readOrders) {
+    return readOrders ? readOrders() : this.broker.getFrontendOpenOrders(this.masterAddress, this.network);
+  }
+
+  /** True se l'ordine appartiene al mercato di questo bot. */
+  _isSameCoin(o) {
+    return o.coin === this.coin || `${o.coin}-PERP` === this.coin || o.coin === this.coin.replace('-PERP', '');
+  }
+
   /** Tutti gli ordini SL (trigger reduce-only "stop") attivi per questo mercato. */
-  async _findStopOrders() {
-    const orders = await this.broker.getFrontendOpenOrders(this.masterAddress, this.network);
-    const sameCoin = o => o.coin === this.coin || `${o.coin}-PERP` === this.coin || o.coin === this.coin.replace('-PERP', '');
-    return (orders || []).filter(o => sameCoin(o) && o.isTrigger && /stop/i.test(o.orderType || ''));
+  async _findStopOrders(readOrders) {
+    const orders = await this._readOpenOrders(readOrders);
+    return (orders || []).filter(o => this._isSameCoin(o) && o.isTrigger && /stop/i.test(o.orderType || ''));
   }
 
   /** Trova l'ordine SL (trigger reduce-only) attivo per questa posizione, se c'è. */
-  async _findStopOrder() {
-    const stops = await this._findStopOrders();
+  async _findStopOrder(readOrders) {
+    const stops = await this._findStopOrders(readOrders);
     return stops.find(o => o.oid === this.position?.slOid) || stops[0] || null;
   }
 
   /** Trova gli ordini TP (trigger reduce-only, non-stop) attivi per questa posizione — può essere più di uno con partialTp. */
-  async _findTpOrders() {
-    const orders = await this.broker.getFrontendOpenOrders(this.masterAddress, this.network);
-    const sameCoin = o => o.coin === this.coin || `${o.coin}-PERP` === this.coin || o.coin === this.coin.replace('-PERP', '');
-    return (orders || []).filter(o => sameCoin(o) && o.isTrigger && !/stop/i.test(o.orderType || ''));
+  async _findTpOrders(readOrders) {
+    const orders = await this._readOpenOrders(readOrders);
+    return (orders || []).filter(o => this._isSameCoin(o) && o.isTrigger && !/stop/i.test(o.orderType || ''));
+  }
+
+  /**
+   * Segnala che NON siamo riusciti a leggere gli ordini aperti.
+   *
+   * Non è un fallimento silenziabile — una guardia che non riesce a fare la
+   * guardia deve dirlo — ma neanche un motivo per chiudere: una lettura fallita
+   * non è una prova sullo stato del book, e i trigger già piazzati continuano a
+   * proteggere la posizione exchange-side anche mentre noi siamo ciechi (è
+   * esattamente ciò che tiene al sicuro le posizioni quando il bot è fermo).
+   *
+   * Una notifica per EPISODIO, non per tick: a 10s di tick, tre bot ciechi per
+   * dieci minuti sarebbero 180 messaggi e Telegram verrebbe ignorato proprio
+   * quando conta. L'episodio si chiude — con notifica di rientro — alla prima
+   * lettura riuscita.
+   */
+  _reportOrdersReadFailure(error) {
+    // Guardia SL e sweep TP condividono UNA lettura: quando fallisce, ricevono
+    // lo stesso identico oggetto Error e chiamano entrambi questo metodo. È un
+    // solo guasto, va contato una volta — altrimenti «tentativo consecutivo 6»
+    // dopo tre tick manderebbe fuori strada chi legge il log o la metrica.
+    if (error && this._lastReportedReadError === error) return;
+    this._lastReportedReadError = error;
+    this._slVerifyFailures++;
+    metrics.inc('sl_verify_failures_total');
+    logger.error(`Bot ${this.name}: impossibile verificare i trigger attivi su ${this.coin} (tentativo consecutivo ${this._slVerifyFailures})`, error?.message);
+    if (!this._ordersReadEpisode) {
+      this._ordersReadEpisode = true;
+      notifier.notify(`👁️ <b>${this.name}</b>: non riesco a verificare stop loss e take profit su ${this.coin} (${error?.message}). La posizione NON viene chiusa — i trigger già piazzati restano attivi sull'exchange — ma la guardia è cieca finché non rientra.`, { urgent: true });
+    }
+  }
+
+  /** Chiude l'episodio di cecità dopo una lettura riuscita. */
+  _reportOrdersReadRecovered() {
+    if (this._ordersReadEpisode) {
+      const blind = this._slVerifyFailures;
+      this._ordersReadEpisode = false;
+      logger.info(`Bot ${this.name}: verifica dei trigger su ${this.coin} di nuovo operativa dopo ${blind} tentativo/i fallito/i`);
+      notifier.notify(`✅ <b>${this.name}</b>: verifica dei trigger su ${this.coin} ripristinata dopo ${blind} tentativo/i fallito/i.`);
+    }
+    this._slVerifyFailures = 0;
+    this._lastReportedReadError = null;
   }
 
   /**
@@ -1018,8 +1123,23 @@ export class PerpsBot {
    * — come i 2 SL trovati sul VPS — rientra da solo, senza cancellazioni a mano.
    * No-op se la strategia non prevede SL.
    */
-  async _ensureStopLoss() {
+  async _ensureStopLoss(readOrders) {
     if (!this.position || !this.position.slPx) return;
+
+    // FASE 1 — VERIFICA. È l'unico punto in cui si acquisisce CONOSCENZA sullo
+    // stato del book, ed è tenuto separato da tutto il resto proprio perché il
+    // suo fallimento ha un significato diverso da ogni altro: «non so», non
+    // «non c'è». Il try/catch unico che avvolgeva l'intera funzione confondeva
+    // le due cose e chiudeva la posizione su un timeout di rete (P0 24/09/2026).
+    let stops;
+    try {
+      stops = await this._findStopOrders(readOrders);
+    } catch (error) {
+      this._reportOrdersReadFailure(error);
+      return; // nessuna chiusura: un timeout non è una prova.
+    }
+    this._reportOrdersReadRecovered();
+
     try {
       // SEC-08 — pulizia degli SL orfani. Una posizione ha esattamente UN stop
       // loss: più di uno significa che un ri-piazzamento ha lasciato indietro il
@@ -1027,7 +1147,6 @@ export class PerpsBot {
       // 1.31 SOL). Ne teniamo uno — quello che stiamo tracciando, se c'è — e
       // cancelliamo gli altri: l'ordine di cancellazione parte solo su ordini in
       // eccesso, quindi la posizione non resta mai senza protezione.
-      const stops = await this._findStopOrders();
       if (stops.length) {
         const keep = stops.find(o => o.oid === this.position.slOid) || stops[0];
         const previousOid = this.position.slOid;
@@ -1044,45 +1163,67 @@ export class PerpsBot {
               .catch(err => logger.error(`Bot ${this.name}: cancellazione SL orfano ${o.oid} fallita`, err.message));
           }
         }
+        this._slRestoreFailures = 0; // protezione presente e tracciata
         return;
       }
+    } catch (error) {
+      // La lettura era riuscita, la POTATURA no (cancellazione, scrittura in DB).
+      // Non è un motivo per chiudere: lo SL tracciato esiste, il difetto è al più
+      // un ordine di troppo. Va detto, non nascosto.
+      logger.error(`Bot ${this.name}: pulizia degli stop loss in eccesso su ${this.coin} fallita`, error?.message);
+      notifier.notify(`⚠️ <b>${this.name}</b>: non sono riuscito a ripulire gli stop loss in eccesso su ${this.coin} (${error?.message}) — verifica manualmente che ne resti uno solo.`, { urgent: true });
+      return;
+    }
 
-      // SL assente: tentativo di ripiazzamento immediato.
-      logger.warn(`Bot ${this.name}: stop loss assente, ripiazzo…`);
-      const closeIsBuy = this.position.side === 'short';
-      const res = await this.broker.placeTriggerOrder({
+    // FASE 2 — ASSENZA CONFERMATA. Qui la lettura è RIUSCITA e non ha trovato
+    // nessuno stop loss: questa sì è conoscenza, e giustifica un'azione.
+    logger.warn(`Bot ${this.name}: stop loss assente, ripiazzo…`);
+    const closeIsBuy = this.position.side === 'short';
+    let res;
+    try {
+      res = await this.broker.placeTriggerOrder({
         masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
         size: this.position.size, triggerPx: this.position.slPx, tpsl: 'sl'
       }, this.network);
-      this.position.slOid = res.oid;
-      db.updatePosition(this.position.id, { trailing_json: this._trailingJson() });
-
-      // WARN-06 — `oid` nullo è una risposta già CONCLUSIVA: l'ordine non è stato
-      // accettato. Cercarlo sul book sarebbe una chiamata di rete in più con la
-      // posizione completamente scoperta, per confermare qualcosa che il broker ha
-      // già detto. Si chiude subito.
-      if (!res.oid) {
-        logger.error(`Bot ${this.name}: impossibile garantire lo stop loss (oid nullo), chiusura di sicurezza`);
-        notifier.notify(`⚠️ <b>${this.name}</b>: stop loss non piazzabile su ${this.coin} → chiudo la posizione per sicurezza.`, { urgent: true });
-        await this._closeNow('SL non garantito (chiusura di sicurezza)');
-        return;
-      }
-
-      // Con un oid valido la verifica sul book resta: serve a lasciare traccia se
-      // l'ordine accettato non risulta poi visibile (non chiude la posizione — è
-      // esattamente il comportamento precedente, dove `!res.oid` era già falso).
-      const stop = await this._findStopOrder();
-      if (!stop) {
-        logger.debug(`Bot ${this.name}: stop loss ${res.oid} accettato ma non ancora visibile tra gli ordini aperti`);
-      }
     } catch (error) {
-      logger.error(`Bot ${this.name}: errore verifica stop loss`, error.message);
-      // In caso di errore irriducibile, è più prudente chiudere che restare nudi.
-      try {
-        notifier.notify(`⚠️ <b>${this.name}</b>: errore nel garantire lo stop loss → chiudo la posizione.`, { urgent: true });
-        await this._closeNow('errore verifica SL (chiusura di sicurezza)');
-      } catch { /* noop */ }
+      // Il ri-piazzamento è FALLITO su una posizione che sappiamo scoperta: è la
+      // situazione più grave, ma resta un esito INCERTO (un timeout non dice se
+      // l'ordine è passato o no). Si conta e si riprova al tick successivo;
+      // si chiude solo dopo MAX_SL_RESTORE_ATTEMPTS fallimenti CONSECUTIVI,
+      // perché a quel punto l'incertezza è durata troppo per essere ignorata.
+      this._slRestoreFailures++;
+      metrics.inc('sl_restore_failures_total');
+      logger.error(`Bot ${this.name}: ri-piazzamento dello stop loss su ${this.coin} fallito (${this._slRestoreFailures}/${MAX_SL_RESTORE_ATTEMPTS} consecutivi)`, error?.message);
+      if (this._slRestoreFailures >= MAX_SL_RESTORE_ATTEMPTS) {
+        notifier.notify(`⚠️ <b>${this.name}</b>: stop loss assente su ${this.coin} e ri-piazzamento fallito ${this._slRestoreFailures} volte di fila (${error?.message}) → chiudo la posizione per sicurezza.`, { urgent: true });
+        await this._closeNow('SL assente e ripristino fallito (chiusura di sicurezza)');
+      } else {
+        notifier.notify(`⚠️ <b>${this.name}</b>: stop loss assente su ${this.coin}, ri-piazzamento fallito (${error?.message}). Riprovo al prossimo tick — chiuderò per sicurezza dopo ${MAX_SL_RESTORE_ATTEMPTS} tentativi consecutivi.`, { urgent: true });
+      }
+      return;
     }
+
+    this.position.slOid = res.oid;
+    db.updatePosition(this.position.id, { trailing_json: this._trailingJson() });
+
+    // WARN-06 — `oid` nullo è una risposta già CONCLUSIVA: l'ordine non è stato
+    // accettato. Cercarlo sul book sarebbe una chiamata di rete in più con la
+    // posizione completamente scoperta, per confermare qualcosa che il broker ha
+    // già detto. Si chiude subito. RAMO INVARIATO dal fix del 24/09/2026: è
+    // l'unico caso in cui il broker ci ha dato una risposta, e la risposta è no.
+    if (!res.oid) {
+      logger.error(`Bot ${this.name}: impossibile garantire lo stop loss (oid nullo), chiusura di sicurezza`);
+      notifier.notify(`⚠️ <b>${this.name}</b>: stop loss non piazzabile su ${this.coin} → chiudo la posizione per sicurezza.`, { urgent: true });
+      await this._closeNow('SL non garantito (chiusura di sicurezza)');
+      return;
+    }
+
+    // Ordine accettato con un oid valido: protezione ripristinata, contatore a zero.
+    // Qui c'era una rilettura del book il cui unico effetto era un `logger.debug`
+    // se l'ordine non risultava ancora visibile: una chiamata di peso 20 in più
+    // proprio sul percorso in cui il secchiello è già sotto pressione, per
+    // un'informazione che il tick successivo fornisce comunque. Rimossa.
+    this._slRestoreFailures = 0;
   }
 
   /**
@@ -1121,12 +1262,24 @@ export class PerpsBot {
    * paperBroker). Dopo un ri-piazzamento place-then-cancel i trigger corretti
    * sono gli ultimi piazzati; i residui sono i precedenti.
    */
-  async _sweepExcessTakeProfits() {
+  async _sweepExcessTakeProfits(readOrders) {
     if (!this.position) return;
     const expected = this._expectedTpCount();
     if (expected === 0) return;
+
+    // Stessa distinzione di `_ensureStopLoss`: non essere riusciti a leggere il
+    // book non è un'anomalia dei TP, è cecità — e quando il lettore è condiviso
+    // col tick è LO STESSO fallimento che la guardia SL ha già segnalato, quindi
+    // passa dal dedup per episodio invece di produrre una seconda notifica.
+    let tps;
     try {
-      const tps = await this._findTpOrders();
+      tps = await this._findTpOrders(readOrders);
+    } catch (error) {
+      this._reportOrdersReadFailure(error);
+      return;
+    }
+
+    try {
       if (tps.length <= expected) return;
 
       const sorted = [...tps].sort((a, b) => (b.oid ?? 0) - (a.oid ?? 0));
@@ -1144,10 +1297,11 @@ export class PerpsBot {
           .catch(err => logger.error(`Bot ${this.name}: cancellazione TP in eccesso ${o.oid} fallita`, err.message));
       }
     } catch (error) {
-      // Non si chiude la posizione (vedi asimmetria 1), ma non si tace: se non
-      // riesco a leggere i trigger attivi, l'operatore deve poterlo sapere.
+      // Non si chiude la posizione (vedi asimmetria 1), ma non si tace: qui la
+      // lettura era riuscita e a fallire è stata la POTATURA (cancellazione o
+      // scrittura), quindi il messaggio dice quello, non «non riesco a leggere».
       logger.error(`Bot ${this.name}: errore pulizia TP in eccesso`, error.message);
-      notifier.notify(`⚠️ <b>${this.name}</b>: impossibile verificare i take profit attivi su ${this.coin} (${error.message}) — controlla manualmente che non ce ne siano di residui.`, { urgent: true });
+      notifier.notify(`⚠️ <b>${this.name}</b>: non sono riuscito a rimuovere i take profit in eccesso su ${this.coin} (${error.message}) — controlla manualmente che non ce ne siano di residui.`, { urgent: true });
     }
   }
 
@@ -1157,11 +1311,15 @@ export class PerpsBot {
       await this._closeNow(decision.reason);
       return;
     }
+    // UNA sola lettura del book per tick, condivisa dalle due guardie: prima
+    // ne facevano una a testa sullo stesso wallet e nello stesso istante, cioè
+    // 40 token di peso per bot per tick (vedi `_sharedOrderReader`).
+    const readOrders = this._sharedOrderReader();
     // Guardia continua: assicura che lo stop loss sia attivo a ogni tick.
-    await this._ensureStopLoss();
+    await this._ensureStopLoss(readOrders);
     if (!this.position) return; // _ensureStopLoss può aver chiuso per sicurezza
     // DEBT-01: e che i TP attivi non siano più di quanti la strategia prevede.
-    await this._sweepExcessTakeProfits();
+    await this._sweepExcessTakeProfits(readOrders);
     // DCA: aggiunge alla posizione su movimento avverso (mediazione del prezzo)
     await this._maybeDca(snapshot);
     // Trailing stop — PLACE-THEN-CANCEL: piazza il nuovo trigger PRIMA di

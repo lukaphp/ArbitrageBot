@@ -44,6 +44,19 @@ L'equity corretta è `accountValue + (spot.total − spot.hold)`, che ha la prop
 giusta: è invariante all'apertura di una posizione. Vedi
 [[equity-doppio-conteggio-spot]].
 
+## Ordine di grandezza del funding rate: non formattarlo a 2 decimali
+
+Il `fundingRate` di Hyperliquid è **oraria e piccolissima**: 0.0001 = 0.01%. Di
+conseguenza le soglie delle regole `type: 'funding'` sono numeri come `0.0001` o `0`,
+e **qualunque formattatore a 2 decimali le azzera** ("< 0.00"), mostrando una cosa
+falsa invece di una cosa mancante. Nella diagnostica del Monitor il funding si legge
+infatti su 4 decimali in percentuale (`(funding * 100).toFixed(4) + '%'`).
+
+**How to apply:** quando unifichi la formattazione dei valori numerici in una vista,
+il funding è l'eccezione da trattare a parte — la coerenza estetica con prezzi e
+indicatori qui costa precisione. Vale anche al contrario: un fix "rendiamo tutto
+coerente" su queste pill va bloccato in review.
+
 ## Attenzione: `webData2` NON ha la stessa semantica
 
 `webData2` (la chiamata che usa il frontend) restituisce stato perp e spot in

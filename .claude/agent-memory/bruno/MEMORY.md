@@ -1,13 +1,19 @@
 # Memoria di Bruno — Backend / logica che maneggia denaro
 
 - [Place-then-cancel, sempre](feedback_place-then-cancel.md) — il nuovo trigger prima della cancellazione del vecchio; pattern di SEC-01
+- [«Non so» non è «non c'è»](feedback_non-so-non-e-non-ce.md) — il try/catch sull'intera funzione che ha liquidato 23 posizioni su 24 per un timeout
+- [Budget di chiamate: fai la divisione](feedback_budget-di-chiamate-e-aritmetica.md) — alzare il secchiello è la risposta sbagliata; coalescenza, amplificazione da retry, discriminante interno/fornitore
 - [Stato posizione: immutabile vs corrente](feedback_stato-posizione-immutabile-vs-corrente.md) — ingresso originale ≠ prezzo medio, e `trailing_json` in merge mai in overwrite
-- [`npm test` non termina (arm64)](project_npm-test-non-termina.md) — rebuild nativo, `--test-force-exit`, e i rossi flake da ri-eseguire prima di attribuirli
+- [`npm test` non termina (arm64)](project_npm-test-non-termina.md) — risolto: SDK chiuse nel teardown, niente più `--test-force-exit`; come trovare l'handle vivo
 - [Seam di test del repo](feedback_seam-di-test.md) — paperBroker, DB temporaneo, mock.timers, CLI a processo figlio; e verifica che il test falliresse col bug
+- [`ok` non significa "eseguito"](feedback_ok-non-significa-eseguito.md) — ramifica il messaggio sull'esito reale, e cerca il gemello (web ↔ Telegram) dello stesso testo
 - [Nessun fallimento silenzioso sul money path](feedback_fallimenti-money-path-non-silenziosi.md) — log **e** notifica, una per episodio non per tentativo
 - [Invarianti nel DB, non nel chiamante](feedback_invarianti-nel-db-non-nel-chiamante.md) — "crea se non esiste" dentro un metodo sincrono; il pattern di SEC-08
 - [Contratto API: leggi il consumer](feedback_contratto-api-leggi-il-consumer.md) — due suite verdi e la UI rotta; segni firmati e chiavi aggiuntive invece di forme cambiate
+- [Vista aggregata di due fonti](feedback_vista-aggregata-di-due-fonti.md) — reale + paper: concatena ed etichetta, mai fondere; rapporti da un solo aggregato
+- [Cap globale posizioni: race fra coin](project_cap-globale-posizioni-race.md) — 4 su un cap di 3; risolto (issue #34) con slot riservati per wallet, non con un lock di wallet
 - [Un guardrail copre solo chi scrive lo stato che legge](feedback_guardrail-copre-solo-chi-scrive-lo-stato.md) — chi scrive la riga `positions`? verificalo eseguendo, non leggendo
+- [Dati con tempi di vita diversi](feedback_dati-con-tempi-di-vita-diversi.md) — un prezzo dentro una cache di metadati: sovrapponilo in lettura dal feed vivo, non con un timer che rifà la fetch
 - [Purezza delle funzioni che sembrano query](feedback_purezza-funzioni-che-sembrano-query.md) — `canOpen` che scriveva stato: il finding più importante di Release 2 · Sprint 1
 - [Working tree condiviso: mai git stash](project_tree-condiviso-mai-git-stash.md) — il rosso-prima-del-fix si ottiene test-first o con un worktree separato, non stashando il lavoro dei colleghi
 - [TP vs SL si legge dall'oid del fill](project_close-reason-non-distingue-tp-da-sl.md) — fatto dal fix Sprint 4 in poi; lo storico precedente resta ambiguo e non si riclassifica
@@ -19,3 +25,19 @@
 - [Worktree isolato: allinealo prima di tutto](feedback_worktree-isolato-va-allineato-prima.md) — può essere decine di commit indietro e non avere il codice da modificare
 - [Account unificato Hyperliquid](reference_hyperliquid-unified-account-model.md) — `hold`/`accountValue`/`totalRawUsd`, gli endpoint info pubblici, e perché `webData2` ha semantica diversa
 - [Equity: doppio conteggio dello Spot](project_equity-doppio-conteggio-spot.md) — risolto in CRIT-05; invisibile a conto piatto, resta aperto lo storico gonfiato
+- [VPS: due processi, un solo blob paper](project_vps-due-processi-stato-paper.md) — si cancellavano `paper_broker_state`; owner unico del loop + merge per (account,coin), non ancora deployato
+- [Hot-patch VPS del 14/09/2026](project_hotpatch-vps-20260914.md) — sentiment da `Math.random`, rotazione bot via SQL grezzo: respinto, non integrato
+- [Stop istantaneo: risolto (issue #16)](project_stop-istantaneo-prezzo-esecuzione.md) — il fill paper pagava la tolleranza del 2%: nasceva oltre lo SL. Le due ipotesi ovvie erano sbagliate
+- [L'evidenza è spesso già in DB](feedback_evidenza-gia-persistita.md) — cerca la colonna che risponde prima di aggiungere log; un numero uguale a un default non è un caso
+- [Simulatore: stessa firma, altra semantica](feedback_simulatore-stessa-firma-altra-semantica.md) — `slippage` = tolleranza sul client, costo sul paperBroker; e le infedeltà ancora aperte
+- [Template di strategia: stati, non eventi](project_template-strategia-stati-non-eventi.md) — macd/ema con segnale attivo al 100% delle barre; usa rsi_reversal e bollinger
+- [`running` non significa operativo](feedback_running-non-significa-operativo.md) — bot che ticcano puntualmente e non potranno mai aprire: controlla `lastEval`, non la riga DB; e l'istanza zombie
+- [Auto-riparazione: una sola direzione](feedback_autoriparazione-una-sola-direzione.md) — si riavvia ciò che l'operatore vuole acceso; un bot fermo con posizione aperta non si tocca
+- [Stato monotono: serve il suo reset](feedback_stato-monotono-va-con-il-suo-reset.md) — un massimo stantio non resta fermo, cresce; e ripulire la tabella sorgente è un no-op
+- [Hyperliquid: le chiamate di peso 20 muoiono di fame](project_hyperliquid-ratelimit-peso20.md) — promise pendente per sempre, zero errori; discriminante peso 2 vs peso 20
+- [Diagnosi di un processo Node vivo](feedback_diagnosi-processo-node-vivo.md) — inspector CDP nel container: niente `import()`, i singleton si raggiungono dalle closure
+- [Jev: osservatore, mai guardrail](project_jev-osservatore-typesafe.md) — dove si innesca e perché "dopo l'esecuzione"; il prezzo non verificato è l'unica cosa aperta
+- [Ramo `default` neutro = guasto muto](feedback_ramo-default-neutro-e-diagnosi-cieca.md) — e la diagnostica che legge lo stesso campo è cieca allo stesso modo: non usarla per trovarlo
+- [Config scritta da agente, mai validata](project_config-scrittura-non-validata.md) — `validateStrategyConfig` è cablata solo sull'import; `register_bot` non guarda le entryRules
+- [Lo stesso parametro in due percorsi](feedback_stesso-parametro-due-percorsi.md) — tetto alla radice vs annidato: più restrittivo vince; e come si riconosce un default globale dai numeri
+- [Un NaN attraversa ogni guardia](feedback_nan-attraversa-ogni-guardia.md) — `size <= 0` falso, `checkLimits` OK, Budget Ceiling falso: fail-closed sugli ingressi di config

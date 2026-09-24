@@ -38,3 +38,18 @@ davvero verificata.
   dall'invariante. In CRIT-05 la formula calcola lo Spot libero come `total − hold`
   ed è giusta qualunque cosa `hold` includa; l'invariante serviva solo a misurare
   la magnitudine del difetto. Vedi [[equity-doppio-conteggio-spot]].
+
+**Corollario opposto e altrettanto insidioso: uno scarto di ZERO è un sintomo, non
+una conferma.** Il 2026-09-15, indagando su stop loss che scattavano entro 10s
+dall'ingresso, ho campionato 12 volte in 24s il prezzo di 3 coin da un endpoint
+dell'app: identico all'ultimo decimale, escursione `0.00%`. Sembrava la prova che il
+prezzo fosse fermo; era la prova che stavo misurando una **cache**. Quei valori non
+corrispondevano a *nessuna* delle due reti (né al mid mainnet né a quello testnet,
+entrambi letti in parallelo dagli endpoint `info` pubblici): erano solo vecchi.
+Un prezzo di mercato vivo non è mai identico a 12 campioni consecutivi — se lo è,
+la domanda giusta è «da dove viene questo numero?», non «perché il mercato è fermo?».
+Discriminante decisivo: confrontare col **mid pubblico delle due reti nello stesso
+istante**, e verificare quale prezzo usa davvero il codice sotto esame (per un bot è
+`lastEval.price`, non l'endpoint che leggerebbe la UI — vedi
+[[feedback-running-non-significa-operativo]] sulla differenza fra stato dichiarato e
+stato osservato).

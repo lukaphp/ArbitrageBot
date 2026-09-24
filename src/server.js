@@ -74,7 +74,7 @@ import proposals from './agents/proposals.js';
 import riskAgent from './agents/riskAgent.js';
 import mlTrainer from './agents/mlTrainer.js';
 import jev from './agents/jev.js';
-import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk, deriveExecutionStatus, RISK_ALERT_THRESHOLDS, toRiskBotView } from './perps/riskSnapshot.js';
+import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk, deriveExecutionStatus, RISK_ALERT_THRESHOLDS, toRiskBotView, resolveEquityRange, EQUITY_HISTORY_MAX_POINTS } from './perps/riskSnapshot.js';
 // DEBT-03: la profondità della coda di esecuzione (WARN-02) è la sola fonte reale
 // per "Queue health" nella card EXECUTION STATUS della cockpit.
 import execQueue from './perps/execQueue.js';
@@ -142,6 +142,30 @@ async function mergeWithPaperAccount(real, address, network) {
     logger.error(`Vista account ${address}: stato simulato non leggibile (${error.message}). Le posizioni paper NON compaiono in questa risposta.`);
   }
   return { ...riskManager.mergeAccountViews({ real, paper }), paperError };
+}
+
+/**
+ * Curva equity per la finestra chiesta dal grafico (parametro `range`).
+ *
+ * Usata da `/api/perps/risk` e `/api/perps/performance` perché con lo stesso
+ * bottone premuto i due grafici devono mostrare la stessa finestra. È SOLO la
+ * serie da disegnare: il drawdown continua a leggere la storia con
+ * `listRiskEquityHistory`, che è una domanda diversa ("gli ultimi N campioni")
+ * e la cui semantica non cambia con ciò che l'utente sceglie di guardare.
+ *
+ * Finestra vuota: quando il campionamento è fermo da più tempo del range
+ * chiesto la finestra non contiene nulla, e restituire `[]` mostrerebbe un
+ * grafico vuoto dove prima si vedeva l'ultimo valore noto. Si ripiega
+ * sull'ultimo campione — la stessa scelta che la UI fa già oggi in
+ * `_filterEquityPointsByRange` quando il filtro non lascia niente.
+ */
+function equityHistoryForRange(network, address, resolvedRange) {
+  const points = db.listRiskEquityHistoryByRange(network, address, {
+    sinceTs: resolvedRange.sinceTs,
+    maxPoints: EQUITY_HISTORY_MAX_POINTS
+  });
+  if (points.length) return points;
+  return db.listRiskEquityHistory(network, address, 1);
 }
 
 class ArbitrageBotServer {
@@ -668,7 +692,13 @@ class ArbitrageBotServer {
         defaultMaxDailyLossUsd: config.HYPERLIQUID_CONFIG.risk.maxDailyLossUsd
       }));
       const marketStatus = marketData.getStatus();
-      let equityHistory = address ? db.listRiskEquityHistory(network, address, 2000) : [];
+      // `drawdownHistory` è la storia grezza che alimenta il DRAWDOWN e nient'altro:
+      // "gli ultimi 2000 campioni", esattamente come prima che esistesse il
+      // parametro `range`. La curva da DISEGNARE è un'altra variabile
+      // (`equityHistory`, più sotto): sono due domande diverse sullo stesso dato,
+      // e far seguire al drawdown la finestra scelta dall'utente cambierebbe la
+      // soglia degli alert di rischio a ogni click su un bottone del grafico.
+      let drawdownHistory = address ? db.listRiskEquityHistory(network, address, 2000) : [];
       const persistedDrawdown = address ? db.getRiskDrawdownState(network, address) : null;
       if (account && Number.isFinite(Number(account.equity)) && address && !sourceErrors.includes('account')) {
         // Il campione è l'equity UNIFICATA (reale + simulata): il drawdown deve
@@ -686,10 +716,19 @@ class ArbitrageBotServer {
         // scriverebbe in `risk_equity_history` un calo mai avvenuto — che
         // `mergeDrawdownState`, monotono per disegno, renderebbe permanente.
         db.insertRiskEquitySample(network, address, Math.floor(now / 1000), Number(account.equity), 10000);
-        equityHistory = db.listRiskEquityHistory(network, address, 2000);
+        drawdownHistory = db.listRiskEquityHistory(network, address, 2000);
       }
-      const drawdown = mergeDrawdownState(calculateDrawdown(equityHistory), persistedDrawdown);
+      const drawdown = mergeDrawdownState(calculateDrawdown(drawdownHistory), persistedDrawdown);
       if (address) db.upsertRiskDrawdownState(network, address, drawdown, now);
+
+      // Curva del grafico "Portfolio Performance": con `range` si legge per
+      // FINESTRA TEMPORALE (e si sottocampiona), senza `range` resta la storia
+      // di prima, byte per byte — chi consuma questa rotta oggi non sa che il
+      // parametro esiste e non deve accorgersi di nulla.
+      const equityRange = address ? resolveEquityRange(req.query.range, Math.floor(now / 1000)) : null;
+      const equityHistory = equityRange
+        ? equityHistoryForRange(network, address, equityRange)
+        : drawdownHistory;
       const unrealizedPnl = account?.positions?.reduce((sum, position) => sum + Number(position.unrealizedPnl || 0), 0) || 0;
       const dayStart = new Date();
       dayStart.setHours(0, 0, 0, 0);
@@ -758,6 +797,13 @@ class ArbitrageBotServer {
           killSwitch,
           drawdown,
           equityHistory,
+          ...(equityRange ? {
+            equityHistoryMeta: {
+              range: equityRange.range,
+              sinceTs: equityRange.sinceTs,
+              maxPoints: EQUITY_HISTORY_MAX_POINTS
+            }
+          } : {}),
           pnl: {
             realized: realizedPnl,
             unrealized: unrealizedPnl,
@@ -2106,11 +2152,18 @@ class ArbitrageBotServer {
         totals.winRate = closedTrades ? totals.wins / closedTrades : 0;
         totals.expectancy = closedTrades ? totals.totalPnl / closedTrades : 0;
 
-        const equityHistory = address ? db.listRiskEquityHistory(network, address, Math.min(seriesLimit, 5000)) : [];
+        // Come in `/api/perps/risk`: la storia che alimenta il DRAWDOWN resta
+        // "gli ultimi N campioni" qualunque finestra l'utente stia guardando,
+        // mentre la curva da disegnare segue `range` quando c'è.
+        const drawdownHistory = address ? db.listRiskEquityHistory(network, address, Math.min(seriesLimit, 5000)) : [];
         const drawdown = mergeDrawdownState(
-          calculateDrawdown(equityHistory),
+          calculateDrawdown(drawdownHistory),
           address ? db.getRiskDrawdownState(network, address) : null
         );
+        const equityRange = address ? resolveEquityRange(req.query.range) : null;
+        const equityHistory = equityRange
+          ? equityHistoryForRange(network, address, equityRange)
+          : drawdownHistory;
 
         // ml_history esisteva ed era senza consumer perché `listMlHistory` vuole
         // coin e interval e nessuno sapeva quali chiedere: si enumerano le serie
@@ -2137,6 +2190,13 @@ class ArbitrageBotServer {
             totals,
             bots,
             equityHistory,
+            ...(equityRange ? {
+              equityHistoryMeta: {
+                range: equityRange.range,
+                sinceTs: equityRange.sinceTs,
+                maxPoints: EQUITY_HISTORY_MAX_POINTS
+              }
+            } : {}),
             drawdown,
             mlScopes,
             mlHistory

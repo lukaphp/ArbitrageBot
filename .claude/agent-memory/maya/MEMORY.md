@@ -15,3 +15,4 @@
 - [Un dato che non decide non va reso come se decidesse](feedback_osservatore-non-decide.md) — tab, palette, tempo verbale; e l'elenco vuoto con due cause si dichiara doppio
 - [Osservatore Jev (JEV-OBS-01)](project_jev-osservatore.md) — spento in produzione: lista vuota è normale; `jevStatus()` non è su nessuna rotta, l'ho chiesta
 - [Rendere uno stato di rischio che il backend non espone](feedback_stato-di-rischio-derivato.md) — `startsWith` e non `includes` (la coda è testo utente); due numeri accostati portano ciascuno la sua finestra
+- [Un parametro nuovo in query string rompe la guardia "richiesta in volo"](feedback_parametro-nuovo-e-richiesta-in-volo.md) — il click scartato ridisegna la finestra sbagliata; il filtro locale restringe ma non allarga

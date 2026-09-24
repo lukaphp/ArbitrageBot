@@ -995,6 +995,58 @@ export class PerpsDatabase {
     `).all(scope.network, scope.address, keep).reverse();
   }
 
+  /**
+   * Curva equity per FINESTRA TEMPORALE, sottocampionata uniformemente.
+   *
+   * `listRiskEquityHistory` (sopra) tappa per RIGHE (`ORDER BY ts DESC LIMIT ?`):
+   * con un campionamento ogni pochi secondi le ultime 2000 righe sono poche ore,
+   * quindi qualunque finestra da un giorno in su chiede più storia di quanta ne
+   * arrivi e i bottoni di intervallo del grafico risultano inerti. Questo metodo
+   * è ADDITIVO e non sostituisce l'altro: chi legge per il drawdown continua a
+   * volere "gli ultimi N campioni", che è una domanda diversa.
+   *
+   * Due proprietà sono il motivo per cui esiste:
+   *  - il sottocampionamento è UNIFORME su tutta la finestra. Tenere le ultime N
+   *    righe della finestra riprodurrebbe lo stesso difetto in scala ridotta
+   *    (dati fitti in fondo, vuoto all'inizio);
+   *  - l'ULTIMO campione è sempre incluso, altrimenti il grafico sembrerebbe
+   *    troncato prima di adesso — su un pannello di trading una curva che si
+   *    ferma "poco fa" è indistinguibile da un feed morto.
+   *
+   * Riduzione in JS e non in SQL: la ritenzione tiene al massimo 10.000 righe per
+   * (network, address) e better-sqlite3 è sincrono, quindi leggere la finestra
+   * intera costa millisecondi. In SQL servirebbe una window function con modulo
+   * su ROW_NUMBER, che non garantisce né il conteggio esatto né la presenza
+   * dell'ultima riga senza una UNION: più SQL di quanto il ciclo qui sotto
+   * sostituisca, e non testabile in isolamento.
+   */
+  listRiskEquityHistoryByRange(network, address, { sinceTs = 0, maxPoints = 2000 } = {}) {
+    this.ensure();
+    const scope = this._riskScope(network, address);
+    const since = Number.isFinite(Number(sinceTs)) ? Math.max(0, Math.floor(Number(sinceTs))) : 0;
+    const cap = Math.max(1, Math.min(50000, Math.floor(Number(maxPoints) || 2000)));
+
+    const rows = this.db.prepare(`
+      SELECT ts AS time, equity AS value
+      FROM risk_equity_history
+      WHERE network = ? AND address = ? AND ts >= ?
+      ORDER BY ts ASC
+    `).all(scope.network, scope.address, since);
+
+    if (rows.length <= cap) return rows;
+    if (cap === 1) return [rows[rows.length - 1]];
+
+    // Passo frazionario fra la prima e l'ultima riga: `cap - 1` punti spaziati
+    // in modo uniforme più l'ultimo, sempre. Con `rows.length > cap` il passo è
+    // > 1, quindi gli indici arrotondati crescono in modo stretto (nessun
+    // duplicato) e nessuno di essi può coincidere con l'ultimo.
+    const step = (rows.length - 1) / (cap - 1);
+    const sampled = [];
+    for (let i = 0; i < cap - 1; i++) sampled.push(rows[Math.round(i * step)]);
+    sampled.push(rows[rows.length - 1]);
+    return sampled;
+  }
+
   /** Salva l'ultimo drawdown derivato dalla curva equity persistita. */
   upsertRiskDrawdownState(network, address, drawdown, updatedAt = Date.now()) {
     this.ensure();

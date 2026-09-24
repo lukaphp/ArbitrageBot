@@ -135,6 +135,10 @@ class PerpsApp {
     this.dashboardInitialized = false;
     this.riskSnapshot = null;
     this.riskRefreshInFlight = false;
+    // BUG-EQUITYRANGE-01: la finestra chiesta al server dalla richiesta in volo,
+    // e il flag che ricorda che l'utente ne ha scelta un'altra nel frattempo.
+    this.riskRangeInFlight = null;
+    this.riskRangeDirty = false;
     this.riskTimer = null;
     // Tasso EUR/USD per il secondo valore di comodo (CUR-01). `null` = niente EUR.
     this.fx = null;
@@ -144,6 +148,10 @@ class PerpsApp {
     // `perfData` e non `performance`: quest'ultimo è un globale del browser.
     this.perfData = null;
     this.perfLoading = false;
+    // BUG-EQUITYRANGE-01, come per il rischio: finestra della richiesta in volo
+    // e promemoria che l'utente ne ha chiesta un'altra prima che tornasse.
+    this.perfRangeInFlight = null;
+    this.perfRangeDirty = false;
     this.perfChart = null;
     this.perfEquitySeries = null;
     this.perfMlChart = null;
@@ -685,12 +693,33 @@ class PerpsApp {
     if (nextTab === 'system') this.loadJevEvaluations();
   }
 
+  /**
+   * Rilegge lo snapshot di rischio, CHIEDENDO ESPLICITAMENTE la finestra
+   * temporale scelta sul grafico (BUG-EQUITYRANGE-01). Senza `range` la rotta
+   * restituisce gli ultimi campioni a prescindere dal bottone premuto: i
+   * preset 1G/7G/30G/90G/1A filtravano dati che il server aveva già troncato,
+   * quindi non avevano effetto visibile. Il parametro è lo stesso codice usato
+   * da `_filterEquityPointsByRange`, che resta al suo posto: su una risposta
+   * già finestrata dal server è un passaggio a vuoto innocuo, e copre l'attimo
+   * fra il click e l'arrivo della risposta.
+   */
   async refreshRiskSnapshot() {
-    if (this.riskRefreshInFlight) return;
+    const range = this.dashboardEquityRange || 'all';
+    // Una richiesta già in volo porta con sé il range con cui è partita. Se
+    // l'utente ha cambiato finestra nel frattempo, scartare il click non basta:
+    // la risposta in arrivo ridisegnerebbe la finestra VECCHIA sotto un bottone
+    // acceso su un'altra. Si annota il cambio e si rifà la chiamata appena la
+    // prima è chiusa; se invece il range è lo stesso (polling, eventi socket)
+    // vale la regola di prima e la chiamata in più si scarta.
+    if (this.riskRefreshInFlight) {
+      if (this.riskRangeInFlight !== range) this.riskRangeDirty = true;
+      return;
+    }
     this.riskRefreshInFlight = true;
+    this.riskRangeInFlight = range;
     try {
-      const query = this.connected && this.address ? `?address=${encodeURIComponent(this.address)}` : '';
-      this.riskSnapshot = await this.api(`/api/perps/risk${query}`);
+      const addressParam = this.connected && this.address ? `address=${encodeURIComponent(this.address)}&` : '';
+      this.riskSnapshot = await this.api(`/api/perps/risk?${addressParam}range=${encodeURIComponent(range)}`);
       if (this.riskSnapshot.account) this.account = this.riskSnapshot.account;
       this._renderRiskSnapshot(this.riskSnapshot);
       this._refreshCockpitDashboard();
@@ -706,6 +735,11 @@ class PerpsApp {
       this._renderRiskUnavailable(error.message);
     } finally {
       this.riskRefreshInFlight = false;
+      this.riskRangeInFlight = null;
+      if (this.riskRangeDirty) {
+        this.riskRangeDirty = false;
+        this.refreshRiskSnapshot();
+      }
     }
   }
 
@@ -986,11 +1020,21 @@ class PerpsApp {
       };
       note.textContent = `${labels[range] || range.toUpperCase()} · EQUITY CURVE`;
     }
+    // Due passaggi, in quest'ordine. (1) Filtro locale sui dati già in memoria:
+    // è immediato e restringe subito la curva quando la nuova finestra è più
+    // stretta della precedente. (2) Richiesta al server con `range`: è l'unico
+    // modo di ALLARGARE la finestra, perché i punti più vecchi la UI non li ha
+    // mai ricevuti — è esattamente il motivo per cui questi bottoni sembravano
+    // non fare niente (BUG-EQUITYRANGE-01). Nessun `await`: il click non deve
+    // aspettare la rete, e un fallimento del fetch è già gestito dentro
+    // `refreshRiskSnapshot` (che dichiara i dati non disponibili) senza toccare
+    // quanto disegnato al punto 1.
     if (this.dashboardSeries) {
       const data = this._dashboardEquityData();
       this.dashboardSeries.setData(data);
       if (data.length) this.dashboardChart?.timeScale().fitContent();
     }
+    this.refreshRiskSnapshot();
   }
 
   _dashboardEquityData() {
@@ -1133,11 +1177,22 @@ class PerpsApp {
    * `force` un secondo passaggio sulla tab non rifà la chiamata se una è già in volo.
    */
   async loadPerformance(force = false) {
-    if (this.perfLoading) return this.perfData;
+    // `range` chiede la curva per FINESTRA TEMPORALE invece degli ultimi N
+    // campioni (BUG-EQUITYRANGE-01): senza, `limit=5000` restituisce sempre le
+    // stesse ultime righe e i preset 1G/7G/… non hanno niente da mostrare.
+    const range = this.perfEquityRange || 'all';
+    // Come in `refreshRiskSnapshot`: una chiamata già in volo è partita con la
+    // finestra di prima, quindi un cambio di range durante l'attesa non si
+    // scarta — si rifà appena la prima è chiusa.
+    if (this.perfLoading) {
+      if (this.perfRangeInFlight !== range) this.perfRangeDirty = true;
+      return this.perfData;
+    }
     this.perfLoading = true;
+    this.perfRangeInFlight = range;
     this._setPerfNotice(this.perfData && !force ? null : 'Caricamento dati storici…', 'info');
     try {
-      const data = await this.api('/api/perps/performance?limit=5000');
+      const data = await this.api(`/api/perps/performance?limit=5000&range=${encodeURIComponent(range)}`);
       this.perfData = {
         bots: Array.isArray(data?.bots) ? data.bots : [],
         equityHistory: Array.isArray(data?.equityHistory) ? data.equityHistory : [],
@@ -1152,8 +1207,13 @@ class PerpsApp {
       this._setPerfNotice(`Dati storici non disponibili: ${error.message}`, 'error');
     } finally {
       this.perfLoading = false;
+      this.perfRangeInFlight = null;
     }
     this._renderPerformance();
+    if (this.perfRangeDirty) {
+      this.perfRangeDirty = false;
+      return this.loadPerformance(true);
+    }
     return this.perfData;
   }
 
@@ -1173,7 +1233,13 @@ class PerpsApp {
         btn.classList.toggle('active', btn.dataset.range === range);
       });
     }
+    // Stessa coppia della dashboard: ridisegno immediato su ciò che c'è già in
+    // `perfData` (restringe subito), poi la richiesta al server con `range`, che
+    // è l'unico modo di riavere i punti più vecchi — `_renderPerformanceEquity()`
+    // da solo rifiltrerebbe per sempre gli stessi dati in cache
+    // (BUG-EQUITYRANGE-01). Un errore di rete lo racconta già `loadPerformance`.
     this._renderPerformanceEquity();
+    this.loadPerformance(true);
   }
 
   /**

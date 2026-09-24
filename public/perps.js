@@ -591,7 +591,7 @@ class PerpsApp {
         layout: { background: { color: 'transparent' }, textColor: '#8b97a8', fontFamily: 'JetBrains Mono, monospace', fontSize: 11 },
         grid: { vertLines: { color: '#1b2538' }, horzLines: { color: '#1b2538' } },
         rightPriceScale: { borderColor: '#1b2538', minimumWidth: 64 },
-        timeScale: { borderColor: '#1b2538', timeVisible: true, secondsVisible: false },
+        timeScale: { borderColor: '#1b2538', timeVisible: this._equityChartTimeVisible(this.dashboardEquityRange), secondsVisible: false },
         crosshair: { mode: LightweightCharts.CrosshairMode.Normal }
       });
       this.dashboardSeries = this.dashboardChart.addAreaSeries({
@@ -982,6 +982,25 @@ class PerpsApp {
     }
   }
 
+  /**
+   * `timeVisible` del `timeScale` di un grafico equity, in funzione del range.
+   *
+   * Lightweight Charts, con `timeVisible: true`, alterna etichette a orario a
+   * etichette di sola data nei punti di cambio giorno — corretto per "1d" (la
+   * vista non attraversa mai un cambio di giorno, quindi l'asse resta tutto a
+   * orari puliti) ma incoerente per qualunque range più largo, dove il cambio
+   * giorno è la norma e l'asse finisce a mostrare un misto di date e orari
+   * senza una logica leggibile (segnalato dall'utente su "7G": "21", "13:00",
+   * "18:09", "22", "24 set '26", "15:00" nello stesso asse).
+   *
+   * Non era visibile col difetto di BUG-EQUITYRANGE-01: ogni bottone da "1G"
+   * in su mostrava comunque la stessa finestra di poche ore, che non attraversa
+   * mai un cambio di giorno — l'incoerenza era latente, non assente.
+   */
+  _equityChartTimeVisible(range) {
+    return range === '1d';
+  }
+
   _filterEquityPointsByRange(points, range = 'all') {
     if (!Array.isArray(points) || !points.length) return [];
     if (!range || range === 'all') return points;
@@ -1034,6 +1053,10 @@ class PerpsApp {
       this.dashboardSeries.setData(data);
       if (data.length) this.dashboardChart?.timeScale().fitContent();
     }
+    // Asse del tempo coerente con la finestra scelta: solo "1d" mostra orari,
+    // ogni altro range attraversa più giorni e mostra solo date (vedi
+    // `_equityChartTimeVisible`).
+    this.dashboardChart?.timeScale().applyOptions({ timeVisible: this._equityChartTimeVisible(range) });
     this.refreshRiskSnapshot();
   }
 
@@ -1239,6 +1262,9 @@ class PerpsApp {
     // da solo rifiltrerebbe per sempre gli stessi dati in cache
     // (BUG-EQUITYRANGE-01). Un errore di rete lo racconta già `loadPerformance`.
     this._renderPerformanceEquity();
+    // Stessa regola della dashboard: solo "1d" mostra orari sull'asse, ogni
+    // altro range attraversa più giorni e mostra solo date.
+    this.perfChart?.timeScale().applyOptions({ timeVisible: this._equityChartTimeVisible(range) });
     this.loadPerformance(true);
   }
 
@@ -1304,7 +1330,7 @@ class PerpsApp {
         layout: { background: { color: 'transparent' }, textColor: '#8b97a8', fontFamily: 'JetBrains Mono, monospace', fontSize: 11 },
         grid: { vertLines: { color: '#1b2538' }, horzLines: { color: '#1b2538' } },
         rightPriceScale: { borderColor: '#1b2538', minimumWidth: 64 },
-        timeScale: { borderColor: '#1b2538', timeVisible: true, secondsVisible: false }
+        timeScale: { borderColor: '#1b2538', timeVisible: this._equityChartTimeVisible(this.perfEquityRange), secondsVisible: false }
       });
       this.perfEquitySeries = this.perfChart.addAreaSeries({
         lineColor: '#26d07c', topColor: 'rgba(38, 208, 124, 0.24)', bottomColor: 'rgba(38, 208, 124, 0.02)',

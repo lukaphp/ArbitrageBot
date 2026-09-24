@@ -1,6 +1,6 @@
 {
   "agent": "bruno",
-  "updatedAt": "2026-09-24T17:20:00Z",
+  "updatedAt": "2026-09-24T18:40:00Z",
   "tasks": {
     "MCP-UNIQ-01": {
       "status": "ready_for_review",
@@ -313,6 +313,17 @@
         true
       ],
       "notes": "Chiude il residuo (b) che avevo lasciato aperto in CRIT-SLGUARD-24: restRetries 1 -> 0 sulle 4 letture di peso 20 (getFundingHistory, getPredictedFundings, getFrontendOpenOrders, getUserFills, tutte via _heavyReadOpts). NON e' una nuova indagine: la decisione e' del PO, io ho eseguito e verificato. COSA CAMBIA IN CONCRETO: un tentativo andato in timeout non si annulla, continua a girare e spende comunque i suoi 20 token (withTimeout perde la corsa, non cancella la chiamata). Con retries=1 una lettura pesante fallita ne costava 40 proprio quando il secchiello era gia' vuoto: il retry alimentava il prosciugamento invece di tamponarlo, e non poteva aiutare, perche' se la causa e' il secchiello un istante dopo il secondo tentativo trova la stessa situazione. Tetto peggiore per queste 4 chiamate: da ~21s a 10s, cioe' il solo restTimeoutMs. COMMENTO RISCRITTO e non solo il valore: il vecchio testo motivava esplicitamente il '~21s' e sarebbe rimasto a mentire. Il nuovo dice anche PERCHE' la rinuncia e' sostenibile ora e non lo era prima del fix di stamattina: il timeout passa dritto al chiamante, che lo tratta come 'non so' e non come 'non c'e'' (guardia SL in bot.js, CRIT-SLGUARD-24), quindi nessuna decisione distruttiva si appoggia piu' a una lettura fallita. Il prezzo che paghiamo e' dichiarato nel commento, non nascosto: nessuna resilienza a un blip isolato su queste 4 letture. TEST — CRITERIO 2. test/hyperliquidHeavyReads.test.js aveva un caso che si portava dietro un'assunzione: il test sul timeout FORZAVA client.restRetries = 0 per non aspettare, quindi verificava un valore suo e non il comportamento di produzione, e sarebbe rimasto verde anche con restRetries=5. Tolto l'override (resta abbassato solo restTimeoutMs, che e' tempo e non semantica): ora l'assert 'tentativi === 2' misura il codice vero. Aggiunto un caso dedicato su un 429, che e' l'errore transitorio per eccellenza: su un errore classificato come definitivo (4xx diverso da 429) withRetry non ritenterebbe comunque, quindi un test costruito cosi' sarebbe passato senza dimostrare nulla. Copre tutte e quattro le letture pesanti, non solo le due per-wallet, e asserisce esplicitamente restRetries === 0 come valore di produzione. Aggiunto il contrappeso: getAllMids (peso 2, secchiello diverso) deve CONTINUARE a ritentare — senza quel test niente impedirebbe a un prossimo giro di spegnere i retry globalmente credendo di ripetere questo fix. ROSSO VERIFICATO, non dedotto: rimesso restRetries = 1 nel sorgente, i due casi diventano rossi (il caso sul timeout dice 4 tentativi invece di 2) e il terzo resta verde, che e' la conferma che e' un test di perimetro e non un duplicato. Poi ripristinato lo 0 e riverificato verde. CRITERIO 3 — nessun altro test dipende da un retry su queste 4 chiamate: verificato file per file sui 20 test che le nominano. Tutti i mock sostituiscono il METODO del client o del paperBroker, quindi stanno a valle di withRetry e sono indifferenti a restRetries; l'unico che alterna guasto/successo e' botSlGuardTimeout.test.js ('quando la verifica torna a funzionare'), ma il toggle e' TRA due tick del bot, non dentro una chiamata, e passa da un Proxy su bot.broker che withRetry non attraversa. Grep su restRetries in tutto src/ e test/: le uniche occorrenze restano la definizione, _heavyReadOpts e questo file di test. npm test 1032/1032 verde, npm run lint verde. Committato su feat/perps-hardening, nessuna PR, nessun deploy (verifica e deploy li fa il PO)."
+    },
+    "OVERTRADE-01": {
+      "status": "in_progress",
+      "criteriaChecked": [
+        true,
+        true,
+        true,
+        true,
+        false
+      ],
+      "notes": "Overtrading gate (freno sulla FREQUENZA di apertura). Storia fuori da sprint2-tasks.json, come DYN-SIZE-01/MCP-UNIQ-01: design gia approvato dal PO, la registro con un id mio perche il lavoro esista in review. Implementazione e test completi e verdi; resta il commit e la riverifica finale della suite prima di passare a ready_for_review."
     }
   },
   "notes": [

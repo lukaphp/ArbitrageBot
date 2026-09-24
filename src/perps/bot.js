@@ -119,6 +119,15 @@ export class PerpsBot {
     this.tickErrors = 0;       // contatore errori di tick (metriche)
     this._lastCooldownNotifyUntil = null; // episodio di cooldown già notificato (una notifica per episodio, non per tick)
     this._lastSizingBlockReason = null;   // ultimo motivo di size nulla già notificato (stesso principio, BUG-SIZECAP-01)
+    // Episodio di blocco per OVERTRADING già notificato ('frequenza' |
+    // 'lettura' | null). Tenuto separato da `_lastCooldownNotifyUntil`: il
+    // cooldown conta le perdite, questo conta la frequenza, e un episodio
+    // dell'uno non deve zittire la notifica dell'altro.
+    // In memoria di proposito, a differenza del CONTEGGIO (che sta in DB):
+    // qui non c'è nessuna decisione, solo la memoria di cosa è già stato
+    // detto. Dopo un riavvio si rinotifica al più una volta — l'errore da non
+    // rifare era l'opposto, cioè perdere il blocco stesso.
+    this._overtradingEpisode = null;
     // Guardia SL — stato dei due contatori, tenuti DISTINTI di proposito perché
     // contano due cose diverse (vedi `_ensureStopLoss`):
     //  - `_slVerifyFailures`: quante volte di fila NON siamo riusciti a leggere
@@ -668,6 +677,18 @@ export class PerpsBot {
       return;
     }
 
+    // Freno di FREQUENZA (overtrading): troppe aperture in poco tempo, a
+    // prescindere dall'esito. Distinto dal cooldown qui sopra, che conta le
+    // perdite: un bot che apre e chiude quattro volte in mezz'ora in pari non
+    // viene fermato da nessun altro controllo, ma ha già pagato otto fee e
+    // otto slippage. Blocca SOLO l'apertura: il bot resta running e continua a
+    // gestire i trigger delle posizioni già aperte.
+    const ot = this._overtradingBlock();
+    if (ot) {
+      this.lastEval = { action: 'hold', reason: ot, ts: Date.now() };
+      return;
+    }
+
     // ---- SEZIONE CRITICA SINCRONA: da qui a `reserveOpenSlot` NESSUN `await` ----
     // È l'unica cosa che rende atomica la coppia "verifica il cap / impegna lo
     // slot" su un runtime a singolo thread. Inserire un `await` qui dentro
@@ -900,6 +921,89 @@ export class PerpsBot {
     if (elapsedMin >= cd.minutes) return null;
     const left = Math.ceil(cd.minutes - elapsedMin);
     return `Cooldown post-perdite: riapertura tra ~${left} min`;
+  }
+
+  /**
+   * Freno di overtrading: blocca l'apertura quando il bot ha già aperto
+   * `maxOpensPerWindow` volte nella finestra scorrevole `windowMinutes`.
+   * Ritorna la motivazione (stringa) se bloccato, altrimenti null.
+   *
+   * Tre proprietà volute, tutte conseguenza dello stesso disegno:
+   *
+   *  - Il conteggio è una funzione del contenuto del DB (`positions.opened_at`),
+   *    non di un contatore in memoria. Sopravvive a un riavvio senza niente da
+   *    risincronizzare — il cooldown di portafoglio è stato persistito proprio
+   *    perché in memoria un restart riapriva la finestra di re-entry.
+   *  - Si scioglie da solo: la finestra è scorrevole, quando l'apertura più
+   *    vecchia ne esce il conteggio scende. Nessun `pausedUntil`, nessun timer
+   *    di pausa, nessuno stato che possa disallinearsi dai fatti.
+   *  - NON ferma il bot. `stop()` lascerebbe una posizione aperta senza chi ne
+   *    gestisce TP/SL e trailing: qui si blocca l'ingresso, non la gestione.
+   *
+   * FAIL-CLOSED sulla lettura: se il conteggio non è leggibile non si apre.
+   * Non sapere quante volte si è già entrati non è la stessa cosa che sapere
+   * di non essere entrati, e il costo di un'apertura mancata è molto minore di
+   * quello di una serie di rientri impulsivi non contati. Il guasto è loggato
+   * E notificato, come ogni fallimento su questo percorso.
+   */
+  _overtradingBlock() {
+    const limits = riskManager.resolveOvertradingLimits(this.config);
+    if (!limits.enabled) {
+      this._closeOvertradingEpisode(null);
+      return null;
+    }
+
+    const now = Date.now();
+    const since = now - limits.windowMinutes * 60000;
+    let verdict;
+    try {
+      verdict = riskManager.checkOvertrading(limits, {
+        opens: db.countOpensSince(this.id, since),
+        oldestOpenedAt: db.oldestOpenedAtSince(this.id, since),
+        now
+      });
+    } catch (error) {
+      const motivo = `Overtrading: conteggio delle aperture recenti non leggibile (${error.message}) — apertura sospesa per prudenza`;
+      logger.error(`Bot ${this.name}: ${motivo}`);
+      this._openOvertradingEpisode('lettura',
+        `⚠️ <b>${this.name}</b> (${this.coin}): impossibile contare le aperture recenti (${error.message}) — nuove aperture sospese finché il conteggio non torna leggibile. Le posizioni aperte restano gestite.`,
+        { urgent: true });
+      return motivo;
+    }
+
+    if (verdict.ok) {
+      this._closeOvertradingEpisode(verdict);
+      return null;
+    }
+
+    logger.warn(`Bot ${this.name}: apertura bloccata — ${verdict.reason}`);
+    this._openOvertradingEpisode('frequenza',
+      `🚦 <b>${this.name}</b> (${this.coin}): <b>troppe aperture</b> — ${verdict.opens} negli ultimi ${limits.windowMinutes} min (max ${limits.maxOpensPerWindow}). Nuove aperture sospese${verdict.retryAt ? ` per ~${Math.ceil((verdict.retryAt - now) / 60000)} min` : ''}; il bot resta attivo e continua a gestire TP/SL delle posizioni aperte.`);
+    return verdict.reason;
+  }
+
+  /**
+   * Apre (o mantiene) un episodio di blocco per overtrading, notificando UNA
+   * sola volta. Campo distinto da `_lastCooldownNotifyUntil` di proposito:
+   * sono due episodi concettualmente diversi (frequenza contro perdite) e
+   * condividerne lo stato farebbe sparire la notifica dell'uno mentre l'altro
+   * è in corso. `kind` distingue il blocco vero dal guasto di lettura: passare
+   * dall'uno all'altro è un episodio nuovo e va detto.
+   */
+  _openOvertradingEpisode(kind, text, opts) {
+    if (this._overtradingEpisode === kind) return;
+    this._overtradingEpisode = kind;
+    notifier.notify(text, opts);
+  }
+
+  /** Chiude l'episodio in corso (se c'è) e notifica il rientro, una volta sola. */
+  _closeOvertradingEpisode(verdict) {
+    if (!this._overtradingEpisode) return;
+    this._overtradingEpisode = null;
+    const dettaglio = verdict
+      ? ` (${verdict.opens} aperture nella finestra corrente)`
+      : '';
+    notifier.notify(`▶️ <b>${this.name}</b> (${this.coin}): frequenza di apertura <b>rientrata</b>${dettaglio} — nuove aperture di nuovo consentite.`);
   }
 
   /** Conferma multi-timeframe: true se il TF superiore concorda col lato (o se disattivata). */
@@ -1660,8 +1764,39 @@ export class PerpsBot {
       position: this.position, dailyPnl: this.dailyPnl,
       lastEval: this.lastEval, lastError: this.lastError, config: this.config,
       lastTickAt: this.lastTickAt, startedAt: this.startedAt, tickErrors: this.tickErrors,
+      openRate: this._openRateView(),
       stats
     };
+  }
+
+  /**
+   * Ritmo di apertura del bot per la UI: quante volte è entrato a mercato
+   * nell'ultima ora e nelle ultime 4 ore, più la soglia con cui vanno
+   * confrontati — senza quella, un badge di velocità dovrebbe indovinarla o
+   * duplicare i default, e divergerebbe al primo bot che li sovrascrive.
+   *
+   * Stessa funzione di conteggio del gate (`db.countOpensSince`), solo con una
+   * finestra diversa: due implementazioni darebbero due numeri, e quello
+   * mostrato non sarebbe quello che blocca.
+   *
+   * `null` quando il conteggio non è disponibile: un guasto di lettura non è
+   * "nessuna apertura", e mostrare 0 racconterebbe un bot fermo che invece
+   * potrebbe essere in piena raffica.
+   */
+  _openRateView() {
+    try {
+      const limits = riskManager.resolveOvertradingLimits(this.config);
+      const now = Date.now();
+      return {
+        lastHour: db.countOpensSince(this.id, now - 60 * 60000),
+        last4h: db.countOpensSince(this.id, now - 240 * 60000),
+        windowMinutes: limits.windowMinutes,
+        maxOpensPerWindow: limits.maxOpensPerWindow,
+        enabled: limits.enabled
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**

@@ -291,6 +291,116 @@ export function auditRiskConfig(config) {
   return avvisi;
 }
 
+/**
+ * OVERTRADING — limiti di FREQUENZA di apertura, di default per tutti i bot.
+ *
+ * 4 aperture in 30 minuti è il ritmo oltre il quale una strategia a candele
+ * (l'intervallo tipico qui è 15m) non sta più seguendo il suo segnale: sta
+ * rientrando sullo stesso movimento. Ogni giro costa due fee e due slippage,
+ * quindi il danno si accumula anche quando le operazioni chiudono in pari —
+ * che è esattamente il caso che i due cooldown esistenti NON vedono, perché
+ * guardano entrambi le perdite.
+ */
+export const OVERTRADING_DEFAULTS = {
+  maxOpensPerWindow: 4,
+  windowMinutes: 30
+};
+
+/**
+ * Limiti di overtrading effettivi per un bot: default globali, sovrascrivibili
+ * con `config.overtrading` (stesso pattern di `config.cooldown`).
+ *
+ * Attivo di default, con opt-out ESPLICITO (`overtrading.enabled: false`): un
+ * freno di rischio che si attiva solo per chi lo configura protegge proprio i
+ * bot che nessuno ha guardato, cioè quelli che ne hanno più bisogno.
+ *
+ * Un valore inservibile (stringa, 0, negativo) NON vale come "nessun limite":
+ * si ricade sul default e la cosa viene riportata in `ignored`, mai ingoiata.
+ * Stessa disciplina di `resolveMaxPositionUsd` — e stessa ragione per cui un
+ * NaN qui sarebbe peggio del silenzio: `opens >= NaN` è sempre falso, cioè il
+ * freno sparirebbe senza che nulla lo dica.
+ *
+ * Funzione PURA: niente DB, niente orologio. Il conteggio lo fa il chiamante.
+ */
+export function resolveOvertradingLimits(config) {
+  const cfg = config && typeof config === 'object' ? config : {};
+  const raw = cfg.overtrading && typeof cfg.overtrading === 'object' ? cfg.overtrading : {};
+  const ignored = [];
+
+  const leggi = (valore, percorso, predefinito) => {
+    if (valore === undefined || valore === null) return predefinito;
+    const n = Number(valore);
+    if (!Number.isFinite(n) || n < 1) {
+      ignored.push(`overtrading.${percorso}: valore non utilizzabile (${JSON.stringify(valore)}), ignorato — resta il default (${predefinito})`);
+      return predefinito;
+    }
+    return n;
+  };
+
+  return {
+    enabled: raw.enabled !== false,
+    // Floor sulla soglia: una soglia frazionaria si arrotonda verso il basso,
+    // cioè verso il comportamento più prudente.
+    maxOpensPerWindow: Math.floor(leggi(raw.maxOpensPerWindow, 'maxOpensPerWindow', OVERTRADING_DEFAULTS.maxOpensPerWindow)),
+    windowMinutes: leggi(raw.windowMinutes, 'windowMinutes', OVERTRADING_DEFAULTS.windowMinutes),
+    ignored
+  };
+}
+
+/**
+ * Verdetto sul ritmo di apertura. Blocca quando il conteggio RAGGIUNGE la
+ * soglia (con `maxOpensPerWindow: 4` la quinta apertura nella finestra non
+ * parte).
+ *
+ * `retryAt` è derivato, non memorizzato: la finestra è scorrevole, quindi
+ * l'apertura più vecchia ancora dentro ne esce a `oldestOpenedAt + finestra`
+ * e da quell'istante il conteggio è sceso da solo. Se il chiamante non sa
+ * indicare la più vecchia, `retryAt` resta `null` — "non so quando" non
+ * diventa un orario inventato, e il blocco resta comunque valido perché a
+ * deciderlo è il conteggio.
+ *
+ * Funzione PURA: stessi ingressi, stesso verdetto. Nessuno stato da
+ * risincronizzare, nessun timer da tenere allineato.
+ */
+export function checkOvertrading(limits, { opens = 0, oldestOpenedAt = null, now = Date.now() } = {}) {
+  const lim = limits && typeof limits === 'object' ? limits : resolveOvertradingLimits({});
+  const conteggio = Number(opens);
+  const soglia = Number(lim.maxOpensPerWindow);
+  const finestra = Number(lim.windowMinutes);
+
+  if (lim.enabled === false) return { ok: true, opens: conteggio, reason: null, retryAt: null };
+
+  // Ingressi non utilizzabili: non si passa per default. Un conteggio o una
+  // soglia NaN renderebbero falso qualunque confronto, cioè disattiverebbero
+  // il freno proprio quando lo stato è incerto.
+  if (!Number.isFinite(conteggio) || !Number.isFinite(soglia) || !Number.isFinite(finestra)) {
+    return {
+      ok: false, opens: conteggio, retryAt: null,
+      reason: `Overtrading: frequenza di apertura non verificabile (aperture ${JSON.stringify(opens)}, soglia ${JSON.stringify(lim.maxOpensPerWindow)}, finestra ${JSON.stringify(lim.windowMinutes)})`
+    };
+  }
+
+  if (conteggio < soglia) return { ok: true, opens: conteggio, reason: null, retryAt: null };
+
+  // `oldestOpenedAt` assente resta assente: `Number(null)` è 0, e uno 0 preso
+  // per buono qui produrrebbe un orario di sblocco nel 1970 — cioè "riprova
+  // subito" proprio nel caso in cui non si sa nulla.
+  const oldest = oldestOpenedAt == null ? null : Number(oldestOpenedAt);
+  const retryAt = oldest != null && Number.isFinite(oldest) && oldest > 0
+    ? oldest + finestra * 60000
+    : null;
+  const attesa = retryAt != null && retryAt > now
+    ? ` — nuove aperture sospese per ~${Math.ceil((retryAt - now) / 60000)} min`
+    : ' — nuove aperture sospese';
+
+  return {
+    ok: false,
+    opens: conteggio,
+    retryAt,
+    reason: `Overtrading: ${conteggio} aperture negli ultimi ${finestra} min (max ${soglia})${attesa}`
+  };
+}
+
 class RiskManager {
   /** Arrotonda la size al numero di decimali consentito dal mercato. */
   roundSize(size, szDecimals = 3) {
@@ -307,6 +417,10 @@ class RiskManager {
   /** BUG-SIZECAP-01 — anche come metodi, per i chiamanti che hanno il singleton. */
   resolveMaxPositionUsd(config) { return resolveMaxPositionUsd(config); }
   auditRiskConfig(config) { return auditRiskConfig(config); }
+
+  /** OVERTRADING — anche come metodi, per i chiamanti che hanno il singleton. */
+  resolveOvertradingLimits(config) { return resolveOvertradingLimits(config); }
+  checkOvertrading(limits, input) { return checkOvertrading(limits, input); }
 
   /**
    * Calcola la size (in unità di coin) da aprire.

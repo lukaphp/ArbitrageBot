@@ -204,8 +204,18 @@ export class PerpsBot {
     );
   }
 
+  /**
+   * L'idempotenza si misura sul FATTO, non sull'etichetta: la guardia era
+   * `status === 'running'`, quindi un'istanza "zombie" — `status` rimasto a
+   * running con il timer ormai azzerato (`shutdown()` fa esattamente questo, e
+   * un'istanza sostituita può restare così nella Map) — usciva subito da qui e
+   * non ripartiva MAI. Chiamare `start()` su un bot già vivo continua a essere
+   * un no-op, come prima; chiamarlo su uno fermo che si crede vivo adesso lo
+   * rimette in moto, che è l'unico motivo per cui qualcuno lo chiamerebbe.
+   * Nessun timer può essere perso: se `isTicking()` è falso, `this.timer` è null.
+   */
   start() {
-    if (this.status === 'running') return;
+    if (this.isTicking()) return;
     this.status = 'running';
     this.startedAt = Date.now();
     this._reportConfigIssues();
@@ -224,6 +234,21 @@ export class PerpsBot {
     db.setBotStatus(this.id, 'stopped');
     logger.info(`⏹️  Bot fermato: ${this.name}`, { id: this.id });
     this._emit();
+  }
+
+  /**
+   * Il loop di questo bot è DAVVERO vivo in questo processo?
+   *
+   * `status` da solo non basta: è un campo in memoria che può restare a
+   * 'running' mentre il timer non c'è più (`shutdown()` lo azzera senza
+   * toccarlo, e un'istanza sostituita può sopravvivere nella Map). Chi deve
+   * decidere se un bot va ripreso (`botManager.reconcileRunningBotsOnce`) ha
+   * bisogno del fatto, non dell'etichetta — e leggerlo da qui evita che ogni
+   * chiamante si inventi la propria versione del predicato frugando in
+   * `bot.timer`.
+   */
+  isTicking() {
+    return this.status === 'running' && this.timer != null;
   }
 
   /**

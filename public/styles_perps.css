@@ -125,11 +125,71 @@
   transition: box-shadow 0.2s;
 }
 .bot-card.running { border-color: #48bb78; box-shadow: 0 0 0 2px rgba(72, 187, 120, 0.18); }
-.bot-card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+/* Intestazione della card su due livelli.
+   Prima era una riga sola con fino a sei elementi affiancati e tutti dello
+   stesso peso: il badge ⚠️ CRASH stava in fila fra il badge agente e il budget,
+   cioè un allarme renderizzato come un'etichetta anagrafica. Ora la riga
+   primaria porta solo l'identità del bot (stato · nome · mercato) più il PnL, e
+   lo slot alert vive nell'angolo in alto a destra sotto il PnL: è il primo
+   punto dove l'occhio va a cercare "c'è un problema", e contiene SOLO allarmi.
+   `align-items: flex-start` perché la colonna di destra cresce verso il basso
+   quando gli allarmi sono due e non deve spostare il nome. */
+.bot-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
+.bot-card-ident { min-width: 0; }
+.bot-card-alerts { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex: 0 0 auto; text-align: right; }
+.bot-alert-slot { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .bot-status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
 .bot-status-dot.online { background: #48bb78; box-shadow: 0 0 6px #48bb78; }
 .bot-status-dot.offline { background: #cbd5e0; }
 .bot-pnl { font-size: 0.95rem; }
+
+/* Riga secondaria: contesto (agente · PAPER · budget). Informazioni che si
+   leggono una volta e poi restano uguali — attenuate di proposito, così non
+   competono con gli allarmi. Le regole di spaziatura dei singoli badge nascono
+   dall'epoca in cui erano in fila su una riga sola: qui la spaziatura la fa il
+   `gap`, quindi i loro margini vanno azzerati. */
+.bot-card-context { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 10px; opacity: 0.9; }
+.bot-card-context .agent-badge { margin-left: 0; font-size: 0.62rem; }
+.bot-card-context .bot-budget-info { font-size: 0.72rem; color: #718096; }
+
+/* Base comune dei badge dello slot alert: ⚠️ CRASH e 🚦/⚡/❔ velocità hanno la
+   stessa dimensione e la stessa forma, perché stanno sullo stesso piano di
+   urgenza. A distinguerli è il colore, non l'ingombro. */
+.bot-alert-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  cursor: help;
+}
+/* Badge velocità di trading (OVERTRADE-01).
+   Il rosso NON lampeggia pur essendo severo quanto il CRASH: il lampeggio è già
+   speso dal badge CRASH e i due possono comparire insieme sulla stessa card —
+   due elementi che pulsano a ritmi diversi si annullano a vicenda. */
+.bot-velocity-badge { text-transform: none; }
+.bot-velocity-badge.is-paused { background: #c53030; color: #fff; }
+.bot-velocity-badge.is-elevated {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+/* Ignoto: grigio, non verde e non zero. Il conteggio non è leggibile, il che non
+   dice niente sul ritmo reale del bot — stessa disciplina del backend, che qui
+   manda `openRate: null` invece di 0. */
+.bot-velocity-badge.is-unknown {
+  background: #edf2f7;
+  color: #718096;
+  border: 1px solid #cbd5e0;
+  font-weight: 700;
+  letter-spacing: 0;
+}
 /* Badge del mercato scambiato (es. "BTC") nell'intestazione della card.
    Stessa grammatica pill di .agent-badge e .rule-pill — cambia solo il contrasto,
    che qui deve essere il più alto della riga: è l'informazione che si cerca
@@ -585,20 +645,17 @@
   50%       { box-shadow: 0 0 0 7px rgba(229, 62, 62, 0.05); }
 }
 
-/* Badge ⚠️ CRASH sulla card */
+/* Badge ⚠️ CRASH sulla card. Da OVERTRADE-01 vive nello slot alert insieme al
+   badge velocità e condivide con lui `.bot-alert-badge` (forma e dimensione):
+   qui restano solo le proprietà che lo distinguono. Il `margin-left: 8px` è
+   sparito con lo spostamento — nella colonna dello slot la spaziatura la fa il
+   `gap`, e un margine sinistro lo staccava dal bordo destro della card. */
 .bot-status-crashed-badge {
-  display: inline-block;
-  margin-left: 8px;
-  padding: 2px 8px;
   background: #e53e3e;
   color: #fff;
-  border-radius: 4px;
-  font-size: 0.72rem;
-  font-weight: 800;
   letter-spacing: 0.5px;
   text-transform: uppercase;
   animation: crash-badge-blink 1.4s step-start infinite;
-  cursor: help;
 }
 @keyframes crash-badge-blink {
   0%, 100% { opacity: 1; }

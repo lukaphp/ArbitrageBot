@@ -3609,6 +3609,100 @@ class PerpsApp {
   }
 
   /**
+   * Il freno di overtrading sta bloccando le aperture PROPRIO ORA?
+   *
+   * Nello stato del bot non esiste un booleano dedicato: l'ho cercato prima di
+   * scrivere questo match. Il gate si riconosce dall'ultima valutazione, perché
+   * `_overtradingBlock()` (src/perps/bot.js) scrive il proprio motivo in
+   * `lastEval` con `action: 'hold'`, e TUTTE le sue stringhe — sia il blocco per
+   * frequenza sia il guasto di lettura del conteggio — nascono con il prefisso
+   * `Overtrading:` (src/perps/riskManager.js, `checkOvertrading`). Gli altri rami
+   * che scrivono `lastEval` usano prefissi diversi (`Bloccato:`, `Sizing:`,
+   * `Portafoglio:`, `Cooldown post-perdite:`), quindi il match è esclusivo.
+   *
+   * Due cautele volute:
+   *  - `startsWith` e non `includes`: il resto del motivo può citare testo
+   *    scritto dall'utente (nome del bot, parametri), e con un `includes` il
+   *    badge rosso diventerebbe attivabile chiamando un bot "Overtrading: ...".
+   *  - `action === 'hold'` in AND: il gate blocca sempre in hold, e la coppia
+   *    rende il riconoscimento indipendente dal solo confronto testuale.
+   *
+   * Se un domani il backend esporrà un campo diretto (es. `openRate.blocked`),
+   * questo è l'unico punto da cambiare.
+   */
+  _overtradingGateActive(b) {
+    const le = b && b.lastEval;
+    if (!le || le.action !== 'hold') return false;
+    return typeof le.reason === 'string' && le.reason.startsWith('Overtrading:');
+  }
+
+  /**
+   * Badge "Trade Velocity": quanto spesso il bot sta entrando a mercato, e se il
+   * freno di overtrading lo ha già fermato (OVERTRADE-01).
+   *
+   * Quattro esiti, in ordine di severità decrescente:
+   *   🚦 rosso  — il gate è attivo ADESSO: nuove aperture sospese.
+   *   ❔ grigio — il conteggio non è leggibile: ignoto, che non è zero.
+   *   ⚡ giallo — il ritmo si avvicina alla soglia, ma non la tocca ancora.
+   *   (niente) — freno disattivato, oppure ritmo normale: un bot a posto non ha
+   *              bisogno di dirlo, e un badge in più su ogni card rende invisibili
+   *              i due che contano.
+   *
+   * Soglia e finestra NON sono replicate qui: arrivano dal payload
+   * (`maxOpensPerWindow`/`windowMinutes`) apposta, perché un bot può
+   * sovrascriverle in config e una copia dei default lato UI divergerebbe al
+   * primo che lo fa. Se mancano, il badge dichiara "sconosciuta" invece di
+   * indovinarle.
+   *
+   * Sul testo del giallo: `lastHour` è un conteggio su 60 minuti, la soglia vale
+   * su `windowMinutes` (30 di default). Scrivere "3/4 aperture/30min" affermerebbe
+   * che le 3 aperture stanno dentro la mezz'ora, cosa che il dato non dice: le due
+   * grandezze sono quindi etichettate ciascuna con la propria finestra.
+   */
+  _tradeVelocityBadge(b) {
+    const ignoto = (motivo) =>
+      `<span class="bot-alert-badge bot-velocity-badge is-unknown" title="${this._escapeHtml(motivo)}">❔ velocità sconosciuta</span>`;
+
+    // 1) Gate attivo ora: vince su tutto il resto, anche se il conteggio non si
+    //    legge — è un fatto già deciso dal backend, non una stima della UI.
+    if (this._overtradingGateActive(b)) {
+      // `lastEval.reason` è testo non fidato (cita nome del bot e parametri) e
+      // finisce in un attributo: stesso trattamento di `crashBadge`.
+      return `<span class="bot-alert-badge bot-velocity-badge is-paused" title="${this._escapeHtml(b.lastEval.reason)}">🚦 IN PAUSA — troppe aperture</span>`;
+    }
+
+    // 2) `openRate` assente o null: il backend non ha potuto contare (o non lo
+    //    ha detto). Non è "nessuna apertura".
+    const rate = b && b.openRate;
+    if (!rate || typeof rate !== 'object') {
+      return ignoto('Conteggio delle aperture recenti non disponibile — non vuol dire "nessuna apertura".');
+    }
+
+    // 3) Freno disattivato per questo bot: non c'è nessuna soglia da avvicinare.
+    if (rate.enabled === false) return '';
+
+    // `_jevNumber` e non `Number()`: `Number(null)` vale 0, cioè trasformerebbe
+    // proprio il dato mancante nel "zero aperture" che stiamo evitando.
+    const lastHour = this._jevNumber(rate.lastHour);
+    const last4h = this._jevNumber(rate.last4h);
+    const max = this._jevNumber(rate.maxOpensPerWindow);
+    const win = this._jevNumber(rate.windowMinutes);
+    if (lastHour == null || max == null || win == null) {
+      return ignoto('Ritmo di apertura non confrontabile con la soglia: uno dei valori non è leggibile.');
+    }
+
+    // 4) Ritmo elevato. Il minimo a 1 evita che un bot con soglia 1 risulti
+    //    "elevato" con zero aperture (`max - 1` varrebbe 0).
+    const allerta = Math.max(1, max - 1);
+    if (lastHour < allerta) return '';
+
+    const apr = (n) => `${n} apertur${n === 1 ? 'a' : 'e'}`;
+    const coda4h = last4h == null ? '' : `, ${last4h} nelle ultime 4 ore`;
+    const title = `Ritmo di apertura vicino al freno: ${apr(lastHour)} nell'ultima ora${coda4h}. Le nuove aperture si fermano a ${max} in ${win} minuti.`;
+    return `<span class="bot-alert-badge bot-velocity-badge is-elevated" title="${this._escapeHtml(title)}">⚡ ${apr(lastHour)}/1h · max ${max}/${win}min</span>`;
+  }
+
+  /**
    * Markup di una card bot.
    *
    * Regola di questo metodo: ogni campo che arriva dal DB o da un agente esterno
@@ -3664,9 +3758,11 @@ class PerpsApp {
     const agentBadgeClass = b.actorColor || (isHermes ? 'agent-badge-hermes' : 'agent-badge-manual');
     const agentBadge = `<span class="agent-badge ${agentBadgeClass}" title="Controllato da: ${actorLabel} (${agentId})">${actorIcon} ${actorLabel}</span>`;
 
-    // Budget Ceiling info
+    // Budget Ceiling info. Il separatore " · " iniziale è sparito con lo
+    // spostamento nella riga di contesto: lì la spaziatura la fa il `gap` del
+    // flex, e un puntino appeso davanti al primo elemento sembrava un refuso.
     const budgetInfo = b.max_allocation_usd != null
-      ? `<span class="muted" title="Budget Ceiling"> · max ${this.fmtUsd(b.max_allocation_usd)}</span>`
+      ? `<span class="muted bot-budget-info" title="Budget Ceiling">max ${this.fmtUsd(b.max_allocation_usd)}</span>`
       : '';
 
     // Badge del mercato scambiato. Prima era testo `.muted` accanto al nome
@@ -3683,8 +3779,26 @@ class PerpsApp {
     // lo fa (`"` → `&quot;`, `'` → `&#39;`). Il fallback resta intatto: si escapa il
     // valore finale, non si sostituisce la logica.
     const crashBadge = crashed
-      ? `<span class="bot-status-crashed-badge" title="${this._escapeHtml(b.crashReason || 'Nessun tick rilevato')}">⚠️ CRASH</span>`
+      ? `<span class="bot-alert-badge bot-status-crashed-badge" title="${this._escapeHtml(b.crashReason || 'Nessun tick rilevato')}">⚠️ CRASH</span>`
       : '';
+
+    // Velocità di trading (OVERTRADE-01): condivide con CRASH lo slot alert e lo
+    // stesso trattamento visivo. Se ci sono entrambi si vedono entrambi — un bot
+    // crashato può essere anche stato fermato dal freno, e nascondere l'uno
+    // dietro l'altro toglierebbe metà della diagnosi.
+    const velocityBadge = this._tradeVelocityBadge(b);
+    const alertSlot = (crashBadge || velocityBadge)
+      ? `<div class="bot-alert-slot">${crashBadge}${velocityBadge}</div>`
+      : '';
+
+    // Riga di contesto: chi controlla il bot, se è forward-test, quanto può
+    // allocare. Sono informazioni che si leggono UNA volta e poi non cambiano —
+    // in riga primaria pesavano quanto un CRASH.
+    const paperBadge = b.paper
+      ? '<span class="testnet-badge" style="font-size:.62rem;vertical-align:middle" title="Forward-test: esecuzione simulata su prezzi reali">PAPER</span>'
+      : '';
+    const contextBadges = `${agentBadge}${paperBadge}${budgetInfo}`;
+    const contextRow = contextBadges ? `<div class="bot-card-context">${contextBadges}</div>` : '';
 
     // Stato dot: verde = running, rosso-pulse = crashed, grigio = stopped
     const dotClass = crashed ? 'crashed' : (running ? 'online' : 'offline');
@@ -3703,16 +3817,25 @@ class PerpsApp {
     // Riga strategia: traduzione human-readable delle entryRules dal config
     const stratRules = this._describeEntryRules(b);
 
+    // Intestazione su due livelli. Prima era una riga sola con sei elementi in
+    // fila e lo stesso peso visivo: il badge CRASH stava in mezzo ai badge di
+    // contesto e si leggeva come uno di loro. Ora:
+    //   riga 1  identità (stato · nome · mercato) + PnL + slot alert
+    //   riga 2  contesto (agente · PAPER · budget), più piccolo e attenuato
+    // Lo slot alert è il primo posto dove guardare per "c'è un problema": sta
+    // sotto il PnL, nell'angolo in alto a destra, e contiene solo allarmi.
     return `<div class="bot-card ${running ? 'running' : ''} ${crashed ? 'bot-crashed' : ''}" id="bot-${b.id}">
       <div class="bot-card-head">
-        <div>
+        <div class="bot-card-ident">
           <span class="bot-status-dot ${dotClass}"></span>
           <strong>${this._escapeHtml(b.name)}</strong> ${coinBadge}
-          ${b.paper ? '<span class="testnet-badge" style="font-size:.6em;vertical-align:middle" title="Forward-test: esecuzione simulata su prezzi reali">PAPER</span>' : ''}
-          ${agentBadge}${budgetInfo}${crashBadge}
         </div>
-        <span class="bot-pnl ${pnlClass}">${this.fmtUsd(b.dailyPnl || 0)}</span>
+        <div class="bot-card-alerts">
+          <span class="bot-pnl ${pnlClass}">${this.fmtUsd(b.dailyPnl || 0)}</span>
+          ${alertSlot}
+        </div>
       </div>
+      ${contextRow}
       <div class="bot-card-body">
         ${stratBadge}
         <div class="bot-meta"><span class="label">Strategia</span> <span class="rule-pills">${stratRules}</span></div>

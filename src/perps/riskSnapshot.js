@@ -67,6 +67,58 @@ function timeMeta(now, suffix = '') {
   return suffix ? `${time} · ${suffix}` : time;
 }
 
+/**
+ * FINESTRE TEMPORALI DELLA CURVA EQUITY (bottoni 1G/7G/30G/90G/1A/Tutto).
+ *
+ * Il vocabolario è quello che la UI già usa in `_filterEquityPointsByRange`
+ * (`public/perps.js`), incluso l'alias `1y` per `365d`: qui si accetta lo stesso
+ * insieme di codici perché il parametro `range` viaggia dal bottone alla query
+ * string senza traduzioni intermedie. Vive qui, e non in `server.js`, perché
+ * entrambe le rotte che espongono la curva (`/api/perps/risk` e
+ * `/api/perps/performance`) devono risolverlo allo stesso modo: due copie della
+ * stessa tabella significherebbero due grafici che, con lo stesso bottone
+ * premuto, mostrano finestre diverse.
+ */
+export const EQUITY_RANGE_SECONDS = {
+  '1d': 86400,
+  '7d': 7 * 86400,
+  '30d': 30 * 86400,
+  '90d': 90 * 86400,
+  '365d': 365 * 86400,
+  '1y': 365 * 86400
+};
+
+/**
+ * Tetto di punti restituiti per la curva equity, qualunque sia la finestra.
+ * Un anno di campioni non si disegna: si sottocampiona (vedi
+ * `db.listRiskEquityHistoryByRange`). Il numero è quello già usato oggi dalla
+ * dashboard, così il peso della risposta non cambia rispetto a prima del fix.
+ */
+export const EQUITY_HISTORY_MAX_POINTS = 2000;
+
+/**
+ * Traduce il codice di finestra in un istante di partenza (secondi epoch).
+ *
+ * Ritorna `null` quando il parametro è ASSENTE o SCONOSCIUTO: il chiamante deve
+ * poter distinguere "nessuna finestra richiesta" da "finestra che parte da 0",
+ * perché senza `range` le rotte devono comportarsi ESATTAMENTE come prima —
+ * chi le consuma oggi non sa che questo parametro esiste. Un codice non
+ * riconosciuto non è un errore 400 per la stessa ragione: la curva è un
+ * elemento di contorno di risposte che contengono molto altro, e far fallire
+ * l'intera risposta per un refuso nella query string toglierebbe dalla
+ * dashboard dati di rischio che non c'entrano nulla.
+ */
+export function resolveEquityRange(range, nowSec = Math.floor(Date.now() / 1000)) {
+  if (typeof range !== 'string') return null;
+  const key = range.trim().toLowerCase();
+  if (!key) return null;
+  const now = Math.floor(number(nowSec, Math.floor(Date.now() / 1000)));
+  if (key === 'all') return { range: 'all', sinceTs: 0 };
+  const seconds = EQUITY_RANGE_SECONDS[key];
+  if (!seconds) return null;
+  return { range: key, sinceTs: Math.max(0, now - seconds) };
+}
+
 /** Calcola il drawdown massimo e quello corrente sulla curva sessione. */
 export function calculateDrawdown(history = []) {
   let peak = null;

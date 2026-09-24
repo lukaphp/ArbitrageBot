@@ -79,9 +79,10 @@ test('getUserFills e getFrontendOpenOrders passano dalla SDK pesante, getAllMids
 test('una lettura che non si risolve mai diventa un errore, non un blocco infinito', async () => {
   await client.closeAllSdks();
   const timeoutOriginale = client.restTimeoutMs;
-  const retryOriginali = client.restRetries;
+  // Si abbassa SOLO il tetto di tempo, per non aspettare 10s. `restRetries`
+  // resta quello di produzione: così `tentativi` misura il comportamento vero,
+  // e tornerebbe 4 invece di 2 se qualcuno rimettesse un retry.
   client.restTimeoutMs = 40;
-  client.restRetries = 0;
 
   let tentativi = 0;
   client.readSdks.set(`${NET}:heavy`, {
@@ -96,12 +97,82 @@ test('una lettura che non si risolve mai diventa un errore, non un blocco infini
   const partito = Date.now();
   await assert.rejects(() => client.getUserFills(ADDR, NET), /timeout/i);
   await assert.rejects(() => client.getFrontendOpenOrders(ADDR, NET), /timeout/i);
-  assert.equal(tentativi, 2);
+  assert.equal(tentativi, 2, 'due chiamate, un tentativo ciascuna: nessun retry');
   assert.ok(Date.now() - partito < 5000, 'deve fallire in fretta, non restare appesa');
 
   client.readSdks.clear();
   client.restTimeoutMs = timeoutOriginale;
-  client.restRetries = retryOriginali;
+});
+
+/**
+ * P0 24/09/2026 — amplificazione da retry. Un tentativo andato in timeout non
+ * si annulla: continua a girare e spende comunque i suoi 20 token. Con un
+ * retry, una lettura pesante fallita ne costava 40 proprio quando il secchiello
+ * era già vuoto — il retry alimentava il prosciugamento invece di rimediarvi,
+ * e non poteva aiutare (un istante dopo trova la stessa situazione).
+ *
+ * Si verifica su un 429, cioè l'errore *transitorio* per eccellenza: è il caso
+ * in cui `withRetry` ritenterebbe di sicuro, quindi l'unico che dimostra
+ * davvero che il retry è disattivato e non solo saltato per un errore
+ * classificato come definitivo.
+ */
+test('nessun retry sulle letture pesanti: un 429 costa UNA sola chiamata', async () => {
+  await client.closeAllSdks();
+  client.heavyReadsInFlight.clear();
+  assert.equal(client.restRetries, 0,
+    'il valore di produzione: le 4 letture di peso 20 non ritentano');
+
+  const tentativi = { fills: 0, orders: 0, funding: 0, predicted: 0 };
+  const rateLimit = () => Object.assign(new Error('rate limited'), { status: 429 });
+  client.readSdks.set(`${NET}:heavy`, {
+    info: {
+      getUserFills: async () => { tentativi.fills++; throw rateLimit(); },
+      getFrontendOpenOrders: async () => { tentativi.orders++; throw rateLimit(); },
+      perpetuals: {
+        getFundingHistory: async () => { tentativi.funding++; throw rateLimit(); },
+        getPredictedFundings: async () => { tentativi.predicted++; throw rateLimit(); }
+      }
+    },
+    disconnect() { }
+  });
+
+  await assert.rejects(() => client.getUserFills(ADDR, NET), /rate limited/);
+  await assert.rejects(() => client.getFrontendOpenOrders(ADDR, NET), /rate limited/);
+  await assert.rejects(() => client.getFundingHistory('BTC-PERP', 60_000, NET), /rate limited/);
+  await assert.rejects(() => client.getPredictedFundings(NET), /rate limited/);
+
+  assert.deepEqual(tentativi, { fills: 1, orders: 1, funding: 1, predicted: 1 },
+    'tutte e quattro le letture di peso 20 spendono 20 token, mai 40');
+
+  client.readSdks.clear();
+  client.heavyReadsInFlight.clear();
+});
+
+/**
+ * Il contrappeso: la rinuncia al retry è mirata alle letture di peso 20, non
+ * una disattivazione globale. Le letture da 2 token non concorrono per il
+ * secchiello pesante, quindi per loro ritentare un 429 resta la cosa giusta.
+ */
+test('le letture leggere continuano a ritentare: la rinuncia è solo per il peso 20', async () => {
+  await client.closeAllSdks();
+  let tentativi = 0;
+  client.readSdks.set(NET, {
+    info: {
+      getAllMids: async () => {
+        tentativi++;
+        if (tentativi < 2) throw Object.assign(new Error('rate limited'), { status: 429 });
+        return { BTC: '50000' };
+      }
+    },
+    disconnect() { }
+  });
+
+  const mids = await client.getAllMids(NET);
+
+  assert.equal(mids.BTC, '50000');
+  assert.equal(tentativi, 2, 'una leggera che fallisce una volta riesce al secondo tentativo');
+
+  client.readSdks.clear();
 });
 
 /**

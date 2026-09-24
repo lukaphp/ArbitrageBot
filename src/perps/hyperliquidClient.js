@@ -57,12 +57,24 @@ class HyperliquidClient {
     // di modulo perché i test devono poterli abbassare per verificare il
     // comportamento su una chiamata che non risponde mai, senza aspettare.
     this.restTimeoutMs = 10000;  // letture (info): risposta sana 1-3s
-    // Le letture pesanti ritentano UNA volta sola: il tetto peggiore resta
-    // ~21s, che una rotta della dashboard può ancora spendere. Ritentarle di
-    // più non aiuta — se la causa è il secchiello prosciugato, il tentativo
-    // successivo trova la stessa situazione — e trasformerebbe un guasto in
-    // un'attesa di quasi un minuto davanti all'utente.
-    this.restRetries = 1;
+    // Le letture pesanti (peso 20) NON ritentano affatto: il tetto peggiore è
+    // quindi il solo `restTimeoutMs` qui sopra — 10s, non più ~21s.
+    //
+    // Un secondo tentativo non aveva modo di aiutare: se la causa è il
+    // secchiello prosciugato, un istante dopo trova la stessa identica
+    // situazione. In compenso costava, perché il tentativo andato in timeout
+    // NON si annulla (`withTimeout` perde la corsa, ma la chiamata continua a
+    // girare e spende comunque i suoi 20 token): con un retry una lettura
+    // fallita ne pesava 40 proprio quando il budget era già esaurito,
+    // alimentando il prosciugamento che avrebbe dovuto tamponare.
+    //
+    // Il prezzo di questa scelta è la resilienza a un blip isolato, ed è
+    // sostenibile perché ora un timeout passa dritto al chiamante, che lo
+    // tratta per quello che è — «non so», non «non c'è» — senza prendere
+    // decisioni distruttive su una lettura fallita (guardia SL in `bot.js`,
+    // CRIT-SLGUARD-24). Vale solo per queste 4 letture: le altre continuano a
+    // usare i retry di default di `withRetry`.
+    this.restRetries = 0;
     // Le chiamate di esecuzione (firmate) hanno un tetto più largo e NESSUN
     // retry: un reinvio rischierebbe una doppia esecuzione. Serve comunque,
     // perché girano dentro `execQueue`, serializzata per master: una chiamata

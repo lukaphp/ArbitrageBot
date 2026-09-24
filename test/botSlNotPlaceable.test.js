@@ -90,7 +90,7 @@ test('oid null: chiusura di sicurezza senza la verifica intermedia sul book', as
     `notifica invariata nel testo, trovate: ${JSON.stringify(notified)}`);
 });
 
-test('oid valorizzato: la verifica esistente resta e la posizione non viene chiusa', async () => {
+test('oid valorizzato: nessuna rilettura di cortesia, e la posizione non viene chiusa', async () => {
   const calls = { readOrders: 0, placeTrigger: 0, cancel: 0, close: 0 };
   const bot = botWithPosition('sl-ok', 'SLO-PERP', calls, 4242);
   notified.length = 0;
@@ -98,7 +98,14 @@ test('oid valorizzato: la verifica esistente resta e la posizione non viene chiu
   await bot._ensureStopLoss();
 
   assert.equal(calls.placeTrigger, 1);
-  assert.equal(calls.readOrders, 2, 'lettura iniziale + verifica finale: comportamento invariato');
+  // CAMBIATO il 24/09/2026 (era 2). Dopo un oid valido c'era una seconda lettura
+  // del book il cui unico effetto era un `logger.debug` se l'ordine non risultava
+  // ancora visibile — un'informazione che il tick dopo dà comunque. È una
+  // chiamata di peso 20 sul percorso in cui il secchiello è già sotto pressione
+  // (è così che sono nati i timeout che chiudevano le posizioni): rimossa.
+  // L'invariante che WARN-06 aveva fissato regge ancora, ed è più forte di prima:
+  // nessun round-trip in più prima di decidere.
+  assert.equal(calls.readOrders, 1, 'una sola lettura del book anche sul percorso di ri-piazzamento riuscito');
   assert.equal(calls.close, 0, 'con un oid valido non si chiude nulla');
   assert.ok(bot.position, 'posizione ancora aperta');
   assert.equal(bot.position.slOid, 4242, 'oid dello SL tracciato');

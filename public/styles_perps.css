@@ -238,6 +238,45 @@
 .rule-pill.short { background: rgba(229, 62,  62,  0.11); color: #9b2c2c; border: 1px solid rgba(229,62,62,0.28); }
 .rule-logic { font-size: 0.68rem; color: #a0aec0; padding: 0 2px; font-weight: 700; }
 
+/* --- Riga "Backtest" della card bot (esito del cancello pre-flight MCP) ---
+   Sta subito sotto "Storico reale" e ne ripete la grammatica: stesso ordine dei
+   numeri (win · trade · PF) perché le due righe vanno confrontate a colpo
+   d'occhio — la promessa del backtest contro quello che sta succedendo davvero.
+   Nessuna palette nuova: il verde è quello di `.rule-pill.long`, il rosso quello
+   di `.bot-velocity-badge.is-paused`, il grigio quello di `.is-unknown`. Tre
+   stati già in uso altrove nella card, così "positivo/allerta/non determinato"
+   si leggono uguali ovunque. */
+.bot-backtest-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  text-align: right;
+  cursor: help;
+}
+.bot-backtest-verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.bot-backtest-verdict.is-passed  { background: rgba(56, 161, 105, 0.13); color: #276749; border: 1px solid rgba(56,161,105,0.3); }
+.bot-backtest-verdict.is-blocked { background: #c53030; color: #fff; border: 1px solid #9b2c2c; }
+/* Grigio per "non concludente", per un verdetto che la UI non conosce e per un
+   riassunto scaduto: in tutti e tre i casi nessuno ha giudicato la strategia
+   attuale, e un verde di default lo affermerebbe al posto loro. */
+.bot-backtest-verdict.is-unknown { background: #edf2f7; color: #718096; border: 1px solid #cbd5e0; }
+/* `tabular-nums`: le percentuali della riga backtest e quelle di "Storico reale"
+   restano incolonnate fra una card e l'altra. */
+.bot-backtest-stats { font-size: 0.75rem; color: #4a5568; font-variant-numeric: tabular-nums; }
+.bot-backtest-when  { font-size: 0.7rem;  color: #a0aec0; white-space: nowrap; }
+.bot-backtest-none  { font-size: 0.75rem; color: #a0aec0; font-style: italic; cursor: help; }
+
 
 /* --- Modal largo + rule builder --- */
 .modal-wide { max-width: 760px; width: 92%; }

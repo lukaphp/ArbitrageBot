@@ -198,6 +198,19 @@ export class Portfolio {
    * scaduto ma serie di perdite ancora in corso): la protezione non si allenta,
    * si sposta solo il punto in cui viene scritta.
    *
+   * CRIT-LOSSLOCK-25 — ma quel ramo deve avere una FINE. Deciso solo sul
+   * conteggio, si azzerava unicamente con una chiusura non in perdita: e per
+   * chiudere bisogna aprire, cosa che il ramo stesso impedisce. La condizione
+   * di uscita era irraggiungibile dall'interno, cioè non un cooldown ma un
+   * blocco definitivo con l'etichetta di un cooldown (BTC/BNB/AVAX in
+   * produzione, fermi 4+ ore con `"3 perdite consecutive → cooldown 60 min"`
+   * ripetuto ogni 10 secondi). La durata è quella già dichiarata,
+   * `cooldownMinutes`, contata dall'ULTIMA perdita — `lastLossAt`.
+   *
+   * `lastLossAt` non noto resta bloccante: non sapere QUANDO si è perso non è
+   * sapere che la finestra è passata. Chi non può fornirlo (il backtester, una
+   * diagnostica) vede il comportamento storico, invariato.
+   *
    * `reservedSlots` sono le aperture dello stesso wallet già impegnate ma non
    * ancora presenti in `account.positions` (lo snapshot è letto a inizio tick e
    * non vede le aperture in volo degli altri bot). Contarle qui è ciò che rende
@@ -207,10 +220,10 @@ export class Portfolio {
    * backtester, il gate advisory) passa 0 e la funzione resta pura e
    * deterministica.
    *
-   * @param {object} p { account, plannedNotional, botId, consecutiveLosses, reservedSlots }
+   * @param {object} p { account, plannedNotional, botId, consecutiveLosses, reservedSlots, lastLossAt, now }
    * @returns { ok, reason, cooldownUntil? }
    */
-  canOpen({ account, plannedNotional = 0, botId, consecutiveLosses = 0, reservedSlots = 0 }) {
+  canOpen({ account, plannedNotional = 0, botId, consecutiveLosses = 0, reservedSlots = 0, lastLossAt = null, now = Date.now() }) {
     const L = this.getLimits();
 
     const until = this.cooldownInfo(botId);
@@ -239,7 +252,26 @@ export class Portfolio {
 
     if (consecutiveLosses >= L.maxConsecutiveLosses) {
       // Nessuna scrittura qui: l'attivazione è di `recordLoss()`.
-      return { ok: false, reason: `${consecutiveLosses} perdite consecutive → cooldown ${L.cooldownMinutes} min` };
+      const ultima = Number(lastLossAt);
+      const scadenza = Number.isFinite(ultima) && ultima > 0
+        ? ultima + L.cooldownMinutes * 60000
+        : null;
+      if (scadenza != null && now >= scadenza) {
+        // Finestra esaurita: la serie di perdite resta, ma il bot deve poter
+        // rientrare a mercato — è l'unico modo che ha di spezzarla.
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        reason: scadenza != null
+          ? `${consecutiveLosses} perdite consecutive → cooldown ${L.cooldownMinutes} min (fino alle ${new Date(scadenza).toLocaleTimeString('it-IT')})`
+          : `${consecutiveLosses} perdite consecutive → cooldown ${L.cooldownMinutes} min (istante dell'ultima perdita ignoto, blocco prudenziale)`,
+        // Presente solo quando c'è una scadenza vera: è il discriminante con
+        // cui il chiamante notifica una volta per episodio invece che a ogni
+        // tick. Senza scadenza non c'è episodio da chiudere, e inventarne una
+        // farebbe tacere un blocco che invece va guardato.
+        cooldownUntil: scadenza ?? undefined
+      };
     }
 
     return { ok: true };

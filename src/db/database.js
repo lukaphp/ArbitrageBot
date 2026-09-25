@@ -853,6 +853,27 @@ export class PerpsDatabase {
     return row && row.oldest != null ? row.oldest : null;
   }
 
+  /**
+   * CRIT-LOSSLOCK-25 — `closed_at` dell'ultima chiusura IN PERDITA, o null.
+   *
+   * Compagno obbligato di `getConsecutiveLosses`: il conteggio dice QUANTE
+   * perdite di fila, questo dice QUANDO è arrivata l'ultima. Senza il "quando",
+   * il blocco che ne deriva non ha scadenza — ed è esattamente come tre bot in
+   * produzione sono rimasti fermi 4+ ore con l'etichetta "cooldown 60 min".
+   *
+   * Null (non 0) quando non c'è nessuna chiusura in perdita: uno 0 preso per
+   * buono a valle significherebbe "perso nel 1970", cioè finestra sempre
+   * scaduta — l'opposto della prudenza richiesta qui.
+   */
+  lastLossClosedAt(botId) {
+    this.ensure();
+    const row = this.db.prepare(
+      `SELECT MAX(closed_at) AS ts FROM positions
+        WHERE bot_id = ? AND status = 'closed' AND pnl IS NOT NULL AND pnl < 0`
+    ).get(botId);
+    return row && row.ts != null ? row.ts : null;
+  }
+
   /** Conta le perdite consecutive più recenti di un bot. */
   getConsecutiveLosses(botId) {
     this.ensure();

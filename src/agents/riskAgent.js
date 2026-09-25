@@ -101,7 +101,11 @@ class RiskAgent {
       account,
       plannedNotional: plan.notionalUsd,
       botId: action.botId,
-      consecutiveLosses: action.consecutiveLosses || 0
+      consecutiveLosses: action.consecutiveLosses || 0,
+      // CRIT-LOSSLOCK-25 — se il chiamante non lo fornisce resta null, e il
+      // ramo delle perdite consecutive blocca come prima: questo gate deve
+      // essere almeno restrittivo quanto quello del bot, mai meno.
+      lastLossAt: action.lastLossAt ?? null
     });
     if (!pf.ok) return pf;
 

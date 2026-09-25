@@ -3809,6 +3809,175 @@ class PerpsApp {
   }
 
   /**
+   * Il backtest salvato descrive ancora la strategia con cui il bot opera ADESSO?
+   *
+   * Non è una domanda teorica. `backtestSummary` viene ricalcolato SOLO quando la
+   * modifica passa dal cancello MCP (`update_strategy_params` con `entryRules`,
+   * oppure `register_bot`). Ma una proposta `tune_params` approvata a mano passa
+   * da `botManager.applyConfigPatch`, che FONDE la patch e lascia il riassunto
+   * intatto — e l'unica chiave che quella patch può toccare è `candleInterval`
+   * (`TUNABLE_KEYS` in src/agents/tunePatch.js), cioè esattamente il timeframe su
+   * cui il backtest è stato misurato. Da quel momento il verdetto parla di
+   * un'altra strategia, ma continua ad avere l'aria di parlare di questa: un
+   * "✅ superato" verde su una misura che non vale più è peggio di nessun dato.
+   *
+   * Il confronto scatta solo quando ESISTONO ENTRAMBI i valori: `candleInterval`
+   * assente in config significa "default del backend", non "diverso", e un
+   * avviso su ogni bot che non lo sovrascrive sarebbe un falso allarme.
+   *
+   * @returns {string|null} motivo leggibile, oppure `null` se il riassunto è
+   *   ancora coerente con la configurazione attuale (o non è confrontabile).
+   */
+  _backtestStaleReason(b, s) {
+    const cfg = (b && b.config) || {};
+    // La coin del bot e quella del riassunto possono differire per il solo
+    // suffisso `-PERP` (il gate normalizza, la riga in DB non sempre): senza
+    // questa normalizzazione ogni bot risulterebbe "non più valido".
+    const coinNorm = (v) => String(v ?? '').trim().toUpperCase().replace(/-PERP$/, '');
+
+    if (s.interval && cfg.candleInterval && String(s.interval) !== String(cfg.candleInterval)) {
+      return `misurato su candele ${s.interval}, ma il bot ora opera su ${cfg.candleInterval}`;
+    }
+    if (s.coin && b && b.coin && coinNorm(s.coin) !== coinNorm(b.coin)) {
+      return `misurato su ${s.coin}, ma il bot ora opera su ${b.coin}`;
+    }
+    return null;
+  }
+
+  /**
+   * Riga "Backtest" della card bot: l'esito del cancello pre-flight che il
+   * percorso MCP (`register_bot` / `update_strategy_params`) esegue PRIMA di
+   * scrivere la strategia in DB, salvato dentro `config.backtestSummary`.
+   *
+   * Sta subito sotto "Storico reale" di proposito: le due righe usano lo stesso
+   * vocabolario (win rate, trade, PF) e affiancate rispondono alla domanda che
+   * conta davvero — "quello che il backtest prometteva sta succedendo?".
+   *
+   * Tre scelte non ovvie:
+   *
+   *  1. **Il P&L simulato NON entra nella riga**, solo nel tooltip e con la
+   *     parola "simulato" accanto. Win rate e profit factor sono rapporti e non
+   *     si confondono con niente; un importo in dollari su una card di trading
+   *     si legge come soldi veri, e su un bot che non ha mai aperto una
+   *     posizione sarebbe il numero plausibile-ma-finto peggiore della pagina.
+   *  2. **`verdict: 'blocked'` oggi non è raggiungibile dal percorso MCP** — su
+   *     entrambi i tool il blocco è fail-fast e in DB non viene scritta nessuna
+   *     riga. Lo rendo comunque, in rosso, proprio per questo: se un giorno
+   *     compare significa che quella config è arrivata in DB per una via che il
+   *     cancello non attraversa (creazione dalla UI, import JSON), ed è l'ultima
+   *     cosa da nascondere.
+   *  3. **Verdetto sconosciuto ⇒ pill grigia con il valore grezzo**, mai riga
+   *     omessa e mai verde di default: se il backend aggiunge un quarto esito,
+   *     deve comparire come testo tecnico, non sparire.
+   *
+   * `profitFactor: null` qui vale sia "non calcolabile" sia "infinito" (il gate
+   * collassa entrambi su null in `evaluateBacktestGate`): per questo si mostra
+   * `PF n/d` e non si inventa un `∞` — il valore vero resta nel testo di
+   * `reason`, che finisce nel tooltip.
+   *
+   * @param b stato del bot
+   * @param isManaged bot gestito da un agente: solo per questi l'ASSENZA del
+   *   riassunto è un'informazione (il cancello vive sul percorso MCP, quindi un
+   *   bot creato a mano non ci è mai passato e dirlo su ogni card sarebbe rumore)
+   */
+  _backtestRowHtml(b, isManaged) {
+    const cfg = (b && b.config) || {};
+    const s = cfg.backtestSummary;
+    const valido = s && typeof s === 'object' && !Array.isArray(s);
+
+    if (!valido) {
+      if (!isManaged) return '';
+      const perche = 'Nessun backtest registrato nella configurazione di questo bot: è stato creato '
+        + 'prima del cancello pre-flight, oppure per una via che non lo attraversa (creazione dalla '
+        + 'UI, import JSON). Non vuol dire che la strategia sia stata bocciata — vuol dire che non è '
+        + 'mai stata verificata.';
+      return `<div class="bot-meta bot-backtest-row"><span class="label">Backtest</span>
+        <span class="bot-backtest-none" title="${this._escapeHtml(perche)}">mai verificato</span></div>`;
+    }
+
+    const stale = this._backtestStaleReason(b, s);
+    const verdetto = typeof s.verdict === 'string' ? s.verdict : '';
+    const NOTI = {
+      passed:       { cls: 'is-passed',  text: '✅ superato' },
+      blocked:      { cls: 'is-blocked', text: '⛔ non superato' },
+      inconclusive: { cls: 'is-unknown', text: '❔ non concludente' }
+    };
+    // Un riassunto scaduto non porta più un giudizio: grigio, e lo dice. Il
+    // verdetto originale non si perde, resta nel tooltip.
+    const pill = stale
+      ? { cls: 'is-unknown', text: '❔ non più valido' }
+      : (NOTI[verdetto] || { cls: 'is-unknown', text: `❔ ${verdetto || 'verdetto sconosciuto'}` });
+
+    // `_jevNumber` e non `Number()`: `Number(null)` vale 0, cioè trasformerebbe
+    // "statistica assente" in "zero trade / 0% win", che è un giudizio.
+    const trades = this._jevNumber(s.trades);
+    const winRate = this._jevNumber(s.winRate);
+    const pf = this._jevNumber(s.profitFactor);
+    const statsHtml = trades == null
+      // Nessun trade misurato: succede quando il backtest non è partito affatto
+      // (rete giù, strategia senza entryRules). Dirlo, non lasciare il vuoto.
+      ? '<span class="bot-backtest-stats muted">statistiche non disponibili</span>'
+      : `<span class="bot-backtest-stats">${[
+        winRate != null ? `${(winRate * 100).toFixed(1)}% win` : 'win n/d',
+        `${trades} trade`,
+        pf != null ? `PF ${pf.toFixed(2)}` : 'PF n/d'
+      ].join(' · ')}</span>`;
+
+    const checkedAt = this._jevNumber(s.checkedAt);
+    // `> 0` oltre al null-check: uno `0` scriverebbe "01/01/70, 01:00", una data
+    // perfettamente plausibile per un backtest che non è mai stato datato.
+    const quando = checkedAt != null && checkedAt > 0
+      ? new Date(checkedAt).toLocaleString('it-IT', {
+        day: '2-digit', month: '2-digit', year: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false
+      })
+      : null;
+
+    // Tooltip: il contesto della misura (coin, intervallo, giorni di storico) è
+    // stato salvato apposta dal gate perché un profit factor senza sapere su
+    // cosa e su quanto tempo è stato misurato non è riproducibile. Buttarlo via
+    // qui annullerebbe quella scelta.
+    const contesto = [];
+    if (s.coin) contesto.push(String(s.coin));
+    if (s.interval) contesto.push(`candele ${s.interval}`);
+    const periodDays = this._jevNumber(s.periodDays);
+    const lookbackDays = this._jevNumber(s.lookbackDays);
+    // Due numeri diversi, due frasi diverse: `periodDays` è lo storico davvero
+    // coperto, `lookbackDays` solo la finestra richiesta al gate.
+    if (periodDays != null) contesto.push(`${periodDays} giorni di storico`);
+    else if (lookbackDays != null) contesto.push(`finestra richiesta ${lookbackDays} giorni`);
+
+    const righe = [];
+    righe.push(`Backtest eseguito ${quando ? `il ${quando}` : '(data non registrata)'}`
+      + `${contesto.length ? ` su ${contesto.join(', ')}` : ''}.`);
+    if (stale) {
+      righe.push(`⚠️ Non descrive più la strategia attuale: ${stale}. `
+        + `Verdetto originale: ${verdetto || 'sconosciuto'}.`);
+    }
+    const extra = [];
+    const totalPnl = this._jevNumber(s.totalPnl);
+    const expectancy = this._jevNumber(s.expectancy);
+    const maxDd = this._jevNumber(s.maxDrawdownPct);
+    if (totalPnl != null) extra.push(`P&L simulato ${this.fmtUsd(totalPnl)}`);
+    if (expectancy != null) extra.push(`expectancy ${expectancy.toFixed(2)}$/trade`);
+    if (maxDd != null) extra.push(`max drawdown ${maxDd.toFixed(2)}%`);
+    if (extra.length) righe.push(extra.join(' · '));
+    // `reason` è testo prodotto dal server ma può inglobare il messaggio di
+    // un'eccezione vera (nome della coin, parametri): come ogni altro campo di
+    // questa card passa da `_escapeHtml`, che copre anche `"` e `'`.
+    if (typeof s.reason === 'string' && s.reason.trim()) righe.push(s.reason.trim());
+
+    return `<div class="bot-meta bot-backtest-row">
+        <span class="label">Backtest</span>
+        <span class="bot-backtest-value" title="${this._escapeHtml(righe.join('\n'))}">
+          <span class="bot-backtest-verdict ${pill.cls}">${this._escapeHtml(pill.text)}</span>
+          ${statsHtml}
+          <span class="bot-backtest-when">${this._escapeHtml(quando || 'data ignota')}</span>
+        </span>
+      </div>`;
+  }
+
+  /**
    * Markup di una card bot.
    *
    * Regola di questo metodo: ogni campo che arriva dal DB o da un agente esterno
@@ -3923,6 +4092,11 @@ class PerpsApp {
     // Riga strategia: traduzione human-readable delle entryRules dal config
     const stratRules = this._describeEntryRules(b);
 
+    // Riga backtest: verdetto del cancello pre-flight salvato in
+    // `config.backtestSummary`. Va dopo `isManaged` perché su un bot gestito da
+    // un agente anche l'ASSENZA del riassunto è un'informazione.
+    const backtestRow = this._backtestRowHtml(b, isManaged);
+
     // Intestazione su due livelli. Prima era una riga sola con sei elementi in
     // fila e lo stesso peso visivo: il badge CRASH stava in mezzo ai badge di
     // contesto e si leggeva come uno di loro. Ora:
@@ -3948,6 +4122,7 @@ class PerpsApp {
         <div class="bot-meta"><span class="label">Posizione</span> ${pos}</div>
         <div class="bot-meta"><span class="label">Valutazione</span> <span class="eval">${evalReason}</span></div>
         ${statsLine}
+        ${backtestRow}
         ${crashed ? `<div class="bot-error bot-crash-reason">🐕 Watchdog: ${this._escapeHtml(b.crashReason || 'nessun tick rilevato')}</div>` : ''}
         ${!crashed && b.lastError ? `<div class="bot-error">⚠️ ${this._escapeHtml(b.lastError)}</div>` : ''}
       </div>

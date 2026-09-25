@@ -401,6 +401,55 @@ export function checkOvertrading(limits, { opens = 0, oldestOpenedAt = null, now
   };
 }
 
+/**
+ * CRIT-SLSTALE-25 — lo stop loss è GIÀ STATO SUPERATO dal mercato?
+ *
+ * Nasce da un caso reale (NEAR-PERP, 25/09/2026): uno stop market su book
+ * sottile TRIGGERA correttamente ma riempie solo una frazione della size (2,1
+ * su 99,9 unità); il resto dell'ordine viene scartato, la posizione resta
+ * aperta e senza protezione. La guardia SL al tick successivo non trova nessuno
+ * stop sul book e lo RI-PIAZZA allo stesso `slPx` — che ormai il prezzo si è
+ * lasciato alle spalle. Un trigger dietro al mercato non è una protezione: è
+ * rimasto inerte per 4 ore con il mark a +6% oltre la soglia, mentre la guardia
+ * lo contava come "protezione ripristinata".
+ *
+ * Qui si risponde solo alla domanda pura — «a questo prezzo, la condizione di
+ * stop è già soddisfatta?» — perché la risposta è la stessa per il bot e per il
+ * backtester. Cosa farne (chiudere a mercato invece di piazzare un trigger
+ * inerte) è orchestrazione, e sta in `bot.js`.
+ *
+ * FAIL-CLOSED sugli ingressi: con un prezzo o una soglia non finiti non si
+ * dichiara "non superato". Un NaN rende falso ogni confronto, e qui "falso"
+ * significherebbe piazzare comunque il trigger inerte — cioè il difetto.
+ *
+ * @param {object} p { side ('long'|'short'), price (mark/mid corrente), slPx }
+ * @returns { breached: boolean, known: boolean, reason: string|null }
+ */
+export function isStopBreached({ side, price, slPx } = {}) {
+  const px = Number(price);
+  const sl = Number(slPx);
+  const lato = side === 'short' ? 'short' : side === 'long' ? 'long' : null;
+
+  if (lato == null || !Number.isFinite(px) || px <= 0 || !Number.isFinite(sl) || sl <= 0) {
+    return {
+      breached: false,
+      known: false,
+      reason: `Superamento dello stop non verificabile (lato ${JSON.stringify(side)}, prezzo ${JSON.stringify(price)}, soglia ${JSON.stringify(slPx)})`
+    };
+  }
+
+  // Stessa direzione dei trigger su Hyperliquid: lo stop di uno short scatta
+  // "price above", quello di un long "price below".
+  const breached = lato === 'short' ? px >= sl : px <= sl;
+  return {
+    breached,
+    known: true,
+    reason: breached
+      ? `Stop loss già superato: ${lato} con prezzo ${px} ${lato === 'short' ? '≥' : '≤'} soglia ${sl}`
+      : null
+  };
+}
+
 class RiskManager {
   /** Arrotonda la size al numero di decimali consentito dal mercato. */
   roundSize(size, szDecimals = 3) {
@@ -421,6 +470,9 @@ class RiskManager {
   /** OVERTRADING — anche come metodi, per i chiamanti che hanno il singleton. */
   resolveOvertradingLimits(config) { return resolveOvertradingLimits(config); }
   checkOvertrading(limits, input) { return checkOvertrading(limits, input); }
+
+  /** CRIT-SLSTALE-25 — anche come metodo, per i chiamanti che hanno il singleton. */
+  isStopBreached(input) { return isStopBreached(input); }
 
   /**
    * Calcola la size (in unità di coin) da aprire.

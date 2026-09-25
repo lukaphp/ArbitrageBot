@@ -701,8 +701,11 @@ export class PerpsBot {
     // Il lock CRIT-03 non le copre: è per (master, COIN), e queste sono su coin
     // diverse — vedi il punto 4 in testa a execQueue.js.
     const cl = db.getConsecutiveLosses(this.id);
+    // CRIT-LOSSLOCK-25 — il conteggio da solo non basta: senza l'istante
+    // dell'ultima perdita il blocco che ne deriva non scade mai.
     const pf = portfolio.canOpen({
       account, plannedNotional: plan.notionalUsd, botId: this.id, consecutiveLosses: cl,
+      lastLossAt: db.lastLossClosedAt(this.id),
       reservedSlots: execQueue.reservedOpenSlots(this.masterAddress)
     });
     if (!pf.ok) {
@@ -1226,8 +1229,14 @@ export class PerpsBot {
    * (SEC-08): girando a ogni tick, è anche il punto in cui uno stato già sporco
    * — come i 2 SL trovati sul VPS — rientra da solo, senza cancellazioni a mano.
    * No-op se la strategia non prevede SL.
+   *
+   * `price` (opzionale) è il prezzo corrente del tick: serve solo alla FASE 2,
+   * per non ri-piazzare un trigger che il mercato ha già superato
+   * (CRIT-SLSTALE-25). Quando non c'è — percorso di riconciliazione/adozione —
+   * il comportamento resta quello di prima: non sapere dov'è il prezzo non
+   * autorizza a lasciare la posizione scoperta.
    */
-  async _ensureStopLoss(readOrders) {
+  async _ensureStopLoss(readOrders, price = null) {
     if (!this.position || !this.position.slPx) return;
 
     // FASE 1 — VERIFICA. È l'unico punto in cui si acquisisce CONOSCENZA sullo
@@ -1281,6 +1290,24 @@ export class PerpsBot {
 
     // FASE 2 — ASSENZA CONFERMATA. Qui la lettura è RIUSCITA e non ha trovato
     // nessuno stop loss: questa sì è conoscenza, e giustifica un'azione.
+
+    // CRIT-SLSTALE-25 — ma PRIMA: la soglia è ancora davanti al mercato?
+    // Uno stop market che scatta su un book sottile riempie solo quel che il
+    // book offre (NEAR 25/09: 2,1 unità su 99,9) e sparisce, lasciando aperto
+    // il resto. Ri-piazzarlo allo stesso `slPx` quando il prezzo l'ha già
+    // superato produce un ordine che non scatterà più — è successo quattro
+    // volte in 51 secondi, e l'ultimo è rimasto inerte 4 ore con il mark a +6%
+    // oltre la soglia mentre la guardia lo contava come protezione ripristinata.
+    // Se la condizione di stop è già vera, si fa subito ciò che il trigger
+    // avrebbe dovuto fare: si chiude.
+    const breach = riskManager.isStopBreached({ side: this.position.side, price, slPx: this.position.slPx });
+    if (breach.breached) {
+      logger.error(`Bot ${this.name}: ${breach.reason} su ${this.coin} — chiudo invece di ri-piazzare un trigger che non scatterebbe`);
+      notifier.notify(`🛑 <b>${this.name}</b>: stop loss <b>già superato</b> su ${this.coin} (prezzo ${price}, soglia ${this.position.slPx}) e nessun trigger attivo sul book — chiudo subito a mercato. Un trigger ri-piazzato dietro al prezzo non scatterebbe più.`, { urgent: true });
+      await this._closeNow('SL già superato, nessun trigger attivo (chiusura immediata)');
+      return;
+    }
+
     logger.warn(`Bot ${this.name}: stop loss assente, ripiazzo…`);
     const closeIsBuy = this.position.side === 'short';
     let res;
@@ -1420,7 +1447,9 @@ export class PerpsBot {
     // 40 token di peso per bot per tick (vedi `_sharedOrderReader`).
     const readOrders = this._sharedOrderReader();
     // Guardia continua: assicura che lo stop loss sia attivo a ogni tick.
-    await this._ensureStopLoss(readOrders);
+    // Il prezzo del tick le serve per distinguere "SL da ri-piazzare" da "SL
+    // già superato dal mercato" (CRIT-SLSTALE-25).
+    await this._ensureStopLoss(readOrders, snapshot?.price ?? null);
     if (!this.position) return; // _ensureStopLoss può aver chiuso per sicurezza
     // DEBT-01: e che i TP attivi non siano più di quanti la strategia prevede.
     await this._sweepExcessTakeProfits(readOrders);

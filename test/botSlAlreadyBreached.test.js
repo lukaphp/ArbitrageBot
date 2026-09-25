@@ -159,3 +159,68 @@ test('prezzo non disponibile (percorso di riconciliazione): comportamento invari
   assert.equal(calls.placeTrigger, 1, 'senza prezzo non si può sapere: si ripiazza come prima');
   assert.equal(calls.close, 0);
 });
+
+// ---- Il caso reale: lo stop c'è ANCORA, solo che è inerte ----------------
+//
+// NEAR, 2026-09-25: il trigger a 5,0417 non è mai sparito dal book — è
+// rimasto lì, PRESENTE, per 4+ ore mentre il prezzo saliva a 5,3586. La FASE 1
+// (`if (stops.length)`) lo trova, lo conta come "protezione tracciata" e
+// ritorna PRIMA di arrivare al controllo di superamento della FASE 2 — che
+// quindi non scatta mai finché un trigger, per quanto morto, resta sul book.
+// Un trigger presente ma dietro al mercato è protezione tanto quanto uno
+// assente: nessuno dei due fermerà la perdita.
+
+/** Broker con UN trigger già sul book, con lo stesso side/prezzo del caso reale. */
+function brokerConStopPresente(calls, { oid = 61011497599, triggerPx, coin } = {}) {
+  return {
+    async getFrontendOpenOrders() {
+      calls.readOrders++;
+      return [{ coin, isTrigger: true, orderType: 'Stop Market', oid, triggerPx }];
+    },
+    async placeTriggerOrder() { calls.placeTrigger++; return { oid: 4242 }; },
+    async cancelOrder() { calls.cancel++; return { ok: true }; },
+    async closePosition() { calls.close++; return { oid: 999, avgPx: 0 }; },
+    async getRealizedPnl() { return null; },
+    async setLeverage() { return { ok: true }; }
+  };
+}
+
+test('SICUREZZA · short: lo stop è ANCORA SUL BOOK ma il prezzo l\'ha già superato — chiude comunque', async () => {
+  const calls = { readOrders: 0, placeTrigger: 0, cancel: 0, close: 0 };
+  const bot = botConPosizione('slstale-present-short', 'short', 105, calls);
+  bot.broker = brokerConStopPresente(calls, { triggerPx: 105, coin: bot.coin });
+  bot.position.slOid = 61011497599;
+  notified.length = 0;
+
+  await bot._ensureStopLoss(null, 112); // ben oltre 105
+
+  assert.equal(calls.close, 1,
+    'un trigger presente ma superato non protegge nulla: va chiuso, non lasciato "tracciato"');
+  assert.equal(bot.position, null, 'posizione non più tracciata');
+});
+
+test('SICUREZZA · long: lo stop è ANCORA SUL BOOK ma il prezzo l\'ha già superato — chiude comunque', async () => {
+  const calls = { readOrders: 0, placeTrigger: 0, cancel: 0, close: 0 };
+  const bot = botConPosizione('slstale-present-long', 'long', 95, calls);
+  bot.broker = brokerConStopPresente(calls, { triggerPx: 95, coin: bot.coin });
+  bot.position.slOid = 61011497599;
+  notified.length = 0;
+
+  await bot._ensureStopLoss(null, 90); // ben sotto 95
+
+  assert.equal(calls.close, 1);
+  assert.equal(bot.position, null);
+});
+
+test('lo stop è presente e ancora davanti al mercato: nessuna chiusura, comportamento di sempre', async () => {
+  const calls = { readOrders: 0, placeTrigger: 0, cancel: 0, close: 0 };
+  const bot = botConPosizione('slstale-present-ok', 'short', 105, calls);
+  bot.broker = brokerConStopPresente(calls, { triggerPx: 105, coin: bot.coin });
+  bot.position.slOid = 61011497599;
+  notified.length = 0;
+
+  await bot._ensureStopLoss(null, 101); // sotto la soglia: lo stop è ancora valido
+
+  assert.equal(calls.close, 0, 'lo stop c\'è ed è ancora davanti al prezzo: non tocca nulla');
+  assert.ok(bot.position, 'posizione ancora tracciata');
+});

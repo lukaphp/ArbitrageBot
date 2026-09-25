@@ -52,6 +52,21 @@ const CLOSE_REASON_UNRESOLVED = 'chiusa (TP/SL o esterna)';
  */
 const MAX_SL_RESTORE_ATTEMPTS = 3;
 
+/**
+ * CRIT-CLOSEFAKE-25 — quante chiusure consecutive possono fallire prima di
+ * dirlo esplicitamente all'operatore.
+ *
+ * Conta una cosa DIVERSA da `MAX_SL_RESTORE_ATTEMPTS`, ed è il motivo per cui i
+ * due contatori restano separati: là il bot non riesce a PROTEGGERE una
+ * posizione e la soglia fa scattare un'azione automatica (chiudere); qui non
+ * riesce a CHIUDERLA, e nessuna azione automatica può risolvere il problema —
+ * se il book non ha liquidità, riprovare all'infinito non la crea. Quindi la
+ * soglia non fa scattare niente: fa scattare un MESSAGGIO, una volta sola, per
+ * far arrivare una persona. Il 25/09/2026 su NEAR quattro chiusure rifiutate di
+ * fila sono passate senza una riga di log.
+ */
+const MAX_CLOSE_ATTEMPTS = 3;
+
 export class PerpsBot {
   constructor(record, onUpdate) {
     this.id = record.id;
@@ -139,6 +154,19 @@ export class PerpsBot {
     this._slRestoreFailures = 0;
     this._ordersReadEpisode = false;      // episodio di cecità già notificato (una notifica per episodio, non per tick)
     this._lastReportedReadError = null;   // guasto di lettura già contato: i due consumatori della lettura condivisa lo vedono entrambi
+    // CRIT-CLOSEFAKE-25 — stato dei tentativi di CHIUSURA. Distinto dai due
+    // contatori della guardia SL qui sopra: "non riesco a proteggere" e "non
+    // riesco a chiudere" sono due guasti diversi, con due destinatari diversi
+    // (il primo lo risolve il bot chiudendo, il secondo solo una persona).
+    //  - `_closeFailures`: tentativi di chiusura consecutivi che NON hanno
+    //    prodotto la chiusura attesa (rifiuto totale, errore, fill parziale).
+    //  - `_pendingClose`: intenzione di chiudere già presa e non ancora
+    //    completata. È ciò che rende il ritentativo strutturale invece che
+    //    dipendente dal chiamante che l'aveva richiesta (vedi `_manageOpen`).
+    this._closeFailures = 0;
+    this._pendingClose = null;
+    this._closeEpisode = false;    // primo rifiuto già notificato (una notifica per episodio, non per tentativo)
+    this._closeEscalated = false;  // soglia MAX_CLOSE_ATTEMPTS già notificata
     this.dailyKey = this._todayKey();
     // PnL giornaliero PERSISTITO: sopravvive ai riavvii (il limite di perdita
     // giornaliera non riparte da zero dopo un restart a metà giornata).
@@ -1455,6 +1483,28 @@ export class PerpsBot {
   }
 
   async _manageOpen(snapshot, account, decision) {
+    // CRIT-CLOSEFAKE-25 — c'è una chiusura già decisa e mai completata?
+    // Il ritentativo sta QUI, all'inizio del tick, e non dentro il chiamante che
+    // l'aveva chiesta, per due motivi:
+    //  1. è STRUTTURALE: copre tutti i chiamanti di `_closeNow` (uscita su
+    //     regola, le quattro chiusure di sicurezza della guardia SL) senza
+    //     doverlo ripetere in ognuno, ed è il motivo per cui il difetto non
+    //     tornerà dal prossimo chiamante che qualcuno aggiungerà;
+    //  2. un tentativo per TICK, non in loop: se il book ha appena rifiutato
+    //     l'ordine, ritentare nello stesso istante non cambia il book e
+    //     aggiunge solo chiamate firmate alla coda del wallet.
+    // La motivazione è quella ORIGINALE, non quella del tick corrente: la
+    // decisione di uscire è già stata presa ed eseguita a metà; lasciarla cadere
+    // perché la strategia nel frattempo dice 'hold' significherebbe restare in
+    // una posizione che il bot aveva deciso di non voler più avere.
+    if (this._pendingClose) {
+      await this._closeNow(this._pendingClose.reason);
+      // Chiusa davvero → non c'è più niente da gestire. Ancora aperta → non si
+      // fa altro su di lei (niente DCA, niente trailing, niente TP/SL nuovi su
+      // una posizione che stiamo cercando di chiudere).
+      return;
+    }
+
     // Uscita su segnale strategia
     if (decision.action === 'close') {
       await this._closeNow(decision.reason);
@@ -1674,14 +1724,145 @@ export class PerpsBot {
     }
   }
 
+  /**
+   * CHIUSURA A MERCATO — con verifica dell'esito REALE.
+   *
+   * Il 25/09/2026 su NEAR-PERP questa funzione registrava la chiusura ogni volta
+   * che `closePosition` non lanciava un'eccezione. Ma su un book sottile
+   * Hyperliquid non lancia: RISOLVE con l'ordine rifiutato (`oid: null`,
+   * `error: "Order could not immediately match against any resting orders"`).
+   * Risultato: `_registerClose` scriveva la riga `positions` come `closed` con
+   * un PnL preso dall'ultimo unrealized noto — un numero inventato — e azzerava
+   * `this.position`, mentre sull'exchange la posizione non si era mossa. Al tick
+   * dopo `_reconcile` la ritrovava, la adottava come "non tracciata",
+   * ri-piazzava TP/SL da zero, la guardia SL rilevava di nuovo il superamento e
+   * si richiudeva (finta) il ciclo: quattro chiusure fittizie in circa un minuto.
+   *
+   * Qui si separano le tre cose che prima erano una sola:
+   *  - l'ordine è stato inviato (assenza di eccezione) — non basta;
+   *  - l'ordine è stato ACCETTATO e ha riempito (`interpretCloseResult`);
+   *  - la chiusura è PIENA, e solo allora si registra.
+   *
+   * Un rifiuto o un'eccezione NON azzerano lo stato: la posizione resta
+   * tracciata, l'intenzione di chiudere resta pendente e viene ritentata al
+   * TICK SUCCESSIVO (`_manageOpen`), mai in loop stretto dentro lo stesso tick —
+   * ritentare subito sullo stesso book che ha appena rifiutato aggiunge solo
+   * chiamate firmate a una `execQueue` già serializzata.
+   *
+   * @returns { ok, outcome } — `ok` solo per una chiusura PIENA. Serve al
+   *   chiamante per non proseguire (DCA, trailing) su una posizione che ha già
+   *   deciso di chiudere.
+   */
   async _closeNow(reason) {
+    const expectedSize = this.position?.size ?? null;
+    const posId = this.position?.id ?? null;
+    // L'intenzione si registra PRIMA di inviare l'ordine: se la chiamata muore a
+    // metà (eccezione, processo riavviato a tick in corso) non deve perdersi.
+    this._pendingClose = { reason, since: this._pendingClose?.since ?? Date.now() };
+
+    let res;
     try {
-      await this.broker.closePosition({ masterAddress: this.masterAddress, coin: this.coin }, this.network);
-      await this._registerClose(reason, this.position?.lastUnrealized || 0);
-      logger.info(`🔴 Bot ${this.name}: posizione chiusa (${reason})`);
+      res = await this.broker.closePosition({ masterAddress: this.masterAddress, coin: this.coin }, this.network);
     } catch (error) {
-      logger.error(`Bot ${this.name}: errore chiusura`, error.message);
+      // Esito INCERTO, non negativo: l'ordine può essere arrivato comunque. In
+      // entrambi i casi non si registra niente — `_reconcile` al tick successivo
+      // vedrà la posizione sparita e la chiuderà con il PnL vero dai fill.
+      this._reportCloseFailure(reason, error?.message || String(error));
+      return { ok: false, outcome: 'error' };
     }
+
+    const verdict = riskManager.interpretCloseResult(res, expectedSize);
+
+    if (verdict.outcome === 'rejected') {
+      this._reportCloseFailure(reason, verdict.reason);
+      return { ok: false, outcome: 'rejected' };
+    }
+
+    if (verdict.outcome === 'partial') {
+      // Stesso meccanismo dei trigger a riempimento parziale (NEAR, 2,1 unità
+      // chiuse su 99,9): quello che resta è una posizione VERA, più piccola.
+      // Va tracciata sulla size residua — se la dessimo per chiusa, il residuo
+      // diventerebbe una posizione non tracciata e il PnL registrato sarebbe
+      // quello di una size che non abbiamo chiuso. I trigger TP/SL già sul book
+      // sono reduce-only e sovradimensionati rispetto al residuo: continuano a
+      // proteggerlo per intero (un reduce-only non può invertire la posizione),
+      // quindi NON si ri-piazza nulla qui — e `_reconcile` riallinea comunque la
+      // size dalla fonte di verità al tick successivo.
+      if (this.position) {
+        this.position.size = verdict.remaining;
+        if (posId != null) {
+          try {
+            db.updatePosition(posId, { size: verdict.remaining });
+          } catch (error) {
+            logger.error(`Bot ${this.name}: size residua ${verdict.remaining} non persistita dopo una chiusura parziale di ${this.coin}`, error.message);
+          }
+        }
+      }
+      this._reportCloseFailure(reason, verdict.reason, {
+        filled: verdict.filled, remaining: verdict.remaining, expected: expectedSize
+      });
+      return { ok: false, outcome: 'partial' };
+    }
+
+    // Chiusura PIENA: solo ora si registra e si azzera lo stato.
+    this._clearCloseFailures();
+    await this._registerClose(reason, this.position?.lastUnrealized || 0);
+    logger.info(`🔴 Bot ${this.name}: posizione chiusa (${reason})${verdict.sizeKnown ? ` — ${verdict.filled} ${this.coin}` : ''}`);
+    return { ok: true, outcome: 'closed' };
+  }
+
+  /**
+   * Un tentativo di chiusura che non ha chiuso: si conta, si logga SEMPRE, e si
+   * notifica secondo il principio già usato per la cecità della guardia SL —
+   * una notifica per EPISODIO, non per tentativo, più UNA escalation quando
+   * l'episodio supera `MAX_CLOSE_ATTEMPTS`. A tick da 10 secondi, notificare
+   * ogni tentativo significa rendere Telegram illeggibile proprio mentre c'è una
+   * posizione aperta che nessuno riesce a chiudere.
+   *
+   * Il fill PARZIALE è l'eccezione deliberata: ogni occorrenza è un movimento di
+   * denaro diverso dal precedente (la size residua cambia), quindi ognuna ha un
+   * contenuto proprio e viene detta.
+   */
+  _reportCloseFailure(reason, detail, partial = null) {
+    this._closeFailures++;
+    metrics.inc('close_failures_total');
+    const n = this._closeFailures;
+
+    if (partial) {
+      logger.error(`Bot ${this.name}: chiusura di ${this.coin} riempita solo in parte (${reason}) — ${partial.filled} su ${partial.expected}, restano ${partial.remaining} aperti (tentativo consecutivo ${n})`);
+      notifier.notify(`⚠️ <b>${this.name}</b>: chiusura di ${this.coin} riempita solo <b>in parte</b> — chiusi ${partial.filled} su ${partial.expected}, restano <b>${partial.remaining}</b> ancora aperti. La posizione resta tracciata sulla size residua e protetta dai trigger già attivi; riprovo al prossimo tick.`, { urgent: true });
+    } else {
+      logger.error(`Bot ${this.name}: chiusura di ${this.coin} NON eseguita (${reason}) — ${detail} (tentativo consecutivo ${n})`);
+      if (!this._closeEpisode) {
+        this._closeEpisode = true;
+        notifier.notify(`🚨 <b>${this.name}</b>: chiusura di ${this.coin} <b>NON eseguita</b> (${detail}) — la posizione è ancora APERTA sull'exchange, nessuna chiusura è stata registrata. Riprovo al prossimo tick.`, { urgent: true });
+      }
+    }
+
+    if (n >= MAX_CLOSE_ATTEMPTS && !this._closeEscalated) {
+      this._closeEscalated = true;
+      notifier.notify(`🆘 <b>${this.name}</b>: non riesco a chiudere ${this.coin} da ${n} tentativi consecutivi (ultimo esito: ${detail}). La posizione è ancora aperta: chiudila <b>manualmente</b>, il book potrebbe non avere liquidità sufficiente.`, { urgent: true });
+    }
+  }
+
+  /**
+   * Azzera lo stato dei tentativi di chiusura. Chiamato dalla chiusura riuscita
+   * e da `_registerClose` — cioè anche quando la posizione se n'è andata per
+   * conto suo (TP/SL scattati, chiusura manuale): in quel caso il problema non
+   * esiste più e l'episodio va chiuso comunque, altrimenti la prossima
+   * escalation resterebbe zittita da un flag stantio.
+   */
+  _clearCloseFailures() {
+    if (this._closeFailures) {
+      logger.info(`Bot ${this.name}: posizione ${this.coin} non più aperta dopo ${this._closeFailures} tentativo/i di chiusura fallito/i`);
+      if (this._closeEscalated) {
+        notifier.notify(`✅ <b>${this.name}</b>: posizione ${this.coin} finalmente chiusa dopo ${this._closeFailures} tentativo/i fallito/i.`);
+      }
+    }
+    this._closeFailures = 0;
+    this._pendingClose = null;
+    this._closeEpisode = false;
+    this._closeEscalated = false;
   }
 
   /**
@@ -1781,6 +1962,11 @@ export class PerpsBot {
     this.dailyPnl += net;
     db.setDailyPnl(this.id, this.dailyKey, this.dailyPnl);
     this.position = null;
+    // CRIT-CLOSEFAKE-25 — unico punto in cui una posizione smette di essere
+    // tracciata: è qui che un eventuale episodio di chiusure fallite si chiude,
+    // qualunque sia stata la causa della sparizione (chiusura riuscita, TP/SL
+    // scattati, chiusura manuale rilevata da `_reconcile`).
+    this._clearCloseFailures();
 
     const emoji = net >= 0 ? '✅' : '🔻';
     const feeStr = fee ? ` · fee ${fee.toFixed(2)}$` : '';

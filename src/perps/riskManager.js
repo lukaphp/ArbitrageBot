@@ -450,6 +450,104 @@ export function isStopBreached({ side, price, slPx } = {}) {
   };
 }
 
+/**
+ * CRIT-CLOSEFAKE-25 — la risposta a un ordine di CHIUSURA ha davvero chiuso?
+ *
+ * Caso reale (NEAR-PERP, 25/09/2026). `closePosition` → `placeMarketOrder` è un
+ * limit IoC: su un book sottile Hyperliquid non lancia nessuna eccezione, RISOLVE
+ * con l'ordine rifiutato —
+ *
+ *   { status: "ok", oid: null, avgPx: null, totalSz: null,
+ *     error: "Order could not immediately match against any resting orders" }
+ *
+ * — e `bot._closeNow`, che guardava solo l'assenza di eccezioni, registrava la
+ * chiusura con un PnL preso dall'ultimo unrealized noto e azzerava la posizione
+ * in memoria. Quattro chiusure FITTIZIE in circa un minuto, con la posizione
+ * intatta sull'exchange.
+ *
+ * I tre esiti richiedono azioni diverse, quindi vanno distinti qui, una volta
+ * sola, invece di essere dedotti caso per caso dal chiamante:
+ *
+ *  - `rejected`: niente è stato chiuso. `oid` nullo è già CONCLUSIVO (stesso
+ *    principio di WARN-06 su `placeTriggerOrder`: il broker ha risposto, e la
+ *    risposta è no), così come un `totalSz` esplicitamente 0.
+ *  - `partial`: la posizione si è ridotta ma esiste ancora — è il meccanismo dei
+ *    trigger a riempimento parziale già misurato lo stesso giorno (2,1 unità
+ *    chiuse su 99,9). Va tracciata sulla size RESIDUA, non data per chiusa.
+ *  - `closed`: chiusura piena, comportamento storico.
+ *
+ * Perché `totalSz` ASSENTE vale come chiusura piena e non come rifiuto: è la
+ * forma che restituisce `paperBroker.closePosition` ({ oid, avgPx, error })
+ * e quella di un ordine `resting` senza fill riportato. In presenza di un `oid`
+ * valido l'informazione mancante è la size, non l'esito; il campo `sizeKnown`
+ * lo dichiara al chiamante, e `bot._reconcile` riallinea comunque la size vera
+ * al tick successivo. È il motivo per cui questa funzione NON è
+ * `resolveFillSize`, che invece tratta correttamente `totalSz` assente come
+ * "nessun fill": lì la domanda è quanto si è APERTO (e il dubbio va risolto al
+ * ribasso), qui è se si è CHIUSO (e il dubbio va risolto sull'oid).
+ *
+ * @param result       risposta del broker, così com'è (`_parseOrderResult`)
+ * @param positionSize size della posizione che si sta tentando di chiudere
+ * @returns { outcome: 'rejected'|'partial'|'closed', filled, remaining, sizeKnown, reason }
+ */
+export function interpretCloseResult(result, positionSize) {
+  // Tolleranza relativa sul confronto fra due size già arrotondate a
+  // `szDecimals`: senza, un fill pieno restituito come 99.89999999 su 99.9
+  // verrebbe classificato parziale e la posizione resterebbe "aperta" su un
+  // residuo di polvere che nessun ordine potrebbe più chiudere.
+  const REL_EPS = 1e-6;
+  const res = result && typeof result === 'object' ? result : null;
+  const expectedRaw = Number(positionSize);
+  const expected = Number.isFinite(expectedRaw) && expectedRaw > 0 ? expectedRaw : null;
+
+  if (!res) {
+    return { outcome: 'rejected', filled: 0, remaining: expected, sizeKnown: false, reason: 'nessuna risposta dal broker' };
+  }
+
+  const err = res.error != null && res.error !== '' ? String(res.error) : null;
+  const szRaw = Number(res.totalSz);
+  const sizeKnown = res.totalSz != null && Number.isFinite(szRaw);
+  const filled = sizeKnown && szRaw > 0 ? szRaw : 0;
+
+  // Un errore dichiarato senza alcuna size riempita: rifiuto, con il motivo vero.
+  if (err && filled <= 0) {
+    return { outcome: 'rejected', filled: 0, remaining: expected, sizeKnown, reason: err };
+  }
+  if (res.oid == null && filled <= 0) {
+    return { outcome: 'rejected', filled: 0, remaining: expected, sizeKnown, reason: 'oid nullo: ordine non accettato dall\'exchange' };
+  }
+  if (sizeKnown && filled <= 0) {
+    return { outcome: 'rejected', filled: 0, remaining: expected, sizeKnown, reason: 'ordine accettato ma nessuna size riempita (totalSz 0)' };
+  }
+
+  if (!sizeKnown) {
+    return {
+      outcome: 'closed', filled: expected, remaining: 0, sizeKnown: false,
+      reason: 'size riempita non riportata dal broker, oid valido'
+    };
+  }
+  if (expected == null) {
+    return {
+      outcome: 'closed', filled, remaining: 0, sizeKnown: true,
+      reason: 'size della posizione non nota: impossibile riconoscere un riempimento parziale'
+    };
+  }
+
+  const residuo = expected - filled;
+  if (residuo > expected * REL_EPS) {
+    return {
+      outcome: 'partial',
+      filled,
+      // Arrotondato: senza, 99.9 − 2.1 diventa 97.80000000000001 e quel numero
+      // finirebbe tale e quale in DB, nella notifica e nella size dei trigger.
+      remaining: Math.round(residuo * 1e10) / 1e10,
+      sizeKnown: true,
+      reason: `riempiti ${filled} su ${expected}`
+    };
+  }
+  return { outcome: 'closed', filled, remaining: 0, sizeKnown: true, reason: null };
+}
+
 class RiskManager {
   /** Arrotonda la size al numero di decimali consentito dal mercato. */
   roundSize(size, szDecimals = 3) {
@@ -473,6 +571,9 @@ class RiskManager {
 
   /** CRIT-SLSTALE-25 — anche come metodo, per i chiamanti che hanno il singleton. */
   isStopBreached(input) { return isStopBreached(input); }
+
+  /** CRIT-CLOSEFAKE-25 — anche come metodo, per i chiamanti che hanno il singleton. */
+  interpretCloseResult(result, positionSize) { return interpretCloseResult(result, positionSize); }
 
   /**
    * Calcola la size (in unità di coin) da aprire.

@@ -41,7 +41,15 @@ export const GUARDRAILS_CONFIG = {
   CONFIRMATION_TTL_SEC: 60,
   DEFAULT_MAX_DAILY_LOSS_USD: 500,
   DEFAULT_MAX_POSITION_USD: 5000,
-  DEFAULT_BLACKLIST: ['FTT', 'LUNA', 'UST', 'LUNC']
+  DEFAULT_BLACKLIST: ['FTT', 'LUNA', 'UST', 'LUNC'],
+  // Backtest Gate (vedi sezione 6). Il campione minimo serve a non dedurre
+  // "strategia cattiva" da una manciata di trade: sotto questa soglia il
+  // verdetto è `inconclusive`, non `blocked`. Il profit factor minimo è 1,
+  // cioè il pareggio lordo: si blocca solo la perdita netta conclamata, non
+  // l'edge modesto — il cancello è un filtro sul danno evidente, non un
+  // giudizio di merito sulla bontà della strategia.
+  BACKTEST_MIN_TRADES: 10,
+  BACKTEST_MIN_PROFIT_FACTOR: 1
 };
 
 /**
@@ -631,6 +639,125 @@ export function checkPositionUniquenessLive({ botId, coin, side, accountPosition
   };
 }
 
+/**
+ * ============================================================================
+ * 6. BACKTEST GATE (edge storico di una strategia scritta da un agente)
+ * ============================================================================
+ */
+
+/** Numero arrotondato o `null` se non è un numero finito (Infinity/NaN/undefined). */
+function finiteOrNull(v, decimals = 4) {
+  return Number.isFinite(v) ? Number(v.toFixed(decimals)) : null;
+}
+
+/** Profit factor leggibile: `∞` quando non ci sono perdite, `n/d` quando non è misurabile. */
+function formatProfitFactor(pf) {
+  if (pf === Infinity) return '∞ (nessun trade in perdita)';
+  if (!Number.isFinite(pf)) return 'n/d';
+  return pf.toFixed(2);
+}
+
+/**
+ * Decide se l'esito di un backtest deve impedire la creazione/modifica di un bot.
+ *
+ * FUNZIONE PURA: stesso `result`, stesso verdetto. Tutta l'I/O (eseguire il
+ * backtest, salvare il riassunto, scrivere l'audit) sta nel layer che la chiama
+ * — così la soglia si verifica in isolamento, senza far girare né il
+ * backtester né i due stadi di conferma MCP, ed è UNA sola per `register_bot` e
+ * `update_strategy_params`.
+ *
+ * TRE ESITI, non due:
+ *  - `blocked`      — profit factor sotto 1 su almeno `BACKTEST_MIN_TRADES`
+ *                     trade: perdita netta su un campione non trascurabile;
+ *  - `passed`       — edge non negativo sullo stesso campione minimo;
+ *  - `inconclusive` — non ci sono prove sufficienti per dire né l'una né
+ *                     l'altra cosa (dati storici insufficienti, pochi trade,
+ *                     backtest fallito, numeri non finiti).
+ *
+ * Perché `inconclusive` NON blocca: dedurre "strategia cattiva" da tre trade, o
+ * da un download di candele andato storto, sarebbe indovinare — l'errore
+ * speculare al non guardare affatto. Un guardrail che si guasta e blocca tutto
+ * è peggio dell'assenza del guardrail. L'incertezza però viene SCRITTA (nel
+ * riassunto e nell'audit), mai taciuta.
+ *
+ * Nota sul NaN: `NaN < 1` è falso, quindi senza il controllo esplicito di
+ * finitezza un profit factor non calcolabile passerebbe come "edge positivo".
+ *
+ * @param {object|null} result esito di `runBacktest` (o `{ error }` se non è
+ *   nemmeno partito)
+ * @returns {{verdict: string, blocked: boolean, reason: string, summary: object}}
+ */
+export function evaluateBacktestGate(result) {
+  const minTrades = GUARDRAILS_CONFIG.BACKTEST_MIN_TRADES;
+  const minPf = GUARDRAILS_CONFIG.BACKTEST_MIN_PROFIT_FACTOR;
+
+  const build = (verdict, reason, stats = null, period = null) => {
+    const summary = {
+      verdict,
+      reason,
+      checkedAt: Date.now(),
+      // `Infinity` diventerebbe `null` in JSON.stringify senza dirlo: qui il
+      // null è esplicito e il testo di `reason` conserva il valore vero.
+      trades: stats && Number.isFinite(stats.trades) ? stats.trades : null,
+      winRate: stats ? finiteOrNull(stats.winRate) : null,
+      profitFactor: stats ? finiteOrNull(stats.profitFactor, 3) : null,
+      expectancy: stats ? finiteOrNull(stats.expectancy, 4) : null,
+      totalPnl: stats ? finiteOrNull(stats.totalPnl, 2) : null,
+      maxDrawdownPct: stats ? finiteOrNull(stats.maxDrawdownPct, 2) : null,
+      periodDays: period && Number.isFinite(period.days) ? period.days : null,
+      candles: period && Number.isFinite(period.candles) ? period.candles : null
+    };
+    return { verdict, blocked: verdict === 'blocked', reason, summary, stats };
+  };
+
+  if (!result || typeof result !== 'object') {
+    return build('inconclusive', 'Backtest non eseguito: nessun risultato disponibile. Creazione consentita, edge NON verificato.');
+  }
+  if (result.error) {
+    return build('inconclusive', `Backtest non concludente: ${result.error}. Creazione consentita, edge NON verificato.`);
+  }
+
+  const stats = result.stats;
+  if (!stats || typeof stats !== 'object') {
+    return build('inconclusive', 'Backtest senza statistiche utilizzabili. Creazione consentita, edge NON verificato.');
+  }
+
+  const trades = Number(stats.trades);
+  const pf = stats.profitFactor;
+  const numbers = `${Number.isFinite(trades) ? trades : 0} trade, win rate `
+    + `${Number.isFinite(stats.winRate) ? (stats.winRate * 100).toFixed(1) : 'n/d'}%, `
+    + `profit factor ${formatProfitFactor(pf)}, `
+    + `expectancy ${Number.isFinite(stats.expectancy) ? stats.expectancy.toFixed(2) : 'n/d'}$/trade`;
+
+  if (!Number.isFinite(trades) || trades < minTrades) {
+    return build(
+      'inconclusive',
+      `Backtest con troppi pochi trade per giudicare (${Number.isFinite(trades) ? trades : 0} < ${minTrades} richiesti): ${numbers}. Creazione consentita, edge NON verificato.`,
+      stats, result.period
+    );
+  }
+
+  // Infinity = nessun trade in perdita: è un edge positivo, non un dato rotto.
+  if (!Number.isFinite(pf) && pf !== Infinity) {
+    return build(
+      'inconclusive',
+      `Backtest con profit factor non calcolabile (${String(pf)}) su ${trades} trade: ${numbers}. Creazione consentita, edge NON verificato.`,
+      stats, result.period
+    );
+  }
+
+  if (pf < minPf) {
+    return build(
+      'blocked',
+      `strategia in perdita netta sul backtest degli ultimi dati storici — ${numbers}. `
+      + `Soglia di blocco: profit factor < ${minPf} con almeno ${minTrades} trade.`,
+      stats, result.period
+    );
+  }
+
+  return build('passed', `Backtest superato: ${numbers}.`, stats, result.period);
+}
+
 export default {
   GUARDRAILS_CONFIG,
   getBlacklistedAssets,
@@ -646,5 +773,6 @@ export default {
   validateAndConsumeConfirmation,
   isSameSideEntry,
   checkPositionUniqueness,
-  checkPositionUniquenessLive
+  checkPositionUniquenessLive,
+  evaluateBacktestGate
 };

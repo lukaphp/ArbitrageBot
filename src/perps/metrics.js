@@ -28,6 +28,7 @@ const counters = {
   execqueue_depth_warnings_total: 0, // volte che la coda ha superato la soglia (WARN-02)
   sl_verify_failures_total: 0,       // tick in cui la guardia SL non è riuscita a leggere il book (P0 24/09)
   sl_restore_failures_total: 0,      // ri-piazzamenti di uno SL assente falliti (P0 24/09)
+  close_failures_total: 0,           // chiusure a mercato che NON hanno chiuso la posizione (P0 25/09)
   heavy_reads_coalesced_total: 0     // letture di peso 20 risparmiate unendo richieste identiche in volo
 };
 
@@ -45,6 +46,7 @@ const COUNTER_HELP = {
   execqueue_depth_warnings_total: 'Volte che la coda di esecuzione di un wallet ha superato la soglia di profondità configurata.',
   sl_verify_failures_total: 'Tick in cui la guardia dello stop loss non è riuscita a leggere gli ordini aperti (cecità, non chiusura).',
   sl_restore_failures_total: 'Ri-piazzamenti falliti di uno stop loss la cui assenza era già stata confermata da una lettura riuscita.',
+  close_failures_total: 'Tentativi di chiusura a mercato che non hanno chiuso la posizione: rifiutati dall\'exchange, falliti con errore, o riempiti solo in parte.',
   heavy_reads_coalesced_total: 'Letture Hyperliquid di peso 20 risparmiate riunendo richieste identiche già in volo sullo stesso wallet.'
 };
 

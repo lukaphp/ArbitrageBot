@@ -17,6 +17,7 @@ import logger from '../utils/logger.js';
 import { postInternal, requestInternal } from '../utils/internalLoopback.js';
 import { ownsTickLoop } from '../utils/processRole.js';
 import { mergeStrategyConfig, extractBotConfig } from '../perps/strategySchema.js';
+import { runBacktest } from '../perps/backtester.js';
 import {
   validateInstructionOverride,
   checkOrderVelocity,
@@ -26,6 +27,7 @@ import {
   checkPositionUniquenessLive,
   requestTwoStageConfirmation,
   validateAndConsumeConfirmation,
+  evaluateBacktestGate,
   GUARDRAILS_CONFIG
 } from './guardrails.js';
 
@@ -124,6 +126,74 @@ export function validateDynamicSizingParams(source) {
  *
  * Non-blocking: il fallimento non deve interrompere la risposta MCP.
  */
+
+/** Finestra storica su cui si misura l'edge di una strategia scritta da un agente. */
+const BACKTEST_GATE_LOOKBACK_DAYS = 30;
+
+/**
+ * BACKTEST GATE — guscio di I/O attorno a `evaluateBacktestGate`.
+ *
+ * Divisione dei compiti, identica a quella fra `bot.js` e `riskManager.js`:
+ * qui si SCARICANO le candele e si fa girare il backtester; la soglia e il
+ * verdetto stanno tutti nella funzione pura dei guardrail, che è l'unico posto
+ * dove leggere "cosa blocca cosa" — sia per `register_bot` sia per
+ * `update_strategy_params`. Questa funzione non decide nulla: traduce un esito
+ * (o un guasto) in qualcosa che la funzione pura sappia giudicare.
+ *
+ * DUE PROPRIETÀ CHE NON SI POSSONO PERDERE:
+ *
+ *  1. NON LANCIA MAI. Un backtester che esplode, una rete che cade o un
+ *     formato di candele inatteso diventano `{ error }`, cioè `inconclusive`:
+ *     la creazione passa e l'incertezza viene scritta. Un guardrail guasto che
+ *     blocca tutto è peggio del guardrail assente — e l'eccezione qui sarebbe
+ *     un `register_bot` fallito con un messaggio che non parla di trading.
+ *  2. Senza `entryRules` NON si scarica niente. Una config senza regole
+ *     d'ingresso non può produrre un solo trade: il backtest sarebbe una
+ *     chiamata di rete il cui esito è noto in anticipo (zero trade). Il
+ *     verdetto lo emette comunque la funzione pura, non un ramo scritto qui.
+ *
+ * Al riassunto si aggiunge il CONTESTO della misura (coin, intervallo, giorni):
+ * senza, `profitFactor: 0.4` salvato sulla config non dice su cosa né su quanto
+ * tempo è stato misurato, e fra un mese nessuno può rifarlo uguale.
+ *
+ * @param {object} config configurazione di strategia CANDIDATA (già fusa, nel
+ *   caso di un aggiornamento: è quella con cui il bot opererebbe davvero)
+ * @param {string} coin coin normalizzata (es. `SOL-PERP`)
+ * @returns {Promise<{verdict: string, blocked: boolean, reason: string, summary: object}>}
+ */
+async function runBacktestGate(config, coin) {
+  const entryRules = Array.isArray(config?.entryRules) ? config.entryRules : null;
+  let result;
+
+  if (!entryRules || entryRules.length === 0) {
+    result = { error: 'nessuna regola di ingresso da valutare (strategia senza entryRules)' };
+  } else {
+    try {
+      result = await runBacktest(config, coin, {
+        interval: config.candleInterval,
+        lookbackDays: BACKTEST_GATE_LOOKBACK_DAYS
+      });
+    } catch (err) {
+      // L'eccezione VERA nel messaggio: "backtest non disponibile" non dice a
+      // Hermes (né a chi legge l'audit fra un mese) se è caduta la rete o si è
+      // rotto il backtester.
+      result = { error: err?.message || String(err) };
+      logger.warn(`⚠️ Backtest Gate non concludente su ${coin}: ${result.error}`);
+    }
+  }
+
+  const gate = evaluateBacktestGate(result);
+  return {
+    ...gate,
+    summary: {
+      ...gate.summary,
+      coin,
+      interval: result?.period?.interval || config?.candleInterval || null,
+      lookbackDays: BACKTEST_GATE_LOOKBACK_DAYS
+    }
+  };
+}
+
 /**
  * CRIT #7 — esegue un'azione di ciclo di vita NEL PROCESSO CHE POSSIEDE IL LOOP.
  *
@@ -742,13 +812,46 @@ export async function handleUpdateStrategyParams({ bot_id, params, confirmation_
     return { success: false, error: validation.error, message: validation.error };
   }
 
+  // BACKTEST GATE, ma SOLO se la patch tocca le regole d'ingresso: sono l'unica
+  // cosa che cambia l'EDGE della strategia. Alzare la leva o stringere il tetto
+  // di posizione cambia QUANTO si rischia — lo giudicano i cancelli sopra — e
+  // rifare il backtest lì sarebbe una chiamata di rete per una misura che non
+  // può essere cambiata dalla patch.
+  //
+  // Si misura la config CANDIDATA (quella attuale fusa con la patch, con lo
+  // stesso `mergeStrategyConfig` che verrà applicato subito dopo), non le sole
+  // `entryRules`: un backtest su regole nuove con tp/sl di default misurerebbe
+  // una strategia che nessuno metterà mai in produzione.
+  let backtestSummary = null;
+  if (params.entryRules !== undefined) {
+    const candidateConfig = mergeStrategyConfig(extractBotConfig(botRow), params);
+    const gate = await runBacktestGate(candidateConfig, botRow.coin);
+    if (gate.blocked) {
+      const err = `GUARDRAIL_VIOLATION: Backtest Gate — ${gate.reason}`;
+      logMcpAudit('update_strategy_params', {
+        bot_id, params, error: err, guardrail: 'backtest', backtest: gate.summary, success: false
+      });
+      // Nessuna scrittura è ancora avvenuta: la config in DB resta quella con
+      // cui il bot sta operando, intatta. Il rifiuto è fail-fast, non un
+      // rollback di una patch già applicata a metà.
+      return { success: false, error: err, message: err };
+    }
+    backtestSummary = gate.summary;
+  }
+
   try {
     // Merge profondo di UN livello + ricarica runtime + emit UI: la sequenza sta
     // in `botManager.applyConfigPatch`, condivisa con le proposte `tune_params`
     // approvate a mano. Aggiornare un campo dentro `risk` (o
     // `sizing`/`tp`/`sl`/`trailing`/`dca`) non deve cancellare gli altri campi
     // dello stesso blocco: vedi `mergeStrategyConfig`.
-    const { state: updatedState } = await botManager.applyConfigPatch(bot_id, params, {
+    //
+    // Il riassunto del backtest entra nella patch (quando c'è) perché deve
+    // restare allegato alla strategia che descrive: se lo scrivessimo solo
+    // nell'audit, la config in DB direbbe "regole nuove" senza dire su cosa
+    // sono state verificate.
+    const patch = backtestSummary ? { ...params, backtestSummary } : params;
+    const { state: updatedState } = await botManager.applyConfigPatch(bot_id, patch, {
       reason: 'update_strategy_params'
     });
 
@@ -772,7 +875,13 @@ export async function handleUpdateStrategyParams({ bot_id, params, confirmation_
       }
     }
 
-    logMcpAudit('update_strategy_params', { bot_id, updated_keys: Object.keys(params), runtime_reload_error: runtimeWarning, success: !runtimeWarning });
+    logMcpAudit('update_strategy_params', {
+      bot_id,
+      updated_keys: Object.keys(params),
+      ...(backtestSummary ? { backtest: backtestSummary } : {}),
+      runtime_reload_error: runtimeWarning,
+      success: !runtimeWarning
+    });
 
     if (runtimeWarning) {
       return { success: false, message: runtimeWarning, data: { bot_id, updated_params: params, current_config: updatedState.config } };
@@ -858,6 +967,32 @@ export async function handleRegisterBot({
     return { success: false, error: dynamicSizingErr, message: dynamicSizingErr };
   }
 
+  // Pre-flight Guardrail 4: BACKTEST GATE.
+  //
+  // Gli altri tre cancelli guardano QUANTO si rischia (leva, blacklist,
+  // sizing); nessuno guardava SE la strategia abbia mai avuto un edge. Una
+  // `entryRules` qualunque scritta da un agente arrivava in DB e da lì in
+  // produzione, e la prima verifica del suo valore avveniva con i soldi.
+  //
+  // Si blocca solo la perdita netta conclamata su un campione non trascurabile
+  // (vedi `evaluateBacktestGate`); l'incertezza NON blocca, viene scritta. Il
+  // cancello è in coda agli altri di proposito: è l'unico che costa una
+  // chiamata di rete, e non ha senso pagarla per una config che verrebbe
+  // rifiutata comunque per la leva.
+  const backtestGate = await runBacktestGate(parsedConfig, normalizedCoin);
+  if (backtestGate.blocked) {
+    const err = `GUARDRAIL_VIOLATION: Backtest Gate — ${backtestGate.reason}`;
+    logMcpAudit('register_bot', {
+      name, coin: normalizedCoin, error: err, guardrail: 'backtest', backtest: backtestGate.summary, success: false
+    });
+    return { success: false, error: err, message: err };
+  }
+
+  // Il riassunto viaggia DENTRO la config del bot, non solo nel log: la UI (e
+  // il prossimo che si chiede perché questo bot esiste) deve poterlo leggere
+  // senza rifare il backtest. Copia, non mutazione dell'oggetto del chiamante.
+  const configWithBacktest = { ...parsedConfig, backtestSummary: backtestGate.summary };
+
   db.ensure();
   try {
     const botState = botManager.createBot({
@@ -865,7 +1000,7 @@ export async function handleRegisterBot({
       coin: normalizedCoin,
       network: network || 'testnet',
       masterAddress: (master_address && master_address.startsWith('0x')) ? master_address : '0x55dde41417dd529e51b173916b7fafef86573e72',
-      config: parsedConfig,
+      config: configWithBacktest,
       linked_agent_id: actor_id || 'hermes_agent_01',
       max_allocation_usd: max_allocation_usd != null ? Number(max_allocation_usd) : (parsedConfig.maxPositionUsd ? Number(parsedConfig.maxPositionUsd) : null),
       actor_label: actor_label || 'Hermes',
@@ -905,7 +1040,7 @@ export async function handleRegisterBot({
       warning: [finalState.warning, startWarning].filter(Boolean).join(' ') || null
     };
 
-    logMcpAudit('register_bot', { ...resPayload, success: true });
+    logMcpAudit('register_bot', { ...resPayload, backtest: backtestGate.summary, success: true });
 
     // Notifica il processo Express di sincronizzare botManager dal DB
     notifyExpressReload().catch(() => {});

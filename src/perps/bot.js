@@ -1261,6 +1261,24 @@ export class PerpsBot {
       // cancelliamo gli altri: l'ordine di cancellazione parte solo su ordini in
       // eccesso, quindi la posizione non resta mai senza protezione.
       if (stops.length) {
+        // CRIT-SLSTALE-25 — un trigger PRESENTE ma già superato dal mercato
+        // protegge esattamente quanto uno assente: niente. Il caso reale
+        // (NEAR, 25/09) è rimasto qui per 4+ ore, perché questo ramo lo
+        // trovava "tracciato" e usciva prima di arrivare al controllo che sta
+        // in FASE 2 — quel controllo va fatto anche qui, non solo quando lo
+        // stop manca del tutto.
+        const breachPresente = riskManager.isStopBreached({ side: this.position.side, price, slPx: this.position.slPx });
+        if (breachPresente.breached) {
+          logger.error(`Bot ${this.name}: ${breachPresente.reason} su ${this.coin}, ma un trigger risulta ancora sul book (oid ${stops.map(o => o.oid).join(', ')}) — inerte, non protegge più nulla. Chiudo invece di lasciarlo.`);
+          notifier.notify(`🛑 <b>${this.name}</b>: stop loss <b>superato</b> su ${this.coin} (prezzo ${price}, soglia ${this.position.slPx}) — il trigger è ancora sul book ma non scatterà più. Chiudo subito a mercato.`, { urgent: true });
+          for (const o of stops) {
+            await this.broker.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: o.oid }, this.network)
+              .catch(err => logger.error(`Bot ${this.name}: cancellazione trigger inerte ${o.oid} fallita (proseguo comunque con la chiusura)`, err.message));
+          }
+          await this._closeNow('SL superato, trigger inerte sul book (chiusura immediata)');
+          return;
+        }
+
         const keep = stops.find(o => o.oid === this.position.slOid) || stops[0];
         const previousOid = this.position.slOid;
         this.position.slOid = keep.oid;

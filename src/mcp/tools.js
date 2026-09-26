@@ -337,8 +337,65 @@ export async function handleBotControl({ bot_id, action }) {
  * - Position Uniqueness Gate (no doppio ingresso nello stesso verso su bot+coin),
  *   su due sorgenti: riga `positions` in DB e posizioni dell'account paper
  * - Risk Ceiling Hard-Gate (Max Leverage <= 5x, Account Exposure <= maxPositionUsd, Daily Loss Limit)
+ *
+ * ISSUE #27 / #26 — CHI SCRIVE SUL paperBroker. Questa funzione è un GUSCIO:
+ * se il processo non possiede il tick loop, delega a Express invece di mutare lo
+ * stato simulato in locale. Vedi il commento su `placeOrderPaperLocal`.
  */
-export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = null, leverage = null }) {
+export async function handlePlaceOrderPaper(args) {
+  // CRIT #7, Parte 1 estesa a `place_order_paper`: lo stato simulato lo scrive
+  // SOLO il processo che possiede il tick loop. Vedi `placeOrderPaperLocal` per
+  // il perché la delega è l'unico esito accettabile e il ripiego locale no.
+  if (!ownsTickLoop()) return delegatePlaceOrderPaper(args);
+  return placeOrderPaperLocal(args);
+}
+
+/**
+ * Delega dell'ordine paper al processo che possiede il tick loop (Express).
+ *
+ * PERCHÉ NON C'È UN RIPIEGO LOCALE, a differenza di `readBotStates`. Quella è
+ * una LETTURA: se Express non risponde si degrada al DB e si dichiara il
+ * degrado, perché una fotografia parziale è comunque meglio di niente. Questa è
+ * una SCRITTURA sullo stato simulato, e il ripiego locale sarebbe esattamente il
+ * difetto da eliminare — la seconda sorgente di scritture su (account, coin) che
+ * rende il merge di `_save()` un last-writer-wins (issue #26). Un ordine non
+ * eseguito è un fatto recuperabile (si ritenta); uno stato simulato corrotto da
+ * due scritture concorrenti non lo è, e non lascia nemmeno una traccia da cui
+ * accorgersene.
+ *
+ * Quindi: Express non raggiungibile = RIFIUTO ESPLICITO, con detto chiaramente
+ * che nessun ordine è partito in nessun processo. È l'alternativa che l'issue
+ * #26 stessa indica come accettabile («un rifiuto esplicito invece di una race
+ * silenziosa»), e costa meno di un lock distribuito che oggi non esiste.
+ */
+async function delegatePlaceOrderPaper(args) {
+  const res = await requestInternal('/internal/mcp/place-order-paper', args, { timeoutMs: 20000 });
+  if (!res.reached) {
+    const msg = `Processo Express non raggiungibile (${res.error}): l'ordine paper NON è stato eseguito in nessun processo. Lo stato simulato lo scrive solo chi esegue i bot; riprova quando il server principale risponde.`;
+    logMcpAudit('place_order_paper', { ...args, error: msg, delegated: true, executed: false, success: false });
+    return { success: false, error: msg, message: msg };
+  }
+  // La rotta ha già scritto il suo audit (ha eseguito lei): qui non si duplica.
+  // Un 4xx/5xx con un corpo vuoto resta comunque un fallimento da riportare.
+  if (!res.body) {
+    const msg = `Il processo Express ha risposto HTTP ${res.status} senza corpo: esito dell'ordine paper IGNOTO. Verificare lo stato della posizione prima di ritentare.`;
+    logMcpAudit('place_order_paper', { ...args, error: msg, delegated: true, success: false });
+    return { success: false, error: msg, message: msg };
+  }
+  return { ...res.body, delegated: true };
+}
+
+/**
+ * Esecuzione LOCALE dell'ordine paper — il corpo storico di questa funzione.
+ *
+ * Separata dal guscio di proposito, e non per eleganza: la rotta
+ * `/internal/mcp/place-order-paper` chiama QUESTA, non `handlePlaceOrderPaper`.
+ * Così anche se il ruolo del processo fosse dichiarato male (o non dichiarato
+ * affatto) la rotta non può mettersi a bussare a sé stessa — il default di
+ * `processRole` è «possiedo il loop», ma dipendere da quel default per evitare
+ * un anello chiuso sarebbe fragile. Stesso schema di `botManager.applyLifecycleLocal`.
+ */
+export async function placeOrderPaperLocal({ bot_id, side, size, entry_price = null, leverage = null }) {
   if (!bot_id) {
     return { success: false, message: 'Parametro bot_id obbligatorio.' };
   }

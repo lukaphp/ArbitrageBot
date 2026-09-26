@@ -56,6 +56,10 @@ import telegramControl from './perps/telegramControl.js';
 import strategySchema from './perps/strategySchema.js';
 import { runBacktest } from './perps/backtester.js';
 import { handleJsonRpcMcp, executeMcpTool, MCP_TOOLS_DEFINITIONS } from './mcp/httpTransport.js';
+// ISSUE #27 — l'ordine paper lo esegue Express, che possiede il tick loop: la
+// rotta `/internal/mcp/place-order-paper` chiama l'esecuzione LOCALE, non il
+// guscio che decide se delegare.
+import { placeOrderPaperLocal } from './mcp/tools.js';
 
 // Polyfill globale per la serializzazione di BigInt in JSON (Express, Socket.IO, logger)
 if (typeof BigInt.prototype.toJSON !== 'function') {
@@ -2181,6 +2185,44 @@ class ArbitrageBotServer {
         const notFound = /non trovato/i.test(err.message || '');
         logger.error(`Errore /internal/mcp/bot-control (${action} su ${botId}):`, err.message);
         return res.status(notFound ? 404 : 500).json({ success: false, error: err.message });
+      }
+    });
+
+    /**
+     * ISSUE #27 / #26 — INTERNAL PLACE ORDER PAPER: lo stato simulato lo scrive
+     * solo chi esegue i bot.
+     *
+     * Quarto membro della famiglia `/internal/*`, stesso disegno di
+     * `bot-control`: `place_order_paper` invocato dal processo MCP Stdio mutava
+     * il `paperBroker` LOCALE — la seconda sorgente di scritture su
+     * (account, coin) che rende il merge di `_save()` un last-writer-wins
+     * (issue #26). La Parte 1 di #7 aveva dato a Express la proprietà esclusiva
+     * del TICK LOOP; questa la estende all'ultima scrittura rimasta fuori.
+     *
+     * Esegue `placeOrderPaperLocal` e NON `handlePlaceOrderPaper`: chiamare il
+     * guscio significherebbe dipendere dal ruolo dichiarato di questo processo
+     * per non bussare a sé stessi. Qui l'esecuzione è locale per definizione.
+     *
+     * I guardrail (blacklist, velocity, uniqueness, risk ceiling) girano DENTRO
+     * quella funzione, quindi restano tutti applicati: questa rotta non è una
+     * scorciatoia che li salta. Come `bot-control`, muove denaro simulato oggi e
+     * reale domani, e il cancello IP è l'unica cosa che la separa dalla rete.
+     */
+    app.post('/internal/mcp/place-order-paper', async (req, res) => {
+      const ip = req.ip || req.socket?.remoteAddress || '';
+      if (!isInternalIp(ip)) {
+        logger.warn(`/internal/mcp/place-order-paper rifiutato da IP non loopback: ${ip}`);
+        return res.status(403).json({ success: false, error: 'Accesso non consentito' });
+      }
+      try {
+        const out = await placeOrderPaperLocal(req.body || {});
+        // L'esito dell'ORDINE non è l'esito della RICHIESTA: un guardrail che
+        // rifiuta è una risposta valida e va riportata così com'è, con 200, o il
+        // chiamante non potrebbe distinguerla da un guasto del trasporto.
+        return res.json(out);
+      } catch (err) {
+        logger.error('Errore /internal/mcp/place-order-paper:', err.message);
+        return res.status(500).json({ success: false, error: err.message, message: err.message });
       }
     });
 

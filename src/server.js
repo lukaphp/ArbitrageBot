@@ -2239,7 +2239,14 @@ class ArbitrageBotServer {
         return res.status(403).json({ success: false, error: 'Accesso non consentito' });
       }
       try {
-        const out = await placeOrderPaperLocal(req.body || {});
+        // ISSUE #26 — `paperBroker._save()` rifiuta le scritture di un processo
+        // che non possiede il tick loop. Questa rotta è la superficie HTTP di
+        // Express, cioè il proprietario PER COSTRUZIONE: la sua autorità non
+        // viene dal flag globale di `processRole` (è la stessa ragione per cui
+        // chiama `placeOrderPaperLocal` e non il guscio, che con un ruolo MCP
+        // dichiarato busserebbe a sé stessa). Lo scope lo dice esplicitamente,
+        // invece di lasciarlo dipendere da come il processo si è dichiarato.
+        const out = await paperBroker.asLoopOwner(() => placeOrderPaperLocal(req.body || {}));
         // L'esito dell'ORDINE non è l'esito della RICHIESTA: un guardrail che
         // rifiuta è una risposta valida e va riportata così com'è, con 200, o il
         // chiamante non potrebbe distinguerla da un guasto del trasporto.

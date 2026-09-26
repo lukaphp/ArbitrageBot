@@ -13,11 +13,32 @@
  *
  * È il ponte mancante tra backtest e mainnet: valida la strategia su mercato
  * reale, in avanti, senza rischiare capitale.
+ *
+ * CHI PUÒ SCRIVERE LO STATO SIMULATO (issue #26)
+ * ---------------------------------------------
+ * Lo stato vive in UNA riga di `settings` (`paper_broker_state`) e sul VPS due
+ * processi importano questo modulo (Express e MCP Stdio), ognuno con la propria
+ * copia in memoria. Il reload-and-merge di `_save()` limita il danno ma non
+ * decide chi ha ragione su una coppia (account, coin) mossa da entrambi: resta
+ * last-writer-wins. Le scritture note nel processo sbagliato sono state
+ * eliminate una per una (#7 parte 1 per il tick loop, #27 per
+ * `place_order_paper`), ma «non c'è più nessuno scrittore» non è «non si può
+ * scrivere»: il prossimo tool che chiamasse `placeMarketOrder` da lì riaprirebbe
+ * #26 senza che niente lo segnali.
+ *
+ * Da qui in avanti è STRUTTURALE: `_save()` rifiuta — con un'eccezione, non un
+ * `return false` — se il processo non possiede il tick loop. Due sole eccezioni,
+ * entrambe esplicite e cercabili:
+ *  - `asLoopOwner(fn)`, usata dalla rotta `/internal/mcp/place-order-paper`, che
+ *    è la superficie HTTP di Express e quindi il proprietario per costruzione;
+ *  - `new PaperBroker({ allowWriteWithoutTickLoop: true })` per un'istanza
+ *    ISOLATA (simulazioni, test del merge): il singleton condiviso non la ha.
  */
 
 import client from './hyperliquidClient.js';
 import db from '../db/database.js';
 import logger from '../utils/logger.js';
+import { ownsTickLoop } from '../utils/processRole.js';
 
 const TAKER_FEE_PCT = 0.00035;
 // Costo di esecuzione SIMULATO, per lato. È lo stesso valore del backtester
@@ -202,7 +223,21 @@ function mergeFills(base, mine) {
 }
 
 export class PaperBroker {
-  constructor() {
+  /**
+   * @param {object} opts
+   * @param {boolean} opts.allowWriteWithoutTickLoop istanza ISOLATA, non il
+   *        singleton condiviso: può salvare anche in un processo che non possiede
+   *        il tick loop. Serve a chi simula due processi (i test del merge) o a
+   *        una sandbox futura. Sta nel COSTRUTTORE e non in una variabile di
+   *        modulo di proposito: così il permesso è una proprietà dell'istanza,
+   *        visibile nel punto in cui la si crea, e non uno stato globale che nei
+   *        test resterebbe impostato per tutti.
+   */
+  constructor({ allowWriteWithoutTickLoop = false } = {}) {
+    this._allowWriteWithoutTickLoop = !!allowWriteWithoutTickLoop;
+    // Profondità dello scope `asLoopOwner()` attivo (rientrante: un salvataggio
+    // dentro l'altro non deve riaprire la guardia a metà).
+    this._loopOwnerScope = 0;
     // master(lower) -> { equity, positions: Map<coin,{side,size,entryPx,leverage}>,
     //                    triggers: Map<coin,[{oid,tpsl,triggerPx,isBuy,size}]>,
     //                    leverage: Map<coin, number>,
@@ -430,6 +465,60 @@ export class PaperBroker {
   }
 
   /**
+   * Questo processo (o questa istanza) può PERSISTERE lo stato simulato? (#26)
+   *
+   * Tre vie, in ordine di specificità: l'istanza isolata, lo scope esplicito di
+   * `asLoopOwner()`, il ruolo del processo. Il caso normale è l'ultimo — in
+   * Express, nei test e negli script `ownsTickLoop()` è `true` e non cambia
+   * niente.
+   */
+  _canPersist() {
+    if (this._allowWriteWithoutTickLoop) return true;
+    if (this._loopOwnerScope > 0) return true;
+    return ownsTickLoop();
+  }
+
+  /**
+   * Esegue `fn` dichiarando che il chiamante È il proprietario del tick loop,
+   * indipendentemente dal ruolo globale del processo.
+   *
+   * UNICO uso di produzione: la rotta `/internal/mcp/place-order-paper`. La sua
+   * autorità a scrivere non viene dal flag globale ma dall'essere la superficie
+   * HTTP di Express — è la stessa ragione per cui chiama `placeOrderPaperLocal`
+   * e non il guscio `handlePlaceOrderPaper`, che con un ruolo MCP dichiarato si
+   * metterebbe a bussare a sé stessa.
+   *
+   * Rientrante e sempre richiusa (`finally`): un'eccezione dentro `fn` non deve
+   * lasciare la guardia aperta per il resto della vita del processo.
+   */
+  async asLoopOwner(fn) {
+    this._loopOwnerScope++;
+    try {
+      return await fn();
+    } finally {
+      this._loopOwnerScope = Math.max(0, this._loopOwnerScope - 1);
+    }
+  }
+
+  /**
+   * Butta via le mutazioni che NON sono state persistite dopo un rifiuto della
+   * guardia, e forza la rilettura del blob al prossimo accesso.
+   *
+   * Senza questo, un processo non proprietario resterebbe con una posizione (o
+   * un trigger, o un'equity) che esiste solo nella sua memoria: le sue letture
+   * — `get_snapshot` dell'MCP, per esempio — mostrerebbero un numero che non
+   * corrisponde a niente e indistinguibile da uno misurato. La verità sta nel
+   * DB, scritta da chi possiede il loop: si riparte da lì.
+   */
+  _discardUnsavedState() {
+    this.state.clear();
+    this._delta.clear();
+    this._lastWrittenEquity.clear();
+    this._touchedEver.clear();
+    this._loaded = false;
+  }
+
+  /**
    * Salva lo stato simulato con RELOAD-AND-MERGE (CRIT #7).
    *
    * Prima riscriveva il blob intero con la memoria del processo chiamante: due
@@ -446,9 +535,32 @@ export class PaperBroker {
    *
    * Un errore di scrittura non interrompe la simulazione, ma non è silenzioso.
    *
+   * GUARDIA STRUTTURALE (#26) — un processo che non possiede il tick loop non
+   * persiste: l'eccezione esce dal metodo e arriva al chiamante. Deliberatamente
+   * PRIMA del `try`, e deliberatamente un `throw` e non il `return false` usato
+   * per l'errore di scrittura: lì la simulazione continua e il dato si riscrive
+   * al salvataggio seguente, qui il chiamante sta eseguendo un ordine in un
+   * processo che non ha nessun diritto di eseguirlo e deve saperlo — un ordine
+   * "riuscito" il cui stato non esiste è la cosa peggiore che possa restituire.
+   *
    * @param {string|null} touchedKey account su cui il chiamante ha appena agito.
+   * @throws {Error} code `PAPER_STATE_NOT_LOOP_OWNER` se la guardia rifiuta.
    */
   _save(touchedKey = null) {
+    if (!this._canPersist()) {
+      // Le mutazioni in memoria che questo salvataggio avrebbe dovuto persistere
+      // vanno buttate PRIMA di lanciare: restare con uno stato locale divergente
+      // trasformerebbe un rifiuto in un dato inventato nelle letture di questo
+      // stesso processo.
+      this._discardUnsavedState();
+      const err = new Error(
+        'Paper broker: scrittura dello stato simulato RIFIUTATA — questo processo non possiede il tick loop (#26). ' +
+        'Le mutazioni sul paperBroker vanno eseguite dal processo proprietario (Express), delegando: vedi place_order_paper / /internal/mcp/place-order-paper.'
+      );
+      err.code = 'PAPER_STATE_NOT_LOOP_OWNER';
+      logger.error(err.message, { touchedKey });
+      throw err;
+    }
     try {
       const persisted = this._readPersisted();
       const keys = new Set(this._delta.keys());
@@ -638,8 +750,26 @@ export class PaperBroker {
     return { closedPnl, fee, size: closeSize, partial };
   }
 
+  /**
+   * Snapshot dell'account simulato. NON è una query: valuta i trigger, quindi
+   * può produrre fill — ed è giusto così sul percorso del tick, dove
+   * `bot._registerClose` raccoglie il fill e chiude la riga `positions`.
+   *
+   * #26 — la valutazione dei trigger è però il "motore di matching" del broker
+   * simulato, cioè lavoro del TICK LOOP, e produce SCRITTURE. In un processo che
+   * non possiede il loop questa funzione deve degradare a lettura pura: lì
+   * `get_snapshot` chiama `getAccount()` (con un `.catch()` sopra) e chiedere una
+   * fotografia dell'account finiva per ESEGUIRE un TP/SL simulato in un processo
+   * dove nessun bot lo registrerà mai. Era l'ultimo scrittore rimasto, e non
+   * l'avevo contato fra gli scrittori proprio perché sembra una lettura.
+   *
+   * Nel processo proprietario il comportamento è invariato.
+   */
   async getAccount(master, network) {
-    await this._evaluateTriggers(master, network);
+    // Stessa condizione della guardia di `_save()`, non un secondo criterio: chi
+    // può persistere può far scattare i trigger, e viceversa. Due domande
+    // diverse qui vorrebbero dire un fill eseguito e poi rifiutato.
+    if (this._canPersist()) await this._evaluateTriggers(master, network);
     return this._snapshot(this._acc(master), network);
   }
 

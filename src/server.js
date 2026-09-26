@@ -960,13 +960,34 @@ class ArbitrageBotServer {
           if (master) {
             const acc = await hyperliquid.getAccount(master, network);
             for (const p of acc.positions) {
-              try { const r = await hyperliquid.closePosition({ masterAddress: master, coin: p.coin }, network); closed.push({ coin: p.coin, ok: !r.error }); }
-              catch (e) { closed.push({ coin: p.coin, ok: false, error: e.message }); }
+              // ISSUE #55 — `!r.error` prende il caso NEAR (messaggio d'errore
+              // presente) ma NON un oid nullo senza messaggio, né un riempimento
+              // parziale: su un kill-switch sarebbero posizioni contate come
+              // chiuse e invece ancora vive.
+              try {
+                const r = await hyperliquid.closePosition({ masterAddress: master, coin: p.coin }, network);
+                const v = riskManager.interpretCloseResult(r, r?.requestedSz ?? p.size);
+                if (v.outcome !== 'closed') {
+                  logger.error(`Kill-switch: chiusura ${p.coin} ${v.outcome} — ${v.reason}`);
+                }
+                closed.push({
+                  coin: p.coin, ok: v.outcome === 'closed', outcome: v.outcome,
+                  ...(v.outcome === 'closed' ? {} : { error: v.reason, remaining: v.remaining })
+                });
+              }
+              catch (e) { closed.push({ coin: p.coin, ok: false, outcome: 'rejected', error: e.message }); }
             }
           }
         }
-        notifier.notify(`🛑 <b>KILL-SWITCH</b> attivato: ${states.filter(s => s.status === 'running').length} bot fermati${closePositions ? `, posizioni chiuse: ${closed.length}` : ''}`);
-        logger.warn('🛑 Kill-switch attivato', { closePositions, closed: closed.length });
+        // Il conteggio nella notifica è quello delle posizioni DAVVERO chiuse, con
+        // il totale accanto: `closed.length` da solo contava anche i tentativi
+        // falliti, ed è il numero su cui una persona decide se intervenire a mano.
+        const reallyClosed = closed.filter(c => c.ok).length;
+        const closeSummary = closePositions
+          ? `, posizioni chiuse: ${reallyClosed}/${closed.length}${reallyClosed < closed.length ? ' ⚠️ INTERVENTO MANUALE NECESSARIO sulle restanti' : ''}`
+          : '';
+        notifier.notify(`🛑 <b>KILL-SWITCH</b> attivato: ${states.filter(s => s.status === 'running').length} bot fermati${closeSummary}`);
+        logger.warn('🛑 Kill-switch attivato', { closePositions, closed: reallyClosed, attempted: closed.length });
         res.json({ success: true, data: { stopped: states.length, closed } });
       } catch (error) {
         logger.error('Errore kill-switch:', error.message);
@@ -1252,10 +1273,30 @@ class ArbitrageBotServer {
                     { masterAddress: bot.masterAddress, coin: bot.coin },
                     hyperliquid.getNetwork()
                   );
-                  closedPositions.push({
-                    botId: bot.id, coin: bot.coin,
-                    notionalUsd: estimatedNotional, result
-                  });
+                  // ISSUE #55 — `closedPositions` è il numero che questa risposta
+                  // presenta all'operatore come "posizioni messe in sicurezza".
+                  // Una risposta senza eccezione non basta a metterci dentro una
+                  // riga: un ordine rifiutato (oid nullo, book senza liquidità)
+                  // lascerebbe l'operatore convinto di essere al sicuro proprio
+                  // nel momento in cui sta premendo il panic button.
+                  const verdict = riskManager.interpretCloseResult(result, result?.requestedSz ?? bot.position?.size);
+                  if (verdict.outcome === 'closed') {
+                    closedPositions.push({
+                      botId: bot.id, coin: bot.coin,
+                      notionalUsd: estimatedNotional, result, outcome: verdict.outcome
+                    });
+                  } else {
+                    // Rifiuto o riempimento parziale: in entrambi i casi resta
+                    // esposizione aperta e serve una persona. Va fra gli errori,
+                    // non fra le chiusure.
+                    logger.error(`Panic ${bot.id}: chiusura ${bot.coin} ${verdict.outcome} — ${verdict.reason}`);
+                    errors.push({
+                      botId: bot.id, action: 'close_position', outcome: verdict.outcome,
+                      error: verdict.outcome === 'partial'
+                        ? `chiusura PARZIALE: ${verdict.reason}, restano ${verdict.remaining} aperti`
+                        : `chiusura RIFIUTATA: ${verdict.reason} — posizione ancora aperta`
+                    });
+                  }
                 } catch (closeErr) {
                   errors.push({ botId: bot.id, action: 'close_position', error: closeErr.message });
                 }
@@ -1509,15 +1550,47 @@ class ArbitrageBotServer {
     });
 
     // Chiusura manuale di una posizione
+    //
+    // ISSUE #55 — l'esito dell'ordine si GUARDA. `closePosition` → limit IoC può
+    // RISOLVERE con l'ordine rifiutato invece di lanciare (`{status:'ok',
+    // oid:null, totalSz:null, error:'could not immediately match…'}`): prima
+    // questo handler rispondeva `success: true` a qualunque risposta ed emetteva
+    // `perps:position {closed:true}`, cioè cancellava dalla dashboard una
+    // posizione ancora aperta sull'exchange. Nessun loop di retry qui (è
+    // un'azione singola di una persona): basta riportare l'esito vero.
     app.post('/api/perps/positions/:coin/close', async (req, res) => {
       try {
         const { masterAddress } = req.body;
         const coin = decodeURIComponent(req.params.coin);
         const result = await hyperliquid.closePosition({ masterAddress, coin }, hyperliquid.getNetwork());
+        const verdict = riskManager.interpretCloseResult(result, result?.requestedSz);
+
+        if (verdict.outcome === 'rejected') {
+          // NIENTE `closed:true`: la posizione è ancora là. Un refresh della
+          // dashboard sì — l'operatore deve vederla ancora aperta.
+          logger.error(`Chiusura manuale di ${coin} RIFIUTATA dall'exchange: ${verdict.reason}`);
+          this.io.emit('perps:dashboardRefresh', { reason: 'close_rejected', coin });
+          return res.status(400).json({
+            success: false,
+            error: `Chiusura NON eseguita su ${coin}: ${verdict.reason}. La posizione è ancora aperta.`,
+            data: { outcome: verdict.outcome, reason: verdict.reason }
+          });
+        }
+
+        if (verdict.outcome === 'partial') {
+          logger.warn(`Chiusura manuale di ${coin} PARZIALE: ${verdict.reason}, residuo ${verdict.remaining}`);
+          this.io.emit('perps:dashboardRefresh', { reason: 'close_partial', coin });
+          return res.status(409).json({
+            success: false,
+            error: `Chiusura PARZIALE su ${coin}: ${verdict.reason}. Restano ${verdict.remaining} aperti.`,
+            data: { outcome: verdict.outcome, filled: verdict.filled, remaining: verdict.remaining, result }
+          });
+        }
+
         this.io.emit('perps:position', { coin, closed: true });
         // Notifica dashboard: ricarica bots + posizioni immediatamente
         this.io.emit('perps:dashboardRefresh', { reason: 'position_closed', coin });
-        res.json({ success: true, data: result });
+        res.json({ success: true, data: { ...result, outcome: verdict.outcome } });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });
       }
@@ -2535,3 +2608,17 @@ if (process.argv[1] === __filename) {
 
 // Per Vercel, esportiamo l'app express
 export default server.app;
+
+/**
+ * L'ISTANZA del server, accanto all'app.
+ *
+ * Serve ai test che invocano gli handler REALI presi dal router stack (seam già
+ * usato da `killSwitchWebNotify`, `botUpdatePushLoopback` e altri): quegli
+ * handler sono closure su `this`, quindi `this.io.emit` non è osservabile
+ * dall'app Express da sola. E gli emit socket NON sono un dettaglio decorativo —
+ * `perps:position {closed:true}` è ciò che fa sparire una posizione dalla
+ * dashboard, cioè un effetto visibile all'operatore che va potuto asserire
+ * (issue #55). Nessun comportamento di produzione cambia: è solo un export in
+ * più sullo stesso singleton.
+ */
+export { server as serverInstance };

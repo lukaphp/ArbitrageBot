@@ -23,6 +23,7 @@ import axios from 'axios';
 import botManager from './botManager.js';
 import client from './hyperliquidClient.js';
 import notifier from './notifier.js';
+import riskManager from './riskManager.js';
 import proposals from '../agents/proposals.js';
 import riskAgent from '../agents/riskAgent.js';
 import advisor from '../agents/advisor/advisor.js';
@@ -540,15 +541,34 @@ class TelegramControl {
     const acc = await client.getAccount(masterAddress, network);
     if (!acc.positions.length) return this._send('Nessuna posizione da chiudere.');
     const results = [];
+    let closedCount = 0;
     for (const p of acc.positions) {
       try {
         const r = await client.closePosition({ masterAddress, coin: p.coin }, network);
-        results.push(`${r.error ? '⚠️' : '✅'} ${p.coin}${r.error ? ` (${r.error})` : ''}`);
+        // ISSUE #55 — `r.error ? '⚠️' : '✅'` metteva una spunta verde su un
+        // ordine rifiutato con oid nullo e su un riempimento parziale. Il ✅ deve
+        // significare «chiusa», non «la risposta non conteneva un messaggio
+        // d'errore»: chi legge questo messaggio su Telegram non ha nessun altro
+        // modo di accorgersene.
+        const v = riskManager.interpretCloseResult(r, r?.requestedSz ?? p.size);
+        if (v.outcome === 'closed') {
+          closedCount++;
+          results.push(`✅ ${p.coin}`);
+        } else if (v.outcome === 'partial') {
+          logger.error(`/chiuditutto: ${p.coin} chiusura PARZIALE — ${v.reason}`);
+          results.push(`🟡 ${p.coin} — PARZIALE: ${v.reason}, restano ${v.remaining} aperti`);
+        } else {
+          logger.error(`/chiuditutto: ${p.coin} chiusura RIFIUTATA — ${v.reason}`);
+          results.push(`⚠️ ${p.coin} — NON chiusa: ${v.reason}`);
+        }
       } catch (e) {
-        results.push(`⚠️ ${p.coin} (${e.message})`);
+        results.push(`⚠️ ${p.coin} — NON chiusa: ${e.message}`);
       }
     }
-    return this._send(`🧹 <b>Chiusura posizioni</b>\n${results.join('\n')}`);
+    const header = closedCount === acc.positions.length
+      ? `🧹 <b>Chiusura posizioni</b> — ${closedCount}/${acc.positions.length} chiuse`
+      : `🧹 <b>Chiusura posizioni</b> — ${closedCount}/${acc.positions.length} chiuse, le altre sono ANCORA APERTE e richiedono un intervento manuale`;
+    return this._send(`${header}\n${results.join('\n')}`);
   }
 }
 

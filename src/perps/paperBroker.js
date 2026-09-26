@@ -758,8 +758,13 @@ export class PaperBroker {
     // L'oid si genera PRIMA del fill: deve finirci dentro, così una chiusura
     // esterna al bot resta distinguibile da un trigger scattato.
     const oid = this._nextOid(acc, masterAddress);
+    const requestedSz = pos.size;
     this._fillClose(masterAddress, coin, px, 'closePosition', { oid });
-    return { oid, avgPx: px, error: null, paper: true };
+    // ISSUE #55 — stessa chiave di `hyperliquidClient.closePosition`: i chiamanti
+    // interpretano l'esito con `interpretCloseResult` senza sapere quale dei due
+    // broker hanno davanti. `totalSz` resta assente di proposito (il paper riempie
+    // sempre tutto): è il caso `sizeKnown: false` già gestito.
+    return { oid, avgPx: px, error: null, paper: true, requestedSz };
   }
 
   /** Ordini trigger "aperti" nel formato del frontend (per _ensureStopLoss). */

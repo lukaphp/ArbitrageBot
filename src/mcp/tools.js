@@ -35,6 +35,13 @@ import {
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
 /**
+ * Master address del conto simulato condiviso dagli agenti. Era una stringa
+ * letterale ripetuta in tre punti: una costante sola evita che uno dei tre si
+ * disallinei senza che nessun test se ne accorga.
+ */
+export const PAPER_MASTER = 'paper_hermes';
+
+/**
  * `mergeStrategyConfig` ed `extractBotConfig` sono definite in
  * `perps/strategySchema.js` (funzioni pure sulla configurazione di strategia) e
  * ri-esportate qui: hanno un secondo consumatore fuori dal layer MCP
@@ -361,7 +368,7 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
 
   const coin = botRow.coin;
   const network = botRow.network || 'testnet';
-  const masterAddress = botRow.masterAddress || botRow.master_address || 'paper_hermes';
+  const masterAddress = botRow.masterAddress || botRow.master_address || PAPER_MASTER;
   const botConfig = extractBotConfig(botRow);
 
   // GUARDRAIL 1: INSTRUCTION OVERRIDE & BLACKLIST
@@ -531,6 +538,50 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
   }
 }
 
+/** Reti che il client sa indirizzare: tutto il resto non è una rete. */
+const KNOWN_NETWORKS = new Set(['testnet', 'mainnet']);
+
+/**
+ * ISSUE #19 — quale rete usare per leggere il conto simulato condiviso.
+ *
+ * CALCOLO PURO (nessun I/O, nessun DB): riceve le righe `bots` e restituisce la
+ * rete da passare al paperBroker. È pura di proposito — la decisione è l'unica
+ * parte interessante e va testabile senza montare uno snapshot intero.
+ *
+ * PERCHÉ NON BASTA UN DEFAULT. `paperBroker` indicizza lo stato sul solo master
+ * (`_acc(master)`), quindi la rete non sposta il conto: decide i mid con cui
+ * `_snapshot` marca a mercato e con cui `_evaluateTriggers` valuta i TP/SL
+ * simulati. Con la rete sbagliata l'uPNL e i trigger di un bot sono calcolati sui
+ * prezzi di un'ALTRA rete — numeri plausibili e mai segnalati.
+ *
+ * DISCORDANZA. Più bot possono condividere lo stesso conto simulato dichiarando
+ * reti diverse: è una configurazione incoerente, non un caso da appianare. Qui si
+ * sceglie la MAGGIORANZA (a pari merito l'ordine alfabetico, così l'esito non
+ * dipende dall'ordine delle righe) e si alza il flag `mixed`, che il chiamante
+ * traduce in un alert. Nessuna scelta sarebbe giusta per tutti i bot coinvolti:
+ * l'unica cosa sbagliata è non dirlo.
+ *
+ * @param {Array<object>} botRows righe `bots` grezze (o già camelCase)
+ * @param {string} paperMaster master del conto simulato
+ * @returns {{network: string, networks: string[], mixed: boolean}}
+ */
+export function resolvePaperNetwork(botRows, paperMaster = PAPER_MASTER) {
+  const counts = new Map();
+  for (const row of Array.isArray(botRows) ? botRows : []) {
+    const master = String(row?.masterAddress || row?.master_address || paperMaster).toLowerCase();
+    if (master !== String(paperMaster).toLowerCase()) continue;
+    const net = row?.network;
+    // Una rete illeggibile non è una rete: non conta come voto e non fa
+    // "discordanza". Il default si applica solo se NESSUNO ha votato.
+    if (!KNOWN_NETWORKS.has(net)) continue;
+    counts.set(net, (counts.get(net) || 0) + 1);
+  }
+  const networks = [...counts.keys()].sort();
+  if (networks.length === 0) return { network: 'testnet', networks: [], mixed: false };
+  const network = networks.reduce((best, n) => (counts.get(n) > counts.get(best) ? n : best), networks[0]);
+  return { network, networks, mixed: networks.length > 1 };
+}
+
 /**
  * 3. GET SYSTEM SNAPSHOT
  * Ritorna lo stato consolidato di tutti i bot, P&L cumulativo, uPNL e alert di sistema.
@@ -544,9 +595,12 @@ export async function handleGetSystemSnapshot() {
     const { bots, degraded } = await readBotStates();
     const killSwitch = riskAgent.isKillSwitchOn();
 
-    // Recupera lo stato aggregato paper
-    const paperMaster = 'paper_hermes';
-    const paperAcc = await paperBroker.getAccount(paperMaster, 'testnet').catch(() => ({
+    // Recupera lo stato aggregato paper.
+    // ISSUE #19 — la rete si LEGGE dalla configurazione dei bot che usano questo
+    // conto simulato, non è più scritta a mano: vedi `resolvePaperNetwork`.
+    const paperMaster = PAPER_MASTER;
+    const paperNet = resolvePaperNetwork(db.listBots(), paperMaster);
+    const paperAcc = await paperBroker.getAccount(paperMaster, paperNet.network).catch(() => ({
       equity: 10000,
       positions: [],
       accountValue: 10000
@@ -572,6 +626,16 @@ export async function handleGetSystemSnapshot() {
         level: 'warning',
         type: 'bot_states_degraded',
         message: `Stato dei bot letto dal DB e non dal processo che li esegue (${degraded}): status attendibile, ma ultima valutazione, ultimo tick e posizione in corso NON sono in questa risposta.`
+      });
+    }
+    if (paperNet.mixed) {
+      // Non è recuperabile in automatico: il conto simulato è UNO e i bot che lo
+      // condividono dichiarano reti diverse, quindi qualunque rete si scelga
+      // l'uPNL di una parte dei bot è marcato sui prezzi sbagliati.
+      alerts.push({
+        level: 'warning',
+        type: 'paper_network_mixed',
+        message: `I bot sul conto simulato ${paperMaster} dichiarano reti diverse (${paperNet.networks.join(', ')}): equity e uPNL di questo snapshot sono marcati sui prezzi di ${paperNet.network}. Allineare la rete dei bot o separare i conti simulati.`
       });
     }
 
@@ -912,7 +976,7 @@ export async function handleRegisterBot({
   name,
   coin,
   network = 'testnet',
-  master_address = 'paper_hermes',
+  master_address = PAPER_MASTER,
   config = {},
   max_allocation_usd = null,
   actor_label = 'Hermes',

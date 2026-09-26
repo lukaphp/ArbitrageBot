@@ -49,6 +49,31 @@ groups:
             Verifica con: docker compose logs prometheus e
             curl -s localhost:9090/api/v1/targets
 
+      # Crash-loop INTERMITTENTE: la regola sopra non basta e non è ridondante.
+      # `up == 0` con `for: 2m` presuppone un DOWN CONTINUO: un container che
+      # riesce ad ascoltare qualche decina di secondi tra un crash e l'altro
+      # azzera il timer `for:` a ogni breve ripresa e non arriva mai a `firing`
+      # (issue #28). Qui si guarda la MEDIA nella finestra, non il valore
+      # istantaneo: un target che sale e scende ripetutamente ha comunque una
+      # media bassa, quindi spara.
+      # 0.9 su 15m = oltre il 10% degli scrape falliti, cioè ~90s di buco
+      # cumulato: sopra il rumore di un singolo scrape perso (riavvio voluto,
+      # timeout isolato), sotto qualunque crash-loop reale.
+      # Niente `for:`: la finestra di 15m È già l'attesa, sommarne un'altra
+      # ritarderebbe l'alert senza filtrare nulla in più.
+      - alert: ArbitrageBotTargetFlapping
+        expr: avg_over_time(up{job="arbitragebot"}[15m]) < 0.9
+        labels:
+          severity: critical
+        annotations:
+          summary: "Metriche del bot raccolte a tratti negli ultimi 15 minuti"
+          description: >-
+            Il target app:3000/metrics risponde in modo intermittente: sintomo
+            tipico di un crash-loop del container, che ArbitrageBotTargetDown non
+            vede perché non resta giù 2 minuti filati. Verifica con:
+            docker compose ps app (colonna STATUS, conta i riavvii) e
+            docker compose logs --tail=200 app per l'errore che uccide il processo.
+
       # Il feed WebSocket è caduto. Non è un fermo del bot: si passa al fallback
       # REST (prezzi validi ma meno freschi), quindi la severità è warning.
       # 2 minuti come chiesto da OBS-01: il watchdog interno riprova ogni 30s

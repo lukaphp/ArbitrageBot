@@ -660,29 +660,52 @@ due, e scatta la soglia di assenza: è quello il caso che conta.
    sudo /opt/arbitragebot/deploy/monitoring/heartbeat-ping.sh
    ```
 
-6. **Installa il cron** (ogni 5 minuti, coerente col *Period* del punto 2).
-   `chronic` non è garantito: l'output va già su syslog, quindi si scarta.
+6. **Installa il timer** (ogni 5 minuti, coerente col *Period* del punto 2).
+   **NON usare `/etc/cron.d`**: questo VPS non ha `cron` installato (`systemctl
+   status cron` → *Unit cron.service could not be found*), quindi un file lì
+   non verrebbe mai eseguito da nessun demone — nessun errore, nessun log,
+   semplicemente silenzio permanente. Verificato il 26/09/2026: un
+   `/etc/cron.d/arbitragebot-deadman` è rimasto installato per ~20 minuti senza
+   che scattasse mai un solo ping automatico. Il meccanismo di scheduling di
+   questo host è **systemd timer**, lo stesso già usato per il backup notturno
+   (`arbitragebot-backup.service`/`.timer`, §5) — replica quel pattern:
 
    ```bash
-   sudo tee /etc/cron.d/arbitragebot-deadman >/dev/null <<'EOF'
-   # Dead-man's switch: heartbeat verso il servizio esterno (docs/DEPLOY.md §6.2)
-   SHELL=/bin/bash
-   PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-   */5 * * * * root /opt/arbitragebot/deploy/monitoring/heartbeat-ping.sh >/dev/null 2>&1
+   sudo tee /etc/systemd/system/arbitragebot-deadman.service >/dev/null <<'EOF'
+   [Unit]
+   Description=Heartbeat dead-man's switch verso servizio esterno (ArbitrageBot, issue #29)
+
+   [Service]
+   Type=oneshot
+   ExecStart=/opt/arbitragebot/app/deploy/monitoring/heartbeat-ping.sh
    EOF
-   sudo chmod 644 /etc/cron.d/arbitragebot-deadman
+   sudo tee /etc/systemd/system/arbitragebot-deadman.timer >/dev/null <<'EOF'
+   [Unit]
+   Description=Timer per l'heartbeat del dead-man's switch (ogni 5 minuti, ArbitrageBot)
+
+   [Timer]
+   OnCalendar=*:0/5
+   Persistent=true
+
+   [Install]
+   WantedBy=timers.target
+   EOF
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now arbitragebot-deadman.timer
    ```
 
-   Aggiusta il path se il repo non è in `/opt/arbitragebot`.
+   Aggiusta `ExecStart` se il repo non è in `/opt/arbitragebot/app`.
 
 7. **Verifica che funzioni DAVVERO**, cioè che l'allarme scatti — un check verde non
-   prova niente, prova solo che il ping arriva:
+   prova niente, prova solo che il ping arriva. **Verifica anche che il timer scatti
+   da solo** prima di fidartene (punto 6): non basta che il ping manuale funzioni.
 
    ```bash
-   sudo mv /etc/cron.d/arbitragebot-deadman /root/arbitragebot-deadman.bak   # silenzio voluto
-   journalctl -t arbitragebot-deadman --since '-1h'                          # storico dei ping
+   systemctl list-timers arbitragebot-deadman.timer   # conferma un NEXT/LAST reali
+   sudo systemctl stop arbitragebot-deadman.timer      # silenzio voluto
+   journalctl -u arbitragebot-deadman.service --since '-1h'   # storico dei ping
    # attendi Period + Grace (~10 min): DEVE arrivare la notifica sui canali del punto 3
-   sudo mv /root/arbitragebot-deadman.bak /etc/cron.d/arbitragebot-deadman   # ripristina
+   sudo systemctl start arbitragebot-deadman.timer     # ripristina
    ```
 
    Se la notifica non arriva, il dead-man's switch non esiste: è esattamente il

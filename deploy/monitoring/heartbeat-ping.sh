@@ -36,20 +36,26 @@
 set -euo pipefail
 
 ENV_FILE="${DEADMAN_ENV_FILE:-/etc/arbitragebot/deadman.env}"
-APP_URL="${DEADMAN_APP_URL:-http://127.0.0.1:3000/health}"
-PROM_URL="${DEADMAN_PROM_URL:-http://127.0.0.1:9090/-/healthy}"
-TIMEOUT="${DEADMAN_TIMEOUT:-10}"
-TAG="arbitragebot-deadman"
 
 # `set -a` + source: prende le variabili dal file senza eseguire altro.
 # Il file va letto solo se l'URL non è già in ambiente, così un'invocazione
-# manuale può sovrascriverlo senza toccare il file.
+# manuale può sovrascriverlo senza toccare il file. DEVE avvenire PRIMA di
+# risolvere i default di APP_URL/PROM_URL/TIMEOUT qui sotto: se il file arriva
+# dopo, un DEADMAN_APP_URL scritto lì non ha mai effetto — è già stato
+# sostituito dal default hardcoded (bug osservato: lo script continuava a
+# controllare 127.0.0.1:3000 con l'app reale in ascolto su 8080, nonostante
+# DEADMAN_APP_URL fosse impostata in deadman.env).
 if [[ -z "${DEADMAN_PING_URL:-}" && -r "$ENV_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   set +a
 fi
+
+APP_URL="${DEADMAN_APP_URL:-http://127.0.0.1:3000/health}"
+PROM_URL="${DEADMAN_PROM_URL:-http://127.0.0.1:9090/-/healthy}"
+TIMEOUT="${DEADMAN_TIMEOUT:-10}"
+TAG="arbitragebot-deadman"
 
 # Log su stderr E su syslog: il cron di solito manda la mail a nessuno, syslog
 # resta consultabile con `journalctl -t arbitragebot-deadman`.

@@ -1945,10 +1945,56 @@ class PerpsApp {
       const botCell = p.botName
         ? `<span class="hist-bot">${p.botName === 'Manuale' ? '✋ Manuale' : '🤖 ' + p.botName}</span>`
         : '<span class="muted">—</span>';
+
+      // Riga SIMULATA (issue #35, parte UI). Due interventi sulla stessa riga.
+      //
+      // 1. Il badge PAPER. Dopo PR #33 le posizioni paper compaiono in questa
+      //    tabella, ma niente nel markup diceva QUALI lo fossero: l'utente non
+      //    poteva distinguerle nemmeno volendo. Stessa grammatica dello storico
+      //    operazioni (`_renderFills`), così le due tabelle si leggono uguale.
+      //
+      // 2. Niente pulsante "Chiudi". `POST /api/perps/positions/:coin/close`
+      //    instrada sempre a `hyperliquid.closePosition` — il broker REALE —
+      //    senza guardare `isPaper`. Oggi è innocuo (account reale vuoto ⇒ la
+      //    chiamata fallisce e nessun ordine parte), ma nello scenario misto
+      //    (bot reale e bot paper sulla stessa coin) chiuderebbe la posizione
+      //    VERA mentre l'utente crede di chiudere la simulata.
+      //
+      // PERCHÉ NASCONDERE E NON RIETICHETTARE «Chiudi (simulata)»: quella
+      // etichetta prometterebbe un'azione che il codice NON esegue, e renderebbe
+      // il click più sicuro di quanto sia — l'opposto di quello che serve qui.
+      // Un pulsante che non c'è non può mentire. Al suo posto però non resta un
+      // buco: un marcatore col motivo, perché una riga senza azioni e senza
+      // spiegazione è a sua volta una mezza verità.
+      //
+      // Il marcatore dice che la chiusura la fa il bot (TP/SL o segnale di
+      // uscita) e NON suggerisce di fermare il bot: `botManager.stopBot`
+      // interrompe soltanto i tick, la posizione resta aperta (verificato).
+      //
+      // Il grafico resta su entrambe: si toglie la sola azione che può fare
+      // danno, leggere il mercato non ne fa.
+      //
+      // Confronto stretto su `isPaper`: `riskManager.mergeAccountViews` lo
+      // valorizza su OGNI riga di `/api/perps/account`, quindi nel payload vero
+      // è sempre un booleano. Una riga senza il campo non viene da là, e l'unica
+      // cosa che si sa di lei è ciò che l'endpoint fa davvero — instradare al
+      // broker reale — quindi mostrare il pulsante la descrive correttamente.
+      //
+      // TEMPORANEO: quando il routing backend sarà verificato corretto (parte di
+      // Bruno sulla stessa issue), il pulsante torna anche qui e l'etichetta
+      // potrà dire la verità. Test: `test/paperPositionCloseUi.test.js`.
+      const isPaper = p.isPaper === true;
+      const paperBadge = isPaper
+        ? ' <span class="testnet-badge" style="font-size:.6em;padding:1px 4px;vertical-align:middle">PAPER</span>'
+        : '';
+      const closeAction = isPaper
+        ? `<span class="muted" style="font-size:.75em" title="Posizione simulata: la chiusura manuale da qui non è disponibile, perché l'endpoint di chiusura instrada al broker reale. La chiude il bot, con i suoi TP/SL o con un segnale di uscita.">gestita dal bot</span>`
+        : `<button class="btn btn-sm btn-danger" onclick="perps.closePosition('${coin}')">Chiudi</button>`;
+
       return `<tr>
         <td>${opened}</td>
         <td>${botCell}</td>
-        <td>${p.coin}</td>
+        <td>${p.coin}${paperBadge}</td>
         <td><span class="side-badge ${p.side}">${p.side.toUpperCase()}</span></td>
         <td>${this.fmtNum(p.size)}</td>
         <td>${this.fmtUsd(p.entryPx)}</td>
@@ -1957,7 +2003,7 @@ class PerpsApp {
         <td>${p.liquidationPx ? this.fmtUsd(p.liquidationPx) : '—'}</td>
         <td class="pos-actions">
           <button class="btn btn-sm btn-outline" onclick="perps.openChart('${coin}')">📊</button>
-          <button class="btn btn-sm btn-danger" onclick="perps.closePosition('${coin}')">Chiudi</button>
+          ${closeAction}
         </td>
       </tr>`;
     }).join('');

@@ -78,3 +78,8 @@ deploy/infisical/infisical.env
 
 # Bot token e chat id Telegram di Alertmanager (creato a mano sul server, 0600)
 deploy/monitoring/alertmanager.secrets.env
+
+# URL di ping del dead-man's switch: il token è NEL path (creato a mano, 0600).
+# Posto canonico: /etc/arbitragebot/deadman.env — questa riga è la rete di
+# sicurezza se qualcuno lo scrive per comodità dentro il repo. Vedi §6.2.
+deploy/monitoring/deadman.env

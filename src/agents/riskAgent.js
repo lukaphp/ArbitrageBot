@@ -13,6 +13,7 @@
 
 import riskManager from '../perps/riskManager.js';
 import portfolio from '../perps/portfolio.js';
+import execQueue from '../perps/execQueue.js';
 import db from '../db/database.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
@@ -55,7 +56,12 @@ class RiskAgent {
 
   /**
    * Valuta un'azione. Ritorna { ok, reason }.
-   * action: { type, coin, side?, notionalUsd?, leverage?, botId?, config?, account?, consecutiveLosses?, dailyPnl? }
+   * action: { type, coin, side?, notionalUsd?, leverage?, botId?, config?, account?, masterAddress?, consecutiveLosses?, dailyPnl? }
+   *
+   * `masterAddress` serve per le sole aperture: identifica il wallet di cui
+   * leggere le aperture in volo (#34). `proposals._toAction()` lo mette sempre;
+   * se manca, il conteggio degli slot riservati vale 0 e il verdetto è quello
+   * storico — mai più permissivo del cap sulle posizioni già a book.
    */
   evaluate(action) {
     const verdict = this._evaluate(action);
@@ -102,6 +108,23 @@ class RiskAgent {
       plannedNotional: plan.notionalUsd,
       botId: action.botId,
       consecutiveLosses: action.consecutiveLosses || 0,
+      // #34 — le aperture dello stesso wallet già impegnate dai bot ma non
+      // ancora visibili in `account.positions`. Lo snapshot arriva da un
+      // `getAccount()` anteriore alla valutazione: senza questo addendo una
+      // proposta valutata mentre un bot sta aprendo veniva approvata su un
+      // conteggio vecchio, e con 2 a book + 1 in volo su un cap di 3 si
+      // arrivava a 4 posizioni. Stessa lettura di `bot.js`, stesso significato.
+      //
+      // SOLA LETTURA, deliberatamente: `evaluate()` valuta, non esegue. Non
+      // riserva lo slot (lo consumerebbe per una proposta che l'umano potrebbe
+      // non eseguire mai, e non avrebbe nessun `finally` dove rilasciarlo) e
+      // non lo rilascia (regalerebbe capacità a un'apertura ancora in volo).
+      // Chi esegue davvero è `bot.js`/`executionAgent`, dietro il proprio
+      // reserve/release. Conseguenza accettata: fra questo verdetto e
+      // l'esecuzione della proposta il conteggio può cambiare — il gate del
+      // bot che apre resta comunque davanti all'ordine.
+      reservedSlots: execQueue.reservedOpenSlots(action.masterAddress),
+
       // CRIT-LOSSLOCK-25 — se il chiamante non lo fornisce resta null, e il
       // ramo delle perdite consecutive blocca come prima: questo gate deve
       // essere almeno restrittivo quanto quello del bot, mai meno.

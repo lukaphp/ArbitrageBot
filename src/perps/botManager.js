@@ -16,6 +16,9 @@ import logger from '../utils/logger.js';
 import { postInternal } from '../utils/internalLoopback.js';
 import { ownsTickLoop } from '../utils/processRole.js';
 import { mergeStrategyConfig, extractBotConfig } from './strategySchema.js';
+import client from './hyperliquidClient.js';
+import metrics from './metrics.js';
+import { findUnmanagedLivePositions } from './reconciler.js';
 
 class BotManager {
   constructor() {
@@ -27,6 +30,15 @@ class BotManager {
     this.lastReconciliationAlert = new Map(); // botId -> ts (throttle alert "l'ho ripreso")
     this._forwardInFlight = new Set(); // botId con una POST loopback ancora in volo
     this._forwardFailures = 0;         // consecutive: serve al log per episodio, non per tentativo
+    this.unmanagedTimer = null;
+    // ISSUE #58 — episodi di "posizione reale viva e nessuno che la sorveglia".
+    // chiave `address|coin` -> { since, lastAlertAt }. `since` è l'inizio
+    // dell'episodio e serve nel messaggio: «da 4 ore» è ciò che fa capire che non
+    // è un transitorio. Si cancella quando la condizione rientra, così l'episodio
+    // successivo riparte con il suo avviso invece di restare zittito da uno stato
+    // stantio (lezione di [stato monotono]: un flag che non si resetta spegne
+    // proprio l'allarme che serviva).
+    this.unmanagedEpisodes = new Map();
   }
 
   setIo(io) {
@@ -699,10 +711,172 @@ class BotManager {
     return { checked: intended.length, repaired, failed };
   }
 
+  /**
+   * ISSUE #58 — POSIZIONE REALE VIVA E NESSUN BOT CHE LA SORVEGLIA.
+   *
+   * Terzo guardiano periodico di questo file, e il caso che mancava. Il watchdog
+   * osserva un bot che non ticca; il reconciliation watcher ripara l'intento
+   * `running` senza loop; `reconciler.js` chiude in DB le righe di posizioni
+   * ormai sparite. Nel mezzo restava scoperto il caso OPPOSTO: la posizione
+   * esiste ancora sull'exchange e nessun bot `running` la sta tracciando —
+   * niente guardia SL, niente `_closeNow`, niente TP/SL dinamico, con come sola
+   * protezione i trigger già sul book, che possono fallire (NEAR-PERP del
+   * 25/09/2026). Finora l'unico modo in cui la condizione è stata notata è che
+   * una persona ha guardato la dashboard.
+   *
+   * QUI SI AVVISA E NON SI RIPARA, per lo stesso vincolo di direzione dichiarato
+   * in `startReconciliationWatcher`: un bot `stopped` con una posizione aperta
+   * non si riaccende da soli, è la situazione tipica di chi l'ha fermato apposta
+   * per uscire a mano. Riavviarlo significherebbe piazzare trigger che nessuno ha
+   * chiesto su denaro vero.
+   *
+   * PERCHÉ UN JOB PERIODICO E NON LA ROTTA `/api/perps/account`. Nella rotta i
+   * dati sarebbero già in mano, a costo zero di chiamate — ma l'alert scatterebbe
+   * solo quando qualcuno apre la dashboard, cioè quando la persona sta già
+   * guardando. Il caso reale dell'issue è "un bot fermo con posizione aperta per
+   * ore" notato da un umano: un controllo che richiede quell'umano non risolve
+   * niente.
+   *
+   * COSTO IN CHIAMATE, fatta la divisione: una `clearinghouseState` (peso 2) per
+   * WALLET REALE distinto, ogni 60s — 1440 chiamate al giorno per wallet, contro
+   * un budget dell'ordine di 1200 di peso al minuto. Solo i wallet che sembrano
+   * indirizzi veri: il conto simulato (`paper_hermes`) non è un indirizzo e una
+   * chiamata su di lui sarebbe sprecata, oltre che fuori tema (l'issue parla di
+   * posizioni REALI).
+   */
+  startUnmanagedPositionWatcher() {
+    if (this.unmanagedTimer) return;
+    // CRIT #7 — nel processo che non possiede il tick loop i bot sono fermi per
+    // costruzione: questo giro vedrebbe OGNI posizione come non sorvegliata e
+    // manderebbe un allarme per ognuna. Lo stesso motivo del watchdog.
+    if (!ownsTickLoop()) {
+      logger.info('👁️ Sorveglianza posizioni non avviata: i bot girano nel processo Express, che ha la sua');
+      return;
+    }
+    const CHECK_MS = 60000;
+    this.unmanagedTimer = setInterval(() => {
+      this.checkUnmanagedPositionsOnce().catch(e =>
+        logger.error('👁️ Sorveglianza posizioni: giro fallito', e.message));
+    }, CHECK_MS);
+    this.unmanagedTimer.unref?.();
+    logger.info('👁️ Sorveglianza posizioni non gestite avviata (controllo ogni 60s)');
+  }
+
+  /**
+   * Un giro della sorveglianza. Separato dal timer perché è la sola parte
+   * osservabile in un test senza aspettare un minuto (come
+   * `reconcileRunningBotsOnce`).
+   *
+   * ANTI-SPAM. Un avviso all'INIZIO dell'episodio, poi una RIESCALATION ogni
+   * `ESCALATION_MS` finché la condizione persiste, con dentro da quanto tempo
+   * dura. Non uno per giro: sarebbe un Telegram al minuto per ore, cioè rumore
+   * proprio quando conta. Ma nemmeno uno solo e poi silenzio: l'issue chiede che
+   * avvisi FINCHÉ la condizione persiste, perché è una cosa che va risolta, non
+   * solo saputa. Stesso principio di `_reportCloseFailure`/`_reportOrdersReadFailure`.
+   *
+   * LETTURA FALLITA ≠ NIENTE APERTO. Se l'account non è leggibile non si chiude
+   * l'episodio e non si dichiara niente: si logga. Dire «tutto sorvegliato»
+   * perché non si è riusciti a guardare è il modo in cui questo allarme
+   * diventerebbe peggio della sua assenza.
+   *
+   * @returns {{checked: number, unmanaged: Array, alerted: Array, errors: Array}}
+   */
+  async checkUnmanagedPositionsOnce() {
+    const ESCALATION_MS = 60 * 60 * 1000; // riescalation ogni ora finché dura
+    const now = Date.now();
+    const unmanaged = [];
+    const alerted = [];
+    const errors = [];
+
+    let rows = [];
+    try {
+      rows = db.listBots();
+    } catch (e) {
+      logger.error('👁️ Sorveglianza posizioni: impossibile leggere i bot dal DB', e.message);
+      return { checked: 0, unmanaged, alerted, errors: [{ address: null, error: e.message }] };
+    }
+
+    // Wallet REALI gestiti dalla piattaforma, deduplicati. `paper_hermes` e simili
+    // non sono indirizzi: niente chiamata e niente allarme su denaro simulato.
+    const addresses = [...new Set(
+      rows.map(r => String(r.master_address || '').toLowerCase())
+        .filter(a => /^0x[0-9a-f]{40}$/.test(a))
+    )];
+
+    const runningBotIds = new Set(
+      [...this.bots.values()].filter(b => b.isTicking?.()).map(b => b.id)
+    );
+
+    for (const address of addresses) {
+      let live;
+      try {
+        const acc = await client.getAccount(address, client.getNetwork?.() ?? client.network);
+        live = acc?.positions || [];
+      } catch (e) {
+        // Non si chiude l'episodio e non si afferma niente: solo che non si sa.
+        errors.push({ address, error: e.message });
+        logger.error(`👁️ Sorveglianza posizioni: account ${address} non leggibile (${e.message}) — nessuna conclusione su questo wallet`);
+        continue;
+      }
+
+      const found = findUnmanagedLivePositions({ livePositions: live, bots: rows, runningBotIds, address });
+      const activeKeys = new Set();
+
+      for (const item of found) {
+        const key = `${address}|${item.coin}`;
+        activeKeys.add(key);
+        unmanaged.push({ address, ...item });
+
+        const ep = this.unmanagedEpisodes.get(key);
+        const isNew = !ep;
+        const since = isNew ? now : ep.since;
+        const durataMin = Math.round((now - since) / 60000);
+        const escalate = !isNew && (now - ep.lastAlertAt) >= ESCALATION_MS;
+
+        if (!isNew && !escalate) continue;
+        this.unmanagedEpisodes.set(key, { since, lastAlertAt: now });
+        if (isNew) metrics.inc('unmanaged_position_episodes_total');
+        alerted.push({ address, coin: item.coin, escalation: !isNew, durataMin });
+
+        const chi = item.bots.length
+          ? `bot fermi su questa coin: ${item.bots.map(b => b.name || b.id).join(', ')}`
+          : 'nessun bot di questa piattaforma è configurato su questa coin';
+        const durata = isNew ? '' : ` da ${durataMin} minuti`;
+        const side = String(item.position.side || '?').toUpperCase();
+        const size = item.position.size ?? '?';
+
+        logger.error(`👁️ POSIZIONE NON SORVEGLIATA${durata}: ${side} ${item.coin} size ${size} su ${address} — ${chi}`);
+        // Il testo dice esplicitamente che NON è auto-recuperabile e quali sono le
+        // tre scelte possibili: senza, un avviso del genere viene letto come un
+        // avvertimento transitorio e si aspetta che passi da sé. Non passa.
+        notifier.notify(
+          `${isNew ? '🔴' : '🔴🔴'} <b>POSIZIONE REALE SENZA SORVEGLIANZA</b>${durata ? ` (${durataMin} min)` : ''}\n` +
+          `<b>${side} ${item.coin}</b> size ${size} è aperta sull'exchange (wallet <code>${address}</code>) ` +
+          `e <b>nessun bot in esecuzione la sta gestendo</b>: ${chi}.\n\n` +
+          'Niente guardia stop loss, niente uscita su regola, niente TP/SL dinamico. ' +
+          'L\'unica protezione sono i trigger già presenti sul book, che possono non scattare.\n\n' +
+          '⚠️ <b>NON si risolve da sé e il sistema non la chiuderà automaticamente.</b> ' +
+          'Serve una decisione: riavviare il bot, chiudere la posizione a mano, oppure lasciarla così consapevolmente.'
+        );
+      }
+
+      // Episodi rientrati su questo wallet: si cancellano, così il prossimo
+      // avviso è di nuovo un "inizio episodio" e non resta zittito.
+      for (const key of [...this.unmanagedEpisodes.keys()]) {
+        if (!key.startsWith(`${address}|`) || activeKeys.has(key)) continue;
+        this.unmanagedEpisodes.delete(key);
+        logger.info(`👁️ Posizione ${key.split('|')[1]} su ${address}: condizione rientrata (sorvegliata o chiusa)`);
+      }
+    }
+
+    return { checked: addresses.length, unmanaged, alerted, errors };
+  }
+
   /** Shutdown del server: ferma i timer senza cambiare lo stato persistito. */
   stopAll() {
     if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
     if (this.reconciliationTimer) { clearInterval(this.reconciliationTimer); this.reconciliationTimer = null; }
+    if (this.unmanagedTimer) { clearInterval(this.unmanagedTimer); this.unmanagedTimer = null; }
     for (const bot of this.bots.values()) bot.shutdown();
   }
 }

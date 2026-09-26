@@ -278,6 +278,107 @@ export function mergeStrategyConfig(currentConfig, params) {
 }
 
 /**
+ * CAMPI DI CONFIG SCRITTI DAL BACKEND, che nessun form conosce.
+ *
+ * `backtestSummary` è l'esito del cancello pre-flight (`evaluateBacktestGate`,
+ * scritto da `register_bot`/`update_strategy_params`): una MISURA prodotta dal
+ * server, non un parametro che l'operatore imposta. Vive nella stessa config dei
+ * parametri di strategia perché deve restare attaccato alla strategia che
+ * descrive, ma non ha — e non deve avere — un campo nel modale di modifica.
+ *
+ * `invalidatedBy` elenca le chiavi di strategia che, se cambiano, rendono quella
+ * misura una dichiarazione FALSA: in quel caso il valore vecchio non si riporta,
+ * si perde. Per `backtestSummary` è `entryRules`, la stessa chiave che fa
+ * rieseguire il cancello in `update_strategy_params` ("l'unica cosa che cambia
+ * l'EDGE della strategia"). NON ci sono `candleInterval` e coin di proposito:
+ * quelli li gestisce già `_backtestStaleReason` in public/perps.js degradando la
+ * pill a "non più valido" e tenendo il verdetto originale nel tooltip —
+ * cancellare il dato qui distruggerebbe l'informazione su cui quel meccanismo si
+ * basa.
+ */
+export const DERIVED_CONFIG_KEYS = {
+  backtestSummary: { invalidatedBy: ['entryRules'] }
+};
+
+/**
+ * Confronto strutturale grezzo fra due valori di config.
+ *
+ * `JSON.stringify` e non un deep-equal vero: due oggetti uguali ma con le chiavi
+ * in ordine diverso risultano DIVERSI. È un falso positivo accettato di
+ * proposito, perché la direzione dell'errore è quella giusta — "diverso" fa
+ * scartare la misura (il bot torna a dire "mai verificato", che è onesto),
+ * mentre un falso negativo terrebbe in vita un "✅ superato" su una strategia
+ * che nessuno ha verificato.
+ */
+function sameConfigValue(a, b) {
+  if (a === b) return true;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Riporta nella config in arrivo i campi che solo il backend scrive
+ * (`DERIVED_CONFIG_KEYS`) e che il chiamante non ha menzionato.
+ *
+ * ISSUE-56 — perché serve. Il salvataggio di un bot dalla UI riscrive
+ * `config_json` PER INTERO con quello che costruisce il form di modifica
+ * (`_buildBotConfig`), che non ha nessun campo per `backtestSummary`. Risultato:
+ * una banale rinomina cancellava il verdetto del backtest pre-flight, in
+ * silenzio. La sopravvivenza di un dato non può dipendere dal fatto che ogni
+ * client lo conosca: i client sono tre (UI, Telegram, MCP) e i campi derivati
+ * cresceranno.
+ *
+ * Due alternative scartate, e perché:
+ *
+ *  1. **Fusione generica "tieni tutto ciò che non arriva"** (stile
+ *     `mergeStrategyConfig` applicato a ogni chiave). Rompe il solo modo che la
+ *     UI ha di DISATTIVARE i blocchi opzionali: `_collectAdvancedAutomation`
+ *     emette `dca`/`mtfConfirm`/`partialTp`/`mlGate` solo se la spunta è attiva,
+ *     quindi "chiave assente" significa "funzione spenta". Conservarli per
+ *     assenza lascerebbe il DCA acceso su un bot che opera con soldi veri: un
+ *     guasto peggiore di quello che si sta correggendo.
+ *  2. **Allowlist dei campi che la UI può scrivere.** Va aggiornata a ogni nuovo
+ *     campo del form, e dimenticarsene scarta in silenzio un parametro che
+ *     l'utente ha appena impostato — la stessa classe di perdita silenziosa,
+ *     rovesciata.
+ *
+ * La discriminante giusta non è "quali chiavi manda il form" ma "di chi è la
+ * chiave". Resta una lista da mantenere, ma è quella la cui dimenticanza
+ * FALLISCE IN SICUREZZA: un futuro campo derivato non ancora elencato viene
+ * sovrascritto (dato visibile che si può ricalcolare), mentre una chiave di
+ * strategia dimenticata in una lista opposta lascerebbe attiva un'automazione
+ * che l'operatore crede spenta.
+ *
+ * Una scrittura ESPLICITA vince sempre, `null` compreso: chi menziona la chiave
+ * sa cosa sta facendo (`update_strategy_params` che allega il riassunto nuovo,
+ * o chi vuole buttarlo via).
+ *
+ * Funzione pura: nessuna I/O, si verifica in isolamento.
+ *
+ * @param existingConfig config attualmente in DB
+ * @param incomingConfig config che il chiamante vuole scrivere
+ * @returns nuova config, o `incomingConfig` intatto se non è un oggetto
+ */
+export function preserveDerivedConfig(existingConfig, incomingConfig) {
+  if (!isPlainObject(incomingConfig)) return incomingConfig;
+  const existing = isPlainObject(existingConfig) ? existingConfig : {};
+  const out = { ...incomingConfig };
+
+  for (const [key, spec] of Object.entries(DERIVED_CONFIG_KEYS)) {
+    if (Object.prototype.hasOwnProperty.call(incomingConfig, key)) continue;
+    if (!Object.prototype.hasOwnProperty.call(existing, key)) continue;
+    const invalidato = (spec.invalidatedBy || [])
+      .some(k => !sameConfigValue(existing[k], incomingConfig[k]));
+    if (invalidato) continue;
+    out[key] = existing[key];
+  }
+  return out;
+}
+
+/**
  * Valida la SCALA di take profit parziali (`config.partialTp`).
  *
  * Perché serve, e perché non bastava il giro che già c'era sopra: il loop su
@@ -563,5 +664,6 @@ export default {
   EXPORT_KIND, EXPORT_VERSION, VALID_INTERVALS, VALID_RULE_TYPES, VALID_INDICATORS,
   buildEnvelope, historyExportItem, botExportItem, exportFileName,
   validateStrategyConfig, validateItem, validateEnvelope, validateItemList,
-  extractBotConfig, mergeStrategyConfig, normalizeStrategyConfig
+  extractBotConfig, mergeStrategyConfig, normalizeStrategyConfig,
+  DERIVED_CONFIG_KEYS, preserveDerivedConfig
 };

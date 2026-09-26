@@ -773,18 +773,31 @@ class HyperliquidClient {
   }
 
   /** Chiude completamente una posizione con un market reduce-only. */
+  /**
+   * Chiude l'intera posizione con un market reduce-only.
+   *
+   * ISSUE #55 — la risposta riporta anche `requestedSz`, la size che si è chiesto
+   * di chiudere. Serve a `riskManager.interpretCloseResult`, che senza la size
+   * attesa sa riconoscere un RIFIUTO ma non un riempimento PARZIALE (con
+   * `expected == null` classifica `closed` e lo dichiara). Questa funzione la
+   * conosce già — l'ha appena letta dall'account — mentre i chiamanti no: senza
+   * questa chiave ognuno dovrebbe rifare una lettura dell'account per sapere una
+   * cosa che qui era in mano. Chiave AGGIUNTIVA, forma invariata: i chiamanti
+   * esistenti non cambiano comportamento.
+   */
   async closePosition({ masterAddress, coin }, network = this.network) {
     const account = await this.getAccount(masterAddress, network);
     const pos = account.positions.find(p => p.coin === coin || `${p.coin}-PERP` === coin);
     if (!pos) throw new Error(`Nessuna posizione aperta su ${coin}`);
     // Per chiudere: ordine opposto al lato della posizione.
-    return this.placeMarketOrder({
+    const res = await this.placeMarketOrder({
       masterAddress,
       coin,
       isBuy: pos.side === 'short',
       size: pos.size,
       reduceOnly: true
     }, network);
+    return { ...res, requestedSz: pos.size };
   }
 
   _parseOrderResult(res) {

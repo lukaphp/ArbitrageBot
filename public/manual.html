@@ -810,7 +810,7 @@
                         </tr>
                         <tr>
                             <td><span class="btn-demo btn-demo-danger">Chiudi Posizione</span></td>
-                            <td>Invia un ordine market contrario di pari dimensione, azzerando l'esposizione.</td>
+                            <td>Invia un ordine market contrario di pari dimensione, azzerando l'esposizione. <strong>Compare solo sulle posizioni reali.</strong> Sulle righe marcate <span class="ui-element">PAPER</span> il pulsante non c'è: l'endpoint di chiusura instrada al broker reale, quindi su una coin dove convivono una posizione vera e una simulata chiuderebbe quella sbagliata. Una posizione simulata la chiude il bot, con i suoi TP/SL o con un segnale di uscita.</td>
                         </tr>
                     </tbody>
                 </table>

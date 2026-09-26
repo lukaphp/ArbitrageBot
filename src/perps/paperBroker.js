@@ -13,11 +13,32 @@
  *
  * È il ponte mancante tra backtest e mainnet: valida la strategia su mercato
  * reale, in avanti, senza rischiare capitale.
+ *
+ * CHI PUÒ SCRIVERE LO STATO SIMULATO (issue #26)
+ * ---------------------------------------------
+ * Lo stato vive in UNA riga di `settings` (`paper_broker_state`) e sul VPS due
+ * processi importano questo modulo (Express e MCP Stdio), ognuno con la propria
+ * copia in memoria. Il reload-and-merge di `_save()` limita il danno ma non
+ * decide chi ha ragione su una coppia (account, coin) mossa da entrambi: resta
+ * last-writer-wins. Le scritture note nel processo sbagliato sono state
+ * eliminate una per una (#7 parte 1 per il tick loop, #27 per
+ * `place_order_paper`), ma «non c'è più nessuno scrittore» non è «non si può
+ * scrivere»: il prossimo tool che chiamasse `placeMarketOrder` da lì riaprirebbe
+ * #26 senza che niente lo segnali.
+ *
+ * Da qui in avanti è STRUTTURALE: `_save()` rifiuta — con un'eccezione, non un
+ * `return false` — se il processo non possiede il tick loop. Due sole eccezioni,
+ * entrambe esplicite e cercabili:
+ *  - `asLoopOwner(fn)`, usata dalla rotta `/internal/mcp/place-order-paper`, che
+ *    è la superficie HTTP di Express e quindi il proprietario per costruzione;
+ *  - `new PaperBroker({ allowWriteWithoutTickLoop: true })` per un'istanza
+ *    ISOLATA (simulazioni, test del merge): il singleton condiviso non la ha.
  */
 
 import client from './hyperliquidClient.js';
 import db from '../db/database.js';
 import logger from '../utils/logger.js';
+import { ownsTickLoop } from '../utils/processRole.js';
 
 const TAKER_FEE_PCT = 0.00035;
 // Costo di esecuzione SIMULATO, per lato. È lo stesso valore del backtester
@@ -62,6 +83,121 @@ export function simulatedSlippage(tolerance) {
 }
 
 /**
+ * Margine con cui `getRealizedPnl` allarga all'indietro la finestra dei fill.
+ *
+ * NON è arbitrario e non va stretto per "sicurezza": `bot._registerClose` passa
+ * `position.openedAt`, cioè il `Date.now()` scritto in DB DOPO che il fill di
+ * apertura è già avvenuto. Senza margine il fill di apertura — e quindi la sua
+ * FEE — cadrebbe fuori dalla finestra, e il `net` di ogni trade risulterebbe
+ * migliore del vero. Il margine copre lo scarto fra il fill e la scrittura.
+ */
+const OPEN_FILL_MARGIN_MS = 1000;
+
+/**
+ * ISSUE #18 — quali fill, fra quelli nella finestra temporale, appartengono
+ * davvero alla posizione CORRENTE.
+ *
+ * IL DIFETTO. La finestra è `openedAt - OPEN_FILL_MARGIN_MS` (vedi sopra: serve
+ * a non perdere il fill di apertura). Il margine però è cieco su cosa lascia
+ * entrare: se sulla STESSA coin una posizione riapre entro un secondo dalla
+ * chiusura della precedente, dentro la finestra finisce anche il fill di
+ * CHIUSURA di quella precedente e il suo `closedPnl` viene sommato al PnL della
+ * posizione corrente. Misurato in produzione sulla flotta OPS-FLEET-02: `pnl
+ * -22.95` su un trade che valeva `-11.6`, cioè due chiusure contate come una.
+ *
+ * PERCHÉ NON SI RISOLVE STRINGENDO IL MARGINE. Un margine più piccolo non
+ * elimina la sovrapposizione, la rende solo più rara e più difficile da
+ * riprodurre — e toglie la garanzia per cui il margine esiste. La finestra
+ * temporale non è lo strumento giusto per separare due posizioni: la separazione
+ * è STRUTTURALE.
+ *
+ * SERVONO DUE PASSAGGI, e nessuno dei due basta da solo. Li ho scoperti in
+ * quest'ordine, e li lascio scritti perché il secondo sembra ridondante finché
+ * non si guarda la forma vera dei dati.
+ *
+ * PASSO 1 — la CODA orfana in testa alla finestra. Il caso di produzione è
+ * questo: la posizione precedente era aperta da molto (il suo `Open` è FUORI
+ * finestra) e si è chiusa dentro. La finestra comincia quindi con una chiusura
+ * senza apertura. Quei fill appartengono alla posizione precedente se, più
+ * avanti, un `Open` comincia quella nuova — e in quel caso si scartano.
+ * Se invece un `Open` non c'è affatto, quella coda è tutto ciò che si ha ed È la
+ * posizione corrente: è il caso di una posizione ADOTTATA da `bot._reconcile`,
+ * il cui `openedAt` è molto posteriore ai fill veri. Lì non si taglia niente —
+ * tagliare butterebbe via un PnL misurato per sostituirlo con il fallback
+ * dell'unrealized, cioè un numero inventato.
+ *
+ * PASSO 2 — la SIZE NETTA, per la posizione precedente contenuta INTERA nella
+ * finestra (apertura compresa). Il passo 1 da solo non la vede: il primo `Open`
+ * della finestra è il SUO, quindi non c'è nessuna coda orfana da tagliare e il
+ * difetto sopravvive — verificato da test, era la mia prima versione del fix.
+ * Si ripercorre allora la sequenza tenendo la size corrente (`Open …` somma,
+ * `Close …` sottrae): ogni volta che torna a zero una posizione è finita e il
+ * fill successivo ne apre un'altra. La posizione corrente è l'ULTIMO segmento.
+ * Questo regge da solo tutti gli altri casi veri — il DCA (la size cresce, stesso
+ * segmento), il TP parziale (la size scende ma non a zero, stesso segmento), la
+ * chiusura piena (la size azzera, segmento chiuso).
+ *
+ * Non si confrontano timestamp: a pari millisecondo non sono ordinabili. Conta
+ * l'ordine di inserimento in `acc.fills`, cronologico, che questa funzione
+ * preserva.
+ *
+ * Funzione PURA (nessun I/O, nessuno stato): vive qui perché interpreta la
+ * sequenza di fill, che è il dato di questo file, e non è matematica di rischio —
+ * stessa scelta già fatta per `bot._classifyCloseFills`.
+ *
+ * @param {Array<{dir: string, sz: number}>} inWindow fill della coin già filtrati
+ *   per finestra temporale, in ordine di inserimento
+ * @returns {Array} l'ultimo segmento di `inWindow` (sottoinsieme, stesso ordine)
+ */
+export function fillsOfCurrentPosition(inWindow) {
+  if (!Array.isArray(inWindow) || inWindow.length === 0) return [];
+
+  const isOpen = (f) => /open/i.test(f?.dir || '');
+
+  // PASSO 1 — nessuna apertura in finestra: è la coda di una posizione adottata,
+  // non c'è confine da trovare e non si tocca niente.
+  const firstOpen = inWindow.findIndex(isOpen);
+  if (firstOpen < 0) return inWindow;
+  // Scarta la coda orfana della posizione precedente.
+  const fills = firstOpen > 0 ? inWindow.slice(firstOpen) : inWindow;
+
+  // PASSO 2 — segmentazione sulla size netta. Da qui la sequenza comincia per
+  // costruzione con un'apertura, quindi la size parte positiva e `peak > 0`
+  // distingue una chiusura piena da una finestra malformata.
+  const last = fills.length - 1;
+  let start = 0;   // indice di inizio del segmento in corso
+  let size = 0;    // size netta della posizione dentro il segmento
+  let peak = 0;    // massimo raggiunto: serve alla tolleranza relativa
+
+  for (let i = 0; i <= last; i++) {
+    const f = fills[i];
+    const sz = Number(f?.sz);
+    // Una size illeggibile non sposta il confine e non propaga NaN: da sola non
+    // può chiudere né aprire un segmento. Il chiamante la segnala.
+    const delta = Number.isFinite(sz) ? Math.abs(sz) : 0;
+    size += isOpen(f) ? delta : -delta;
+    if (size > peak) peak = size;
+
+    // Chiusura piena: la size torna a zero DOPO essere stata positiva.
+    // La tolleranza è RELATIVA al massimo del segmento — un residuo così piccolo
+    // non è una size scambiabile, è errore di arrotondamento sui float; una
+    // soglia assoluta sarebbe sbagliata su coin con size dell'ordine di 1e-4.
+    //
+    // `peak > 0` è la guardia che distingue "posizione chiusa" da "size mai
+    // salita": senza di essa una sequenza di size illeggibili (tutte 0) sarebbe
+    // letta come una fila di posizioni chiuse e verrebbe tagliata via tutta.
+    if (peak > 0 && size <= peak * 1e-6) {
+      // Se il fill che chiude è l'ULTIMO della finestra, il segmento appena
+      // concluso È la posizione corrente: `start` non si muove, altrimenti si
+      // restituirebbe una lista vuota proprio nel caso che interessa
+      // (`_registerClose` chiama subito dopo la chiusura).
+      if (i < last) { start = i + 1; size = 0; peak = 0; }
+    }
+  }
+  return start > 0 ? fills.slice(start) : fills;
+}
+
+/**
  * Unione di due liste di fill per IDENTITÀ del fill, non "l'ultima vince".
  *
  * I fill non si cancellano mai (cade solo la coda oltre `MAX_PERSISTED_FILLS`),
@@ -87,7 +223,21 @@ function mergeFills(base, mine) {
 }
 
 export class PaperBroker {
-  constructor() {
+  /**
+   * @param {object} opts
+   * @param {boolean} opts.allowWriteWithoutTickLoop istanza ISOLATA, non il
+   *        singleton condiviso: può salvare anche in un processo che non possiede
+   *        il tick loop. Serve a chi simula due processi (i test del merge) o a
+   *        una sandbox futura. Sta nel COSTRUTTORE e non in una variabile di
+   *        modulo di proposito: così il permesso è una proprietà dell'istanza,
+   *        visibile nel punto in cui la si crea, e non uno stato globale che nei
+   *        test resterebbe impostato per tutti.
+   */
+  constructor({ allowWriteWithoutTickLoop = false } = {}) {
+    this._allowWriteWithoutTickLoop = !!allowWriteWithoutTickLoop;
+    // Profondità dello scope `asLoopOwner()` attivo (rientrante: un salvataggio
+    // dentro l'altro non deve riaprire la guardia a metà).
+    this._loopOwnerScope = 0;
     // master(lower) -> { equity, positions: Map<coin,{side,size,entryPx,leverage}>,
     //                    triggers: Map<coin,[{oid,tpsl,triggerPx,isBuy,size}]>,
     //                    leverage: Map<coin, number>,
@@ -315,6 +465,60 @@ export class PaperBroker {
   }
 
   /**
+   * Questo processo (o questa istanza) può PERSISTERE lo stato simulato? (#26)
+   *
+   * Tre vie, in ordine di specificità: l'istanza isolata, lo scope esplicito di
+   * `asLoopOwner()`, il ruolo del processo. Il caso normale è l'ultimo — in
+   * Express, nei test e negli script `ownsTickLoop()` è `true` e non cambia
+   * niente.
+   */
+  _canPersist() {
+    if (this._allowWriteWithoutTickLoop) return true;
+    if (this._loopOwnerScope > 0) return true;
+    return ownsTickLoop();
+  }
+
+  /**
+   * Esegue `fn` dichiarando che il chiamante È il proprietario del tick loop,
+   * indipendentemente dal ruolo globale del processo.
+   *
+   * UNICO uso di produzione: la rotta `/internal/mcp/place-order-paper`. La sua
+   * autorità a scrivere non viene dal flag globale ma dall'essere la superficie
+   * HTTP di Express — è la stessa ragione per cui chiama `placeOrderPaperLocal`
+   * e non il guscio `handlePlaceOrderPaper`, che con un ruolo MCP dichiarato si
+   * metterebbe a bussare a sé stessa.
+   *
+   * Rientrante e sempre richiusa (`finally`): un'eccezione dentro `fn` non deve
+   * lasciare la guardia aperta per il resto della vita del processo.
+   */
+  async asLoopOwner(fn) {
+    this._loopOwnerScope++;
+    try {
+      return await fn();
+    } finally {
+      this._loopOwnerScope = Math.max(0, this._loopOwnerScope - 1);
+    }
+  }
+
+  /**
+   * Butta via le mutazioni che NON sono state persistite dopo un rifiuto della
+   * guardia, e forza la rilettura del blob al prossimo accesso.
+   *
+   * Senza questo, un processo non proprietario resterebbe con una posizione (o
+   * un trigger, o un'equity) che esiste solo nella sua memoria: le sue letture
+   * — `get_snapshot` dell'MCP, per esempio — mostrerebbero un numero che non
+   * corrisponde a niente e indistinguibile da uno misurato. La verità sta nel
+   * DB, scritta da chi possiede il loop: si riparte da lì.
+   */
+  _discardUnsavedState() {
+    this.state.clear();
+    this._delta.clear();
+    this._lastWrittenEquity.clear();
+    this._touchedEver.clear();
+    this._loaded = false;
+  }
+
+  /**
    * Salva lo stato simulato con RELOAD-AND-MERGE (CRIT #7).
    *
    * Prima riscriveva il blob intero con la memoria del processo chiamante: due
@@ -331,9 +535,32 @@ export class PaperBroker {
    *
    * Un errore di scrittura non interrompe la simulazione, ma non è silenzioso.
    *
+   * GUARDIA STRUTTURALE (#26) — un processo che non possiede il tick loop non
+   * persiste: l'eccezione esce dal metodo e arriva al chiamante. Deliberatamente
+   * PRIMA del `try`, e deliberatamente un `throw` e non il `return false` usato
+   * per l'errore di scrittura: lì la simulazione continua e il dato si riscrive
+   * al salvataggio seguente, qui il chiamante sta eseguendo un ordine in un
+   * processo che non ha nessun diritto di eseguirlo e deve saperlo — un ordine
+   * "riuscito" il cui stato non esiste è la cosa peggiore che possa restituire.
+   *
    * @param {string|null} touchedKey account su cui il chiamante ha appena agito.
+   * @throws {Error} code `PAPER_STATE_NOT_LOOP_OWNER` se la guardia rifiuta.
    */
   _save(touchedKey = null) {
+    if (!this._canPersist()) {
+      // Le mutazioni in memoria che questo salvataggio avrebbe dovuto persistere
+      // vanno buttate PRIMA di lanciare: restare con uno stato locale divergente
+      // trasformerebbe un rifiuto in un dato inventato nelle letture di questo
+      // stesso processo.
+      this._discardUnsavedState();
+      const err = new Error(
+        'Paper broker: scrittura dello stato simulato RIFIUTATA — questo processo non possiede il tick loop (#26). ' +
+        'Le mutazioni sul paperBroker vanno eseguite dal processo proprietario (Express), delegando: vedi place_order_paper / /internal/mcp/place-order-paper.'
+      );
+      err.code = 'PAPER_STATE_NOT_LOOP_OWNER';
+      logger.error(err.message, { touchedKey });
+      throw err;
+    }
     try {
       const persisted = this._readPersisted();
       const keys = new Set(this._delta.keys());
@@ -523,8 +750,26 @@ export class PaperBroker {
     return { closedPnl, fee, size: closeSize, partial };
   }
 
+  /**
+   * Snapshot dell'account simulato. NON è una query: valuta i trigger, quindi
+   * può produrre fill — ed è giusto così sul percorso del tick, dove
+   * `bot._registerClose` raccoglie il fill e chiude la riga `positions`.
+   *
+   * #26 — la valutazione dei trigger è però il "motore di matching" del broker
+   * simulato, cioè lavoro del TICK LOOP, e produce SCRITTURE. In un processo che
+   * non possiede il loop questa funzione deve degradare a lettura pura: lì
+   * `get_snapshot` chiama `getAccount()` (con un `.catch()` sopra) e chiedere una
+   * fotografia dell'account finiva per ESEGUIRE un TP/SL simulato in un processo
+   * dove nessun bot lo registrerà mai. Era l'ultimo scrittore rimasto, e non
+   * l'avevo contato fra gli scrittori proprio perché sembra una lettura.
+   *
+   * Nel processo proprietario il comportamento è invariato.
+   */
   async getAccount(master, network) {
-    await this._evaluateTriggers(master, network);
+    // Stessa condizione della guardia di `_save()`, non un secondo criterio: chi
+    // può persistere può far scattare i trigger, e viceversa. Due domande
+    // diverse qui vorrebbero dire un fill eseguito e poi rifiutato.
+    if (this._canPersist()) await this._evaluateTriggers(master, network);
     return this._snapshot(this._acc(master), network);
   }
 
@@ -643,8 +888,13 @@ export class PaperBroker {
     // L'oid si genera PRIMA del fill: deve finirci dentro, così una chiusura
     // esterna al bot resta distinguibile da un trigger scattato.
     const oid = this._nextOid(acc, masterAddress);
+    const requestedSz = pos.size;
     this._fillClose(masterAddress, coin, px, 'closePosition', { oid });
-    return { oid, avgPx: px, error: null, paper: true };
+    // ISSUE #55 — stessa chiave di `hyperliquidClient.closePosition`: i chiamanti
+    // interpretano l'esito con `interpretCloseResult` senza sapere quale dei due
+    // broker hanno davanti. `totalSz` resta assente di proposito (il paper riempie
+    // sempre tutto): è il caso `sizeKnown: false` già gestito.
+    return { oid, avgPx: px, error: null, paper: true, requestedSz };
   }
 
   /** Ordini trigger "aperti" nel formato del frontend (per _ensureStopLoss). */
@@ -666,12 +916,29 @@ export class PaperBroker {
    * `closingFills` espone i fill veri e propri (con il loro `oid`): serve a
    * `bot._registerClose` per capire QUALE ordine ha chiuso la posizione senza
    * fare una seconda lettura. Stessa forma di `hyperliquidClient.getRealizedPnl`.
+   *
+   * ISSUE #18 — il margine di `OPEN_FILL_MARGIN_MS` sulla finestra non basta da
+   * solo: vedi `fillsOfCurrentPosition`, che lo corregge sulla forma della
+   * sequenza invece di stringerlo.
    */
   async getRealizedPnl(masterAddress, coin, sinceTs) {
     const acc = this._acc(masterAddress);
-    const since = sinceTs ? sinceTs - 1000 : 0;
+    const since = sinceTs ? sinceTs - OPEN_FILL_MARGIN_MS : 0;
     const matchCoin = f => f.coin === coin || `${f.coin}-PERP` === coin || f.coin === coin.replace('-PERP', '');
-    const rel = acc.fills.filter(f => matchCoin(f) && f.time >= since);
+    const inWindow = acc.fills.filter(f => matchCoin(f) && f.time >= since);
+    // `sinceTs` falsy = «tutta la storia di questa coin»: è il senso letterale
+    // del parametro e l'uso dei test aggregati, e lì i segmenti NON si separano.
+    // Con un `sinceTs` vero il chiamante sta chiedendo UNA posizione (è come lo
+    // usa `bot._registerClose`, l'unico chiamante di produzione), e il confine
+    // fra posizioni va rispettato — vedi `fillsOfCurrentPosition`.
+    const rel = sinceTs ? fillsOfCurrentPosition(inWindow) : inWindow;
+    // Il confine si calcola sulle size: una size illeggibile lo renderebbe
+    // inaffidabile, e su un percorso che produce il PnL scritto in DB non può
+    // restare una cosa che nessuno viene a sapere.
+    const badSize = inWindow.filter(f => !Number.isFinite(Number(f?.sz)));
+    if (badSize.length) {
+      logger.warn(`Paper broker: ${badSize.length} fill su ${coin} senza size leggibile — il confine fra posizioni in getRealizedPnl potrebbe essere sbagliato`);
+    }
     const closing = rel.filter(f => /close/i.test(f.dir || ''));
     if (!closing.length) return null;
     const closedPnl = closing.reduce((s, f) => s + (f.closedPnl || 0), 0);

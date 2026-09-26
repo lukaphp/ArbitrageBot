@@ -192,7 +192,9 @@ viene rifiutato con la motivazione, non ridimensionato in silenzio.
 
 ## 5. Tab Positions
 
-Elenco delle posizioni aperte sull'account Hyperliquid.
+Elenco delle posizioni aperte: quelle reali sull'account Hyperliquid **e** quelle
+dei bot in forward-test, marcate `PAPER`. Le due liste non vengono fuse nemmeno
+sulla stessa coin, perché sono due esposizioni distinte.
 
 | Colonna | Descrizione |
 |:---|:---|
@@ -201,7 +203,7 @@ Elenco delle posizioni aperte sull'account Hyperliquid.
 | **Entry Price** | Prezzo medio di carico. |
 | **Mark Price** | Prezzo corrente usato per il PnL non realizzato. |
 | **PnL (USD e %)** | Rendimento in dollari e in percentuale sul margine. |
-| **Chiudi Posizione** | Invia un ordine market contrario di pari dimensione, azzerando l'esposizione. |
+| **Chiudi Posizione** | Invia un ordine market contrario di pari dimensione, azzerando l'esposizione. **Compare solo sulle posizioni reali.** Sulle righe marcate `PAPER` il pulsante non c'è: l'endpoint di chiusura instrada al broker reale, quindi su una coin dove convivono una posizione vera e una simulata chiuderebbe quella sbagliata. Una posizione simulata la chiude il bot, con i suoi TP/SL o con un segnale di uscita. |
 
 ---
 

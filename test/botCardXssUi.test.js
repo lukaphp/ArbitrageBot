@@ -15,6 +15,20 @@
  *
  * Come gli altri test di `public/*.js`: caricamento in `node:vm` con DOM finto, quindi
  * si verifica il markup prodotto, non la resa visiva.
+ *
+ * ── Issue #22: tre punti residui nella stessa card ─────────────────────────────
+ * Aggiunti in coda i casi per i tre punti che #9 aveva lasciato fuori perimetro:
+ * la riga "Strategia" (`_describeEntryRules`), il badge strategia AI e il badge
+ * actor. Non hanno tutti la stessa gravità e i test lo dicono caso per caso:
+ *   • riga Strategia (testo delle pill, `candleInterval`, fallback di `direction`)
+ *     e badge actor (`title=` senza NESSUN escaping) sono eseguibili oggi;
+ *   • il `title=` delle pill e il badge strategia usavano un
+ *     `.replace(/"/g,'&quot;')` fatto a mano: con `"` come delimitatore l'evasione
+ *     dall'attributo non passa — reggono per la scelta del delimitatore, non per
+ *     costruzione. Lì il test difende dal cambio di delimitatore e dal `&` non
+ *     escapato, che oggi storpia il testo mostrato (`&quot;` reso come `"`).
+ * La distinzione è voluta: dichiarare "5 XSS sfruttabili" sarebbe falso quanto
+ * lasciare l'escaping a metà.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -169,4 +183,136 @@ test('una card normale non viene alterata dall\'escaping', () => {
   // `<` dentro un motivo legittimo diventa entity: è corretto, il browser lo rende come `<`.
   assert.match(html, /RSI 28 &lt; 30/);
   assert.equal(html.includes('&amp;lt;'), false, 'niente doppio escaping');
+});
+
+// ===== Issue #22 · punto 1 — riga "Strategia" (`_describeEntryRules`) =========
+//
+// `b.config` è scrivibile dall'editor bot e, da quando esiste la coda advisory,
+// da una patch approvata via agente. Il testo delle pill lo produce
+// `_describeRule`, che monta i campi grezzi della regola in una frase: è TESTO,
+// e finiva nel markup senza escaping.
+
+test('il pattern di una regola price_action con markup non esce dalla riga Strategia', () => {
+  const perps = loadUi();
+  const html = perps._botCardHtml(bot({
+    config: { entryRules: [{ type: 'price_action', pattern: XSS, signal: 'long' }], logic: 'any' }
+  }));
+  assertNeutralizzato(html, 'entryRules[].pattern');
+  assert.match(html, />Price action: &lt;img src=x onerror=alert\(1\)&gt; \[LONG\]</,
+    'il pattern resta leggibile come testo dentro la pill');
+});
+
+test('un r.type sconosciuto finisce nella pill come testo', () => {
+  const perps = loadUi();
+  // Ramo `default` di `_describeRule`: `${r.type} ${sig}`, l'unico punto dove il
+  // `type` grezzo arriva nel markup senza passare da una mappa di etichette.
+  const html = perps._botCardHtml(bot({
+    config: { entryRules: [{ type: XSS }], logic: 'any' }
+  }));
+  assertNeutralizzato(html, 'entryRules[].type');
+});
+
+test('candleInterval e il fallback di direction sono escapati', () => {
+  const perps = loadUi();
+  const html = perps._botCardHtml(bot({
+    config: { entryRules: [{ type: 'funding', op: '>', value: 0 }], logic: 'any',
+      candleInterval: XSS, direction: XSS }
+  }));
+  assertNeutralizzato(html, 'config.candleInterval / config.direction');
+  // Due interpolazioni distinte dello stesso valore: il pill del timeframe e il
+  // fallback della direzione (che si attiva solo per un valore fuori whitelist).
+  assert.equal((html.match(/&lt;img src=x/g) || []).length, 2,
+    'candleInterval e direction devono essere coperti entrambi');
+});
+
+test('la whitelist delle frecce di direction non viene toccata dall\'escaping', () => {
+  const perps = loadUi();
+  // Precondizione: `direction: 'long'` è dentro la mappa, quindi si deve vedere la
+  // freccia e NON il valore grezzo. L'escaping va sul solo fallback.
+  const html = perps._botCardHtml(bot({
+    config: { entryRules: [{ type: 'funding' }], logic: 'any', direction: 'long', candleInterval: '15m' }
+  }));
+  assert.match(html, /↑/, 'direction nella whitelist resta una freccia');
+  assert.equal(html.includes('>long<'), false, 'il valore grezzo non sostituisce la freccia');
+  assert.match(html, /class="muted rule-pill">15m</, 'un candleInterval legittimo resta invariato');
+});
+
+test('il title= della pill non si può chiudere né storpiare', () => {
+  const perps = loadUi();
+  // Il vecchio `.replace(/"/g,'&quot;')` copriva le virgolette ma non `&`: un
+  // pattern che contiene già `&quot;` veniva mostrato come `"` nel tooltip (testo
+  // alterato). Con `_escapeHtml` la `&` diventa `&amp;` e il testo resta fedele.
+  const html = perps._botCardHtml(bot({
+    config: { entryRules: [{ type: 'price_action', pattern: '&quot; onmouseover=&quot;alert(1)' }], logic: 'any' }
+  }));
+  assert.equal(html.includes('" onmouseover="'), false,
+    'nessuna virgoletta grezza deve poter chiudere il title della pill');
+  assert.match(html, /&amp;quot; onmouseover=&amp;quot;alert\(1\)/,
+    'la & va escapata: il tooltip deve mostrare il testo scritto, non la sua decodifica');
+});
+
+// ===== Issue #22 · punto 2 — badge strategia AI ===============================
+
+test('strat.rationale con apice singolo e markup resta dentro il title', () => {
+  const perps = loadUi();
+  perps._botStrategy = { 'bot-1': { rationale: `${XSS} ' onfocus='alert(1)`, decidedAt: null } };
+  const html = perps._botCardHtml(bot());
+  assert.equal(html.includes("' onfocus='"), false,
+    'l\'apice va escapato anche con le virgolette doppie come delimitatore');
+  assert.equal(html.includes('<img'), false, 'nessun tag deve comparire nel title del badge strategia');
+  assert.match(html, /class="bot-strategy-badge" title="&lt;img src=x onerror=alert\(1\)&gt; &#39; onfocus=&#39;alert\(1\)"/);
+});
+
+// ===== Issue #22 · punto 3 — badge actor =====================================
+//
+// `actor_label`/`actor_id` arrivano dal chiamante di `botManager.createBot`
+// (verificato in src/perps/botManager.js: solo `id` è un randomUUID interno),
+// quindi un agente esterno come Hermes li scrive. Erano interpolati in un
+// `title=` senza NESSUN escaping: qui l'evasione dall'attributo passa davvero.
+
+test('actorLabel che chiude il title non inietta un handler', () => {
+  const perps = loadUi();
+  const html = perps._botCardHtml(bot({ actorLabel: '" onmouseover="alert(1)' }));
+  assert.equal(html.includes('" onmouseover="'), false,
+    'un title che si chiude da solo permette di iniettare un attributo vero');
+  assert.match(html, /&quot; onmouseover=&quot;alert\(1\)/);
+});
+
+test('agentId con markup non esce dal badge actor', () => {
+  const perps = loadUi();
+  const html = perps._botCardHtml(bot({ actor_id: XSS }));
+  assertNeutralizzato(html, 'actor_id');
+});
+
+test('actorIcon e actorColor arrivano dalla stessa API e vanno escapati', () => {
+  const perps = loadUi();
+  // `actorColor` finisce in `class=`, `actorIcon` nel testo del badge: stessa
+  // provenienza di actorLabel (admin view / agente), stesso trattamento.
+  const html = perps._botCardHtml(bot({
+    actorColor: 'x" onmouseover="alert(1)', actorIcon: XSS
+  }));
+  assert.equal(html.includes('" onmouseover="'), false,
+    'actorColor non deve poter chiudere l\'attributo class');
+  assert.equal(html.includes('<img'), false, 'actorIcon non deve produrre un tag');
+});
+
+test('il title del pulsante di modifica su bot gestito da agente è escapato', () => {
+  const perps = loadUi();
+  // Precondizione: `is_managed_by_agent` vero, altrimenti il ramo con actorLabel
+  // nel title non viene nemmeno costruito e il caso passerebbe per il motivo
+  // sbagliato.
+  const html = perps._botCardHtml(bot({ is_managed_by_agent: true, actorLabel: XSS }));
+  assert.match(html, /🔒 ✏️/, 'precondizione: il pulsante lock deve essere quello reso');
+  assertNeutralizzato(html, 'actorLabel nel title del pulsante edit');
+});
+
+test('una card con actor e strategia legittimi resta invariata', () => {
+  const perps = loadUi();
+  perps._botStrategy = { 'bot-1': { rationale: 'RSI < 30 su 15m & funding positivo', decidedAt: null } };
+  const html = perps._botCardHtml(bot({ actorLabel: 'Hermes', actor_id: 'hermes-01', actor: 'hermes' }));
+  assert.match(html, /title="Controllato da: Hermes \(hermes-01\)"/);
+  assert.match(html, /class="agent-badge agent-badge-hermes"/);
+  // `<` e `&` in un rationale legittimo diventano entity: il browser li rende come scritti.
+  assert.match(html, /title="RSI &lt; 30 su 15m &amp; funding positivo"/);
+  assert.equal(html.includes('&amp;amp;'), false, 'niente doppio escaping');
 });

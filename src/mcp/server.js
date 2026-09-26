@@ -193,6 +193,10 @@ if (process.argv[1] && process.argv[1].endsWith('server.js')) {
       // Come il watchdog, si autoesclude in questo processo (CRIT #7): la
       // chiamata resta qui perché il ruolo si decide a runtime, non dal file.
       botManager.startReconciliationWatcher();
+      // ISSUE #58 — si autoesclude in questo processo per la stessa ragione: qui
+      // i bot sono fermi per costruzione, e OGNI posizione risulterebbe non
+      // sorvegliata. La chiamata resta perché il ruolo si decide a runtime.
+      botManager.startUnmanagedPositionWatcher();
 
       const server = createArbitrageBotMcpServer();
       const transport = new StdioServerTransport();

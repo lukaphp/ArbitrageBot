@@ -447,7 +447,9 @@ protegge, un singolo guasto disco perderebbe entrambi. Candidato di refinement p
 
 ## 6. Monitoraggio e allerte
 
-- **Uptime**: punta UptimeRobot / healthchecks.io su `https://.../health`.
+- **Uptime**: punta UptimeRobot / healthchecks.io su `https://.../health`. Questo
+  *interroga* l'host dall'esterno; l'altra metà — l'host che *chiama fuori*, così che
+  il silenzio stesso diventi un allarme — è il dead-man's switch di **§6.2**.
 - **Telegram**: configura token + chat id nell'app → ricevi avvisi su entrate/uscite,
   errori e kill-switch, e puoi comandare i bot da chat (`/status`, `/chiuditutto`).
   Il token viene salvato **cifrato** sul DB (`tokenEnc`), non in chiaro.
@@ -561,22 +563,28 @@ dal browser viene rifiutato con *"Cannot save provisioned dashboard"*. Si modifi
 il JSON nel repository e si riavvia il container; per esperimenti usa
 "Save as copy", che crea una dashboard separata.
 
-**Alert.** Cinque regole in `deploy/monitoring/alerts.yml`, valutate da Prometheus
+**Alert.** Sei regole in `deploy/monitoring/alerts.yml`, valutate da Prometheus
 e visibili in Grafana (*Alerting → Alert rules*, sezione della datasource, in sola
 lettura) oltre che nel pannello "Alert attivi":
 
 | Regola | Condizione |
 |:---|:---|
-| `ArbitrageBotTargetDown` | metriche non raccolte da 2 min |
+| `ArbitrageBotTargetDown` | metriche non raccolte da 2 min **di fila** |
+| `ArbitrageBotTargetFlapping` | metriche raccolte **a tratti**: media di `up` <0.9 su 15 min — prende il crash-loop che risale per pochi secondi e azzera il `for:` della regola sopra |
 | `PerpsWebSocketDown` | `perps_ws_connected == 0` da 2 min |
 | `PerpsBotTickStale` | bot **in esecuzione** che non ticca da >180s |
 | `PerpsApiErrorsSpike` | >10 errori API in 10 min, persistenti da 5 |
 | `PerpsTickErrorsSpike` | >5 errori di tick in 10 min, persistenti da 5 |
 
-> ⚠️ **Nessun inoltro esterno**: senza Alertmanager, un alert "firing" non manda
-> niente a nessuno — si vede solo aprendo Grafana. Non resta scoperto il caso
-> urgente, perché WS giù e bot fermo sono già notificati su Telegram dall'app
-> (§6). L'inoltro è un raffinamento previsto, non incluso.
+> **Inoltro esterno: SÌ**, via Alertmanager → Telegram (issue #12). Questa nota
+> diceva il contrario fino al 17/09/2026: allora un `firing` era solo un colore su
+> una pagina Grafana, e il 14/09 l'app è rimasta in crash-loop ~3h40m con le regole
+> in `firing` e nessuno avvisato. Catena: `prometheus.yml` (blocco `alerting:`) →
+> `alertmanager:9093` → `alertmanager.yml`.
+>
+> ⚠️ Resta scoperto **un solo** scenario: l'host o Docker che muoiono del tutto,
+> portandosi via anche Alertmanager. Quello lo copre soltanto un heartbeat esterno
+> → **§6.2**, da attivare a mano.
 
 **Se i pannelli sono vuoti, guarda prima "Raccolta metriche".** Se è `DOWN`, il
 problema è la raccolta, non il bot. La causa più comune è `METRICS_TOKEN`
@@ -596,6 +604,92 @@ curl -s localhost:9090/api/v1/targets | grep -o '"health":"[a-z]*"'   # atteso: 
 aggiornamenti d'immagine. Per buttare via lo storico delle metriche senza
 toccare il DB dei bot: `docker volume rm arbitragebot_prometheus-data` (a
 container spento).
+
+### 6.2 Dead-man's switch esterno — heartbeat (issue #29, DA COMPLETARE A MANO)
+
+**Stato: script e procedura pronti, servizio esterno NON ancora attivato.** Serve un
+umano: creare l'account e custodire un URL con token dentro non è un'azione da
+delegare a un agente.
+
+**Perché.** Tutto ciò che c'è in §6 e §6.1 — Prometheus, Alertmanager, Telegram —
+gira **dentro** l'host che dovrebbe sorvegliare. Se il VPS si spegne, se il demone
+Docker muore o se l'host perde la rete, l'alerting muore insieme all'applicazione:
+da fuori, "guasto totale" e "tutto bene, nessun alert" sono indistinguibili.
+Nessuno script su questo host può chiudere il buco, per definizione. L'unica uscita
+è invertire la logica: un servizio esterno che avvisa per **assenza** di ping.
+
+Lo script è già nel repo: `deploy/monitoring/heartbeat-ping.sh`. Controlla app
+(`/health`) e Prometheus (`/-/healthy`) su loopback e poi manda **un ping di
+successo** se sono vivi, **un ping di fallimento** se non lo sono (notifica
+immediata, senza aspettare la soglia). Se l'host è morto non parte nessuno dei
+due, e scatta la soglia di assenza: è quello il caso che conta.
+
+**Passi manuali, in ordine.**
+
+1. **Account sul servizio di heartbeat.** [Healthchecks.io](https://healthchecks.io)
+   (piano gratuito: 20 check, sufficiente) oppure equivalente con notifica per
+   ping mancante — Better Stack, Cronitor, o un'istanza self-hosted di
+   Healthchecks **su un host diverso da questo VPS** (sullo stesso host non
+   servirebbe a niente). Attiva la 2FA sull'account.
+2. **Crea il check.** Nome `arbitragebot-perps-vps`, e imposta:
+   - **Period** (attesa tra un ping e il successivo): `5 minuti`, come il cron al punto 6.
+   - **Grace time** (tolleranza oltre il periodo): `5 minuti`. Totale: allarme dopo
+     ~10 minuti di silenzio. Più corto genera falsi allarmi al primo `docker compose
+     up -d`; più lungo allunga la cecità nello scenario peggiore.
+3. **Canale di notifica INDIPENDENTE dal VPS.** Email + un secondo canale (Telegram,
+   push sul telefono). Non riusare nulla che viva sul VPS: un canale che muore con
+   l'host non è un canale.
+4. **Prendi l'URL di ping** (`https://hc-ping.com/<uuid>` per Healthchecks.io).
+   **È un segreto**: il token è nel path. Non incollarlo in chat, in un commit, in
+   un issue o in un comando che finisce nella history.
+5. **Scrivilo sul VPS**, in un file leggibile solo da root. `read -rs` evita che
+   finisca nella shell history:
+
+   ```bash
+   sudo install -d -m 700 /etc/arbitragebot
+   read -rsp 'URL di ping: ' PING_URL && \
+     printf 'DEADMAN_PING_URL=%s\n' "$PING_URL" | sudo tee /etc/arbitragebot/deadman.env >/dev/null && \
+     unset PING_URL
+   sudo chmod 600 /etc/arbitragebot/deadman.env
+   ```
+
+   Prova a vuoto, prima del cron (atteso: `heartbeat OK inviato a https://hc-ping.com/xxxx…`,
+   URL mascherato — e il check sul sito passa a verde):
+
+   ```bash
+   sudo /opt/arbitragebot/deploy/monitoring/heartbeat-ping.sh
+   ```
+
+6. **Installa il cron** (ogni 5 minuti, coerente col *Period* del punto 2).
+   `chronic` non è garantito: l'output va già su syslog, quindi si scarta.
+
+   ```bash
+   sudo tee /etc/cron.d/arbitragebot-deadman >/dev/null <<'EOF'
+   # Dead-man's switch: heartbeat verso il servizio esterno (docs/DEPLOY.md §6.2)
+   SHELL=/bin/bash
+   PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+   */5 * * * * root /opt/arbitragebot/deploy/monitoring/heartbeat-ping.sh >/dev/null 2>&1
+   EOF
+   sudo chmod 644 /etc/cron.d/arbitragebot-deadman
+   ```
+
+   Aggiusta il path se il repo non è in `/opt/arbitragebot`.
+
+7. **Verifica che funzioni DAVVERO**, cioè che l'allarme scatti — un check verde non
+   prova niente, prova solo che il ping arriva:
+
+   ```bash
+   sudo mv /etc/cron.d/arbitragebot-deadman /root/arbitragebot-deadman.bak   # silenzio voluto
+   journalctl -t arbitragebot-deadman --since '-1h'                          # storico dei ping
+   # attendi Period + Grace (~10 min): DEVE arrivare la notifica sui canali del punto 3
+   sudo mv /root/arbitragebot-deadman.bak /etc/cron.d/arbitragebot-deadman   # ripristina
+   ```
+
+   Se la notifica non arriva, il dead-man's switch non esiste: è esattamente il
+   guasto silenzioso che doveva coprire.
+
+**Rotazione.** Se l'URL finisce esposto: nel servizio elimina il check e creane uno
+nuovo (l'URL non è rigenerabile senza rifare il check), poi ripeti i punti 2-6.
 
 ---
 

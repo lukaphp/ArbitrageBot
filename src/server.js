@@ -56,6 +56,10 @@ import telegramControl from './perps/telegramControl.js';
 import strategySchema from './perps/strategySchema.js';
 import { runBacktest } from './perps/backtester.js';
 import { handleJsonRpcMcp, executeMcpTool, MCP_TOOLS_DEFINITIONS } from './mcp/httpTransport.js';
+// ISSUE #27 — l'ordine paper lo esegue Express, che possiede il tick loop: la
+// rotta `/internal/mcp/place-order-paper` chiama l'esecuzione LOCALE, non il
+// guscio che decide se delegare.
+import { placeOrderPaperLocal } from './mcp/tools.js';
 
 // Polyfill globale per la serializzazione di BigInt in JSON (Express, Socket.IO, logger)
 if (typeof BigInt.prototype.toJSON !== 'function') {
@@ -79,7 +83,7 @@ import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk,
 // per "Queue health" nella card EXECUTION STATUS della cockpit.
 import execQueue from './perps/execQueue.js';
 import paperBroker from './perps/paperBroker.js';
-import { reconcileStalePositions } from './perps/reconciler.js';
+import { reconcileStalePositions, findUnmanagedLivePositions } from './perps/reconciler.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -736,9 +740,33 @@ class ArbitrageBotServer {
         .filter(fill => Number(fill.time) >= dayStart.getTime())
         .reduce((sum, fill) => sum + Number(fill.closedPnl || 0) - Number(fill.fee || 0), 0);
       const killSwitch = riskAgent.isKillSwitchOn();
+
+      // ISSUE #58 — posizioni REALI vive che nessun bot `running` sta tracciando.
+      // La stessa condizione che il watcher di `botManager` notifica ogni 60s: qui
+      // compare anche nella dashboard, perché una notifica Telegram si perde e il
+      // pannello Rischio è dove si va a guardare. La decisione è la funzione pura
+      // di `reconciler.js`; le posizioni PAPER sono escluse di proposito
+      // (`isPaper` dal merge), l'issue parla di denaro vero.
+      let unmanagedPositions = [];
+      try {
+        const runningBotIds = new Set(
+          [...botManager.bots.values()].filter(b => b.isTicking?.()).map(b => b.id)
+        );
+        unmanagedPositions = findUnmanagedLivePositions({
+          livePositions: (account?.positions || []).filter(p => !p.isPaper),
+          bots: db.listBots(),
+          runningBotIds,
+          address
+        });
+      } catch (error) {
+        // Non deve poter far fallire il pannello Rischio, ma un allarme mancato è
+        // un allarme mancato: va detto.
+        logger.error('Risk snapshot: controllo posizioni non sorvegliate fallito', error.message);
+      }
+
       const alerts = deriveRiskAlerts({
         now, address, account, orders, limits, bots, marketStatus, agent, killSwitch,
-        drawdown, sourceErrors,
+        drawdown, sourceErrors, unmanagedPositions,
         defaultMaxDailyLossUsd: config.HYPERLIQUID_CONFIG.risk.maxDailyLossUsd
       });
 
@@ -960,13 +988,34 @@ class ArbitrageBotServer {
           if (master) {
             const acc = await hyperliquid.getAccount(master, network);
             for (const p of acc.positions) {
-              try { const r = await hyperliquid.closePosition({ masterAddress: master, coin: p.coin }, network); closed.push({ coin: p.coin, ok: !r.error }); }
-              catch (e) { closed.push({ coin: p.coin, ok: false, error: e.message }); }
+              // ISSUE #55 — `!r.error` prende il caso NEAR (messaggio d'errore
+              // presente) ma NON un oid nullo senza messaggio, né un riempimento
+              // parziale: su un kill-switch sarebbero posizioni contate come
+              // chiuse e invece ancora vive.
+              try {
+                const r = await hyperliquid.closePosition({ masterAddress: master, coin: p.coin }, network);
+                const v = riskManager.interpretCloseResult(r, r?.requestedSz ?? p.size);
+                if (v.outcome !== 'closed') {
+                  logger.error(`Kill-switch: chiusura ${p.coin} ${v.outcome} — ${v.reason}`);
+                }
+                closed.push({
+                  coin: p.coin, ok: v.outcome === 'closed', outcome: v.outcome,
+                  ...(v.outcome === 'closed' ? {} : { error: v.reason, remaining: v.remaining })
+                });
+              }
+              catch (e) { closed.push({ coin: p.coin, ok: false, outcome: 'rejected', error: e.message }); }
             }
           }
         }
-        notifier.notify(`🛑 <b>KILL-SWITCH</b> attivato: ${states.filter(s => s.status === 'running').length} bot fermati${closePositions ? `, posizioni chiuse: ${closed.length}` : ''}`);
-        logger.warn('🛑 Kill-switch attivato', { closePositions, closed: closed.length });
+        // Il conteggio nella notifica è quello delle posizioni DAVVERO chiuse, con
+        // il totale accanto: `closed.length` da solo contava anche i tentativi
+        // falliti, ed è il numero su cui una persona decide se intervenire a mano.
+        const reallyClosed = closed.filter(c => c.ok).length;
+        const closeSummary = closePositions
+          ? `, posizioni chiuse: ${reallyClosed}/${closed.length}${reallyClosed < closed.length ? ' ⚠️ INTERVENTO MANUALE NECESSARIO sulle restanti' : ''}`
+          : '';
+        notifier.notify(`🛑 <b>KILL-SWITCH</b> attivato: ${states.filter(s => s.status === 'running').length} bot fermati${closeSummary}`);
+        logger.warn('🛑 Kill-switch attivato', { closePositions, closed: reallyClosed, attempted: closed.length });
         res.json({ success: true, data: { stopped: states.length, closed } });
       } catch (error) {
         logger.error('Errore kill-switch:', error.message);
@@ -1252,10 +1301,30 @@ class ArbitrageBotServer {
                     { masterAddress: bot.masterAddress, coin: bot.coin },
                     hyperliquid.getNetwork()
                   );
-                  closedPositions.push({
-                    botId: bot.id, coin: bot.coin,
-                    notionalUsd: estimatedNotional, result
-                  });
+                  // ISSUE #55 — `closedPositions` è il numero che questa risposta
+                  // presenta all'operatore come "posizioni messe in sicurezza".
+                  // Una risposta senza eccezione non basta a metterci dentro una
+                  // riga: un ordine rifiutato (oid nullo, book senza liquidità)
+                  // lascerebbe l'operatore convinto di essere al sicuro proprio
+                  // nel momento in cui sta premendo il panic button.
+                  const verdict = riskManager.interpretCloseResult(result, result?.requestedSz ?? bot.position?.size);
+                  if (verdict.outcome === 'closed') {
+                    closedPositions.push({
+                      botId: bot.id, coin: bot.coin,
+                      notionalUsd: estimatedNotional, result, outcome: verdict.outcome
+                    });
+                  } else {
+                    // Rifiuto o riempimento parziale: in entrambi i casi resta
+                    // esposizione aperta e serve una persona. Va fra gli errori,
+                    // non fra le chiusure.
+                    logger.error(`Panic ${bot.id}: chiusura ${bot.coin} ${verdict.outcome} — ${verdict.reason}`);
+                    errors.push({
+                      botId: bot.id, action: 'close_position', outcome: verdict.outcome,
+                      error: verdict.outcome === 'partial'
+                        ? `chiusura PARZIALE: ${verdict.reason}, restano ${verdict.remaining} aperti`
+                        : `chiusura RIFIUTATA: ${verdict.reason} — posizione ancora aperta`
+                    });
+                  }
                 } catch (closeErr) {
                   errors.push({ botId: bot.id, action: 'close_position', error: closeErr.message });
                 }
@@ -1509,15 +1578,105 @@ class ArbitrageBotServer {
     });
 
     // Chiusura manuale di una posizione
+    //
+    // ISSUE #55 — l'esito dell'ordine si GUARDA. `closePosition` → limit IoC può
+    // RISOLVERE con l'ordine rifiutato invece di lanciare (`{status:'ok',
+    // oid:null, totalSz:null, error:'could not immediately match…'}`): prima
+    // questo handler rispondeva `success: true` a qualunque risposta ed emetteva
+    // `perps:position {closed:true}`, cioè cancellava dalla dashboard una
+    // posizione ancora aperta sull'exchange. Nessun loop di retry qui (è
+    // un'azione singola di una persona): basta riportare l'esito vero.
+    //
+    // ISSUE #35 (parte backend) — l'ordine va al broker che possiede DAVVERO
+    // quella posizione. La destinazione si DERIVA dallo stato del server (le
+    // posizioni lette dai due broker per quel wallet), mai da un flag `isPaper`
+    // nel corpo della richiesta: un client che lo dichiarasse sbagliato farebbe
+    // muovere denaro vero al posto di denaro simulato. Il campo `source`, se
+    // presente, può solo scegliere fra i candidati che esistono — vedi
+    // `riskManager.resolveCloseTarget`, dove sta tutta la decisione.
     app.post('/api/perps/positions/:coin/close', async (req, res) => {
       try {
-        const { masterAddress } = req.body;
+        const { masterAddress, source } = req.body || {};
         const coin = decodeURIComponent(req.params.coin);
-        const result = await hyperliquid.closePosition({ masterAddress, coin }, hyperliquid.getNetwork());
-        this.io.emit('perps:position', { coin, closed: true });
+        if (!masterAddress) return res.status(400).json({ success: false, error: 'masterAddress richiesto' });
+        const network = hyperliquid.getNetwork();
+
+        // Le due letture, in parallelo e senza effetti collaterali. `peekAccount`
+        // e non `getAccount`: quest'ultima farebbe scattare i trigger simulati
+        // come effetto collaterale di una lettura (vedi `mergeWithPaperAccount`).
+        const [realRes, paperRes] = await Promise.allSettled([
+          hyperliquid.getAccount(masterAddress, network),
+          paperBroker.peekAccount(masterAddress, network)
+        ]);
+        // Una lettura fallita NON vale come "niente aperto qui": sarebbe un
+        // instradamento deciso su un'ignoranza. Si rifiuta e lo si dice.
+        if (realRes.status === 'rejected') {
+          logger.error(`Chiusura ${coin}: account reale non leggibile (${realRes.reason?.message})`);
+          return res.status(502).json({
+            success: false,
+            error: `Impossibile stabilire se la posizione su ${coin} è reale o simulata: l'exchange non risponde (${realRes.reason?.message}). Nessun ordine è stato inviato.`
+          });
+        }
+        if (paperRes.status === 'rejected') {
+          logger.error(`Chiusura ${coin}: stato simulato non leggibile (${paperRes.reason?.message})`);
+          return res.status(502).json({
+            success: false,
+            error: `Impossibile stabilire se la posizione su ${coin} è reale o simulata: lo stato simulato non è leggibile (${paperRes.reason?.message}). Nessun ordine è stato inviato.`
+          });
+        }
+
+        const routing = riskManager.resolveCloseTarget({
+          coin,
+          realPositions: realRes.value?.positions || [],
+          paperPositions: paperRes.value?.positions || [],
+          requestedSource: source || null
+        });
+        if (!routing.target) {
+          return res.status(400).json({
+            success: false,
+            error: routing.reason,
+            data: { candidates: routing.candidates }
+          });
+        }
+
+        const broker = routing.target === 'paper' ? paperBroker : hyperliquid;
+        // `paperBroker.closePosition` è `placeMarketOrder` con `reduceOnly` più la
+        // risoluzione della size: la usa perché è il gemello esatto del percorso
+        // reale, quindi `interpretCloseResult` qui sotto vale identica sui due
+        // rami e la verifica dell'esito di #55 non ha un buco sul lato paper.
+        const result = await broker.closePosition({ masterAddress, coin }, network);
+        const verdict = riskManager.interpretCloseResult(result, result?.requestedSz);
+        // Etichetta esplicita nei messaggi: su una chiusura che non è andata a
+        // buon fine, sapere QUALE dei due conti è rimasto esposto è la prima cosa
+        // che serve a chi legge.
+        const label = routing.target === 'paper' ? 'simulata' : 'reale';
+
+        if (verdict.outcome === 'rejected') {
+          // NIENTE `closed:true`: la posizione è ancora là. Un refresh della
+          // dashboard sì — l'operatore deve vederla ancora aperta.
+          logger.error(`Chiusura manuale (${label}) di ${coin} RIFIUTATA: ${verdict.reason}`);
+          this.io.emit('perps:dashboardRefresh', { reason: 'close_rejected', coin });
+          return res.status(400).json({
+            success: false,
+            error: `Chiusura NON eseguita su ${coin} (posizione ${label}): ${verdict.reason}. La posizione è ancora aperta.`,
+            data: { outcome: verdict.outcome, reason: verdict.reason, source: routing.target }
+          });
+        }
+
+        if (verdict.outcome === 'partial') {
+          logger.warn(`Chiusura manuale (${label}) di ${coin} PARZIALE: ${verdict.reason}, residuo ${verdict.remaining}`);
+          this.io.emit('perps:dashboardRefresh', { reason: 'close_partial', coin });
+          return res.status(409).json({
+            success: false,
+            error: `Chiusura PARZIALE su ${coin} (posizione ${label}): ${verdict.reason}. Restano ${verdict.remaining} aperti.`,
+            data: { outcome: verdict.outcome, filled: verdict.filled, remaining: verdict.remaining, source: routing.target, result }
+          });
+        }
+
+        this.io.emit('perps:position', { coin, closed: true, source: routing.target });
         // Notifica dashboard: ricarica bots + posizioni immediatamente
         this.io.emit('perps:dashboardRefresh', { reason: 'position_closed', coin });
-        res.json({ success: true, data: result });
+        res.json({ success: true, data: { ...result, outcome: verdict.outcome, source: routing.target } });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });
       }
@@ -2054,6 +2213,51 @@ class ArbitrageBotServer {
     });
 
     /**
+     * ISSUE #27 / #26 — INTERNAL PLACE ORDER PAPER: lo stato simulato lo scrive
+     * solo chi esegue i bot.
+     *
+     * Quarto membro della famiglia `/internal/*`, stesso disegno di
+     * `bot-control`: `place_order_paper` invocato dal processo MCP Stdio mutava
+     * il `paperBroker` LOCALE — la seconda sorgente di scritture su
+     * (account, coin) che rende il merge di `_save()` un last-writer-wins
+     * (issue #26). La Parte 1 di #7 aveva dato a Express la proprietà esclusiva
+     * del TICK LOOP; questa la estende all'ultima scrittura rimasta fuori.
+     *
+     * Esegue `placeOrderPaperLocal` e NON `handlePlaceOrderPaper`: chiamare il
+     * guscio significherebbe dipendere dal ruolo dichiarato di questo processo
+     * per non bussare a sé stessi. Qui l'esecuzione è locale per definizione.
+     *
+     * I guardrail (blacklist, velocity, uniqueness, risk ceiling) girano DENTRO
+     * quella funzione, quindi restano tutti applicati: questa rotta non è una
+     * scorciatoia che li salta. Come `bot-control`, muove denaro simulato oggi e
+     * reale domani, e il cancello IP è l'unica cosa che la separa dalla rete.
+     */
+    app.post('/internal/mcp/place-order-paper', async (req, res) => {
+      const ip = req.ip || req.socket?.remoteAddress || '';
+      if (!isInternalIp(ip)) {
+        logger.warn(`/internal/mcp/place-order-paper rifiutato da IP non loopback: ${ip}`);
+        return res.status(403).json({ success: false, error: 'Accesso non consentito' });
+      }
+      try {
+        // ISSUE #26 — `paperBroker._save()` rifiuta le scritture di un processo
+        // che non possiede il tick loop. Questa rotta è la superficie HTTP di
+        // Express, cioè il proprietario PER COSTRUZIONE: la sua autorità non
+        // viene dal flag globale di `processRole` (è la stessa ragione per cui
+        // chiama `placeOrderPaperLocal` e non il guscio, che con un ruolo MCP
+        // dichiarato busserebbe a sé stessa). Lo scope lo dice esplicitamente,
+        // invece di lasciarlo dipendere da come il processo si è dichiarato.
+        const out = await paperBroker.asLoopOwner(() => placeOrderPaperLocal(req.body || {}));
+        // L'esito dell'ORDINE non è l'esito della RICHIESTA: un guardrail che
+        // rifiuta è una risposta valida e va riportata così com'è, con 200, o il
+        // chiamante non potrebbe distinguerla da un guasto del trasporto.
+        return res.json(out);
+      } catch (err) {
+        logger.error('Errore /internal/mcp/place-order-paper:', err.message);
+        return res.status(500).json({ success: false, error: err.message, message: err.message });
+      }
+    });
+
+    /**
      * CRIT #7 — INTERNAL BOT STATES: lo stato dei bot per chi non li esegue.
      *
      * Da quando il processo MCP non tiene istanze ticking, il suo `botManager`
@@ -2408,6 +2612,9 @@ class ArbitrageBotServer {
         // ticcare dopo il boot, nessuno lo rimette in moto. Questo lo fa —
         // solo in quella direzione, mai riavviando un bot fermato apposta.
         botManager.startReconciliationWatcher();
+        // ISSUE #58 — il caso opposto del riconciliatore: la posizione reale è
+        // ancora là e nessun bot `running` la sorveglia. Avvisa, non ripara.
+        botManager.startUnmanagedPositionWatcher();
         // ADV-02: retention dei transcript di chat applicata all'avvio (oltre che
         // alla creazione di una nuova conversazione), così un deploy fermo per
         // settimane non si ritrova con mesi di storico oltre la soglia.
@@ -2535,3 +2742,17 @@ if (process.argv[1] === __filename) {
 
 // Per Vercel, esportiamo l'app express
 export default server.app;
+
+/**
+ * L'ISTANZA del server, accanto all'app.
+ *
+ * Serve ai test che invocano gli handler REALI presi dal router stack (seam già
+ * usato da `killSwitchWebNotify`, `botUpdatePushLoopback` e altri): quegli
+ * handler sono closure su `this`, quindi `this.io.emit` non è osservabile
+ * dall'app Express da sola. E gli emit socket NON sono un dettaglio decorativo —
+ * `perps:position {closed:true}` è ciò che fa sparire una posizione dalla
+ * dashboard, cioè un effetto visibile all'operatore che va potuto asserire
+ * (issue #55). Nessun comportamento di produzione cambia: è solo un export in
+ * più sullo stesso singleton.
+ */
+export { server as serverInstance };

@@ -102,12 +102,42 @@ class ExecutionAgent {
     return { paused: action.botId };
   }
 
+  /**
+   * ISSUE #55 — `if (r.error) throw` non era una verifica completa.
+   *
+   * `closePosition` → `placeMarketOrder` è un limit IoC: su un book sottile
+   * Hyperliquid non lancia, RISOLVE con l'ordine rifiutato e `oid: null`. Il
+   * messaggio d'errore c'è quasi sempre — ed è il caso che `r.error`
+   * intercettava — ma un oid nullo senza messaggio e un riempimento PARZIALE
+   * passavano entrambi per successo: `order.filled` in audit, `ORDER_FILLED` sul
+   * bus, proposta segnata `approved` e la notifica «✅ Proposta eseguita», con la
+   * posizione ancora aperta sull'exchange.
+   *
+   * LANCIARE è la cosa giusta qui, e non serve nessun meccanismo di ritentativo
+   * proprio: il `catch` di `execute()` rilascia già la prenotazione di
+   * idempotenza (cache + `unmarkActionExecuted`), scrive `order.error` e
+   * pubblica `ORDER_ERROR` invece di `ORDER_FILLED`; `proposals.approve` lascia
+   * allora la proposta `pending`. Il ritentativo è quindi una nuova approvazione
+   * UMANA, non un loop automatico — nessun rischio del ciclo di riconciliazione
+   * fittizia visto su NEAR-PERP, dove a richiamare la chiusura era un tick.
+   *
+   * Un riempimento parziale lancia anch'esso: l'azione approvata era «chiudi la
+   * posizione», e mezza posizione chiusa non è quell'azione. Il messaggio dice
+   * quanto è passato e quanto resta, perché il residuo cambia cosa deve fare la
+   * persona che rilegge la proposta.
+   */
   async _close(action) {
     const { masterAddress, coin, network } = action;
     if (!masterAddress || !coin) throw new Error('close richiede masterAddress e coin');
     const r = await client.closePosition({ masterAddress, coin }, network);
-    if (r.error) throw new Error(r.error);
-    return { closed: coin };
+    const verdict = riskManager.interpretCloseResult(r, r?.requestedSz ?? action.size);
+    if (verdict.outcome === 'rejected') {
+      throw new Error(`chiusura di ${coin} NON eseguita: ${verdict.reason} — posizione ancora aperta`);
+    }
+    if (verdict.outcome === 'partial') {
+      throw new Error(`chiusura di ${coin} PARZIALE: ${verdict.reason} — restano ${verdict.remaining} aperti`);
+    }
+    return { closed: coin, filled: verdict.filled, sizeKnown: verdict.sizeKnown };
   }
 
   async _tightenSl(action) {

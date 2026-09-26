@@ -1945,10 +1945,56 @@ class PerpsApp {
       const botCell = p.botName
         ? `<span class="hist-bot">${p.botName === 'Manuale' ? '✋ Manuale' : '🤖 ' + p.botName}</span>`
         : '<span class="muted">—</span>';
+
+      // Riga SIMULATA (issue #35, parte UI). Due interventi sulla stessa riga.
+      //
+      // 1. Il badge PAPER. Dopo PR #33 le posizioni paper compaiono in questa
+      //    tabella, ma niente nel markup diceva QUALI lo fossero: l'utente non
+      //    poteva distinguerle nemmeno volendo. Stessa grammatica dello storico
+      //    operazioni (`_renderFills`), così le due tabelle si leggono uguale.
+      //
+      // 2. Niente pulsante "Chiudi". `POST /api/perps/positions/:coin/close`
+      //    instrada sempre a `hyperliquid.closePosition` — il broker REALE —
+      //    senza guardare `isPaper`. Oggi è innocuo (account reale vuoto ⇒ la
+      //    chiamata fallisce e nessun ordine parte), ma nello scenario misto
+      //    (bot reale e bot paper sulla stessa coin) chiuderebbe la posizione
+      //    VERA mentre l'utente crede di chiudere la simulata.
+      //
+      // PERCHÉ NASCONDERE E NON RIETICHETTARE «Chiudi (simulata)»: quella
+      // etichetta prometterebbe un'azione che il codice NON esegue, e renderebbe
+      // il click più sicuro di quanto sia — l'opposto di quello che serve qui.
+      // Un pulsante che non c'è non può mentire. Al suo posto però non resta un
+      // buco: un marcatore col motivo, perché una riga senza azioni e senza
+      // spiegazione è a sua volta una mezza verità.
+      //
+      // Il marcatore dice che la chiusura la fa il bot (TP/SL o segnale di
+      // uscita) e NON suggerisce di fermare il bot: `botManager.stopBot`
+      // interrompe soltanto i tick, la posizione resta aperta (verificato).
+      //
+      // Il grafico resta su entrambe: si toglie la sola azione che può fare
+      // danno, leggere il mercato non ne fa.
+      //
+      // Confronto stretto su `isPaper`: `riskManager.mergeAccountViews` lo
+      // valorizza su OGNI riga di `/api/perps/account`, quindi nel payload vero
+      // è sempre un booleano. Una riga senza il campo non viene da là, e l'unica
+      // cosa che si sa di lei è ciò che l'endpoint fa davvero — instradare al
+      // broker reale — quindi mostrare il pulsante la descrive correttamente.
+      //
+      // TEMPORANEO: quando il routing backend sarà verificato corretto (parte di
+      // Bruno sulla stessa issue), il pulsante torna anche qui e l'etichetta
+      // potrà dire la verità. Test: `test/paperPositionCloseUi.test.js`.
+      const isPaper = p.isPaper === true;
+      const paperBadge = isPaper
+        ? ' <span class="testnet-badge" style="font-size:.6em;padding:1px 4px;vertical-align:middle">PAPER</span>'
+        : '';
+      const closeAction = isPaper
+        ? `<span class="muted" style="font-size:.75em" title="Posizione simulata: la chiusura manuale da qui non è disponibile, perché l'endpoint di chiusura instrada al broker reale. La chiude il bot, con i suoi TP/SL o con un segnale di uscita.">gestita dal bot</span>`
+        : `<button class="btn btn-sm btn-danger" onclick="perps.closePosition('${coin}')">Chiudi</button>`;
+
       return `<tr>
         <td>${opened}</td>
         <td>${botCell}</td>
-        <td>${p.coin}</td>
+        <td>${p.coin}${paperBadge}</td>
         <td><span class="side-badge ${p.side}">${p.side.toUpperCase()}</span></td>
         <td>${this.fmtNum(p.size)}</td>
         <td>${this.fmtUsd(p.entryPx)}</td>
@@ -1957,7 +2003,7 @@ class PerpsApp {
         <td>${p.liquidationPx ? this.fmtUsd(p.liquidationPx) : '—'}</td>
         <td class="pos-actions">
           <button class="btn btn-sm btn-outline" onclick="perps.openChart('${coin}')">📊</button>
-          <button class="btn btn-sm btn-danger" onclick="perps.closePosition('${coin}')">Chiudi</button>
+          ${closeAction}
         </td>
       </tr>`;
     }).join('');
@@ -3160,6 +3206,23 @@ class PerpsApp {
     return `https://${host}/explorer/tx/${hash}`;
   }
 
+  /**
+   * Tabella dello storico operazioni ("Posizioni" → sotto-tab "Storico").
+   *
+   * Escaping (issue #22, stessa classe di #9): `f.botName` deriva da `bots.name`
+   * (`/api/perps/fills` in src/server.js), cioè lo STESSO campo scritto
+   * dall'utente nel modale di creazione bot o da un agente esterno (Hermes) che
+   * #9 aveva già identificato come vettore sulla card — solo che questa
+   * superficie non era mai stata censita. `f.coin`, `f.dir` e `f.botId` arrivano
+   * dallo stesso giro; l'hash finisce in un `href=`, dove l'evasione è la
+   * virgoletta e non `<`. `_escapeHtml` copre entrambi i contesti (`& < > " '`).
+   *
+   * Due cose che NON passano dall'escaping, di proposito:
+   *  - il confronto `f.botName === 'Manuale'`, che sceglie l'icona: va fatto sul
+   *    valore grezzo, prima della trasformazione;
+   *  - `/Long/i.test(f.dir)`, che sceglie la classe del badge: è un test su
+   *    testo, non un'interpolazione nel markup.
+   */
   _renderFills(fills) {
     const tbody = document.getElementById('fillsList');
     const empty = document.getElementById('noFills');
@@ -3177,16 +3240,16 @@ class PerpsApp {
       const pnl = f.closedPnl;
       const pnlCell = pnl != null ? `<span class="${pnl >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(pnl)}</span>` : '—';
       const txLink = f.hash && f.hash !== '0x0000000000000000000000000000000000000000000000000000000000000000'
-        ? `<a href="${this._explorerTxUrl(f.hash)}" target="_blank" rel="noopener">🔗</a>` : '—';
+        ? `<a href="${this._escapeHtml(this._explorerTxUrl(f.hash))}" target="_blank" rel="noopener">🔗</a>` : '—';
       const botCell = f.botName
-        ? `<span class="hist-bot">${f.botName === 'Manuale' ? '✋ Manuale' : '🤖 ' + f.botName}</span>`
-        : (f.botId ? `<span class="hist-bot">🤖 Bot #${String(f.botId).slice(0, 4)}</span>` : '<span class="muted">—</span>');
+        ? `<span class="hist-bot">${f.botName === 'Manuale' ? '✋ Manuale' : '🤖 ' + this._escapeHtml(f.botName)}</span>`
+        : (f.botId ? `<span class="hist-bot">🤖 Bot #${this._escapeHtml(String(f.botId).slice(0, 4))}</span>` : '<span class="muted">—</span>');
       const paperBadge = f.isPaper ? ' <span class="testnet-badge" style="font-size:.6em;padding:1px 4px;vertical-align:middle">PAPER</span>' : '';
       return `<tr>
         <td>${date}</td>
         <td>${botCell}</td>
-        <td>${f.coin}${paperBadge}</td>
-        <td><span class="${dirClass}">${f.dir || (isLong ? 'Buy' : 'Sell')}</span></td>
+        <td>${this._escapeHtml(f.coin)}${paperBadge}</td>
+        <td><span class="${dirClass}">${this._escapeHtml(f.dir || (isLong ? 'Buy' : 'Sell'))}</span></td>
         <td>${this.fmtNum(f.sz)}</td>
         <td>${this.fmtUsd(f.px)}</td>
         <td>${pnlCell}</td>
@@ -3684,6 +3747,25 @@ class PerpsApp {
   /**
    * Costruisce la riga "Strategia" della card: pill per ogni regola configurata.
    * Se non ci sono regole restituisce una stringa muted.
+   *
+   * Escaping (issue #22, stessa classe di #9). `b.config` non è un dato di
+   * sistema: lo scrive l'editor bot e, da quando esiste la coda advisory, anche
+   * una patch approvata via agente. Tre punti, con gravità diversa:
+   *
+   *  - Il TESTO della pill è il vettore vero: `_describeRule` restituisce testo
+   *    (non markup) montando i campi grezzi della regola — `type`, `indicator`,
+   *    `pattern`, `op`, `value`, `cond`, `signal` — e finiva nel markup nudo. Si
+   *    escapa QUI, sul valore di ritorno, e non dentro `_describeRule`: così un
+   *    campo nuovo aggiunto là è coperto per costruzione e la funzione mantiene
+   *    il suo contratto di "produce testo, non HTML".
+   *  - Il `title=` usava `.replace(/"/g,'&quot;')` a mano. Con `"` come
+   *    delimitatore dell'attributo l'evasione non passava — reggeva per la
+   *    scelta del delimitatore, non per costruzione. Ma la `&` non escapata
+   *    storpiava il tooltip (un `&quot;` scritto dall'utente veniva mostrato
+   *    come `"`), e un domani basta cambiare delimitatore per aprire il buco.
+   *  - `candleInterval` e il FALLBACK di `direction` (il valore fuori whitelist)
+   *    arrivavano nel markup nudi. La mappa delle frecce resta intatta: si
+   *    escapa solo il ramo che mostra il valore grezzo.
    */
   _describeEntryRules(b) {
     const cfg = b.config || {};
@@ -3693,10 +3775,11 @@ class PerpsApp {
     const pills = rules.map(r => {
       const sig = (r.signal || '').toLowerCase();
       const cls = sig === 'short' ? 'short' : (sig === 'long' ? 'long' : '');
-      return `<span class="rule-pill ${cls}" title="${JSON.stringify(r).replace(/"/g,'&quot;')}">${this._describeRule(r)}</span>`;
+      return `<span class="rule-pill ${cls}" title="${this._escapeHtml(JSON.stringify(r))}">${this._escapeHtml(this._describeRule(r))}</span>`;
     });
-    const dir = cfg.direction ? `<span class="muted" style="font-size:.75em">${{ both:'↕', long:'↑', short:'↓' }[cfg.direction] || cfg.direction}</span>` : '';
-    const tf  = cfg.candleInterval ? `<span class="muted rule-pill">${cfg.candleInterval}</span>` : '';
+    const arrow = { both:'↕', long:'↑', short:'↓' }[cfg.direction];
+    const dir = cfg.direction ? `<span class="muted" style="font-size:.75em">${arrow || this._escapeHtml(cfg.direction)}</span>` : '';
+    const tf  = cfg.candleInterval ? `<span class="muted rule-pill">${this._escapeHtml(cfg.candleInterval)}</span>` : '';
     return `${pills.join(`<span class="rule-logic">${logic}</span>`)} ${tf}${dir}`;
   }
 
@@ -4021,8 +4104,12 @@ class PerpsApp {
         <span class="bot-stats"><span class="${wrClass}">${(b.stats.winRate * 100).toFixed(0)}% win</span> · ${b.stats.trades} trade · PF ${pf} · <span class="${b.stats.totalPnl >= 0 ? 'profit-positive' : 'profit-negative'}">${this.fmtUsd(b.stats.totalPnl)}</span></span></div>`;
     }
     const strat = this._botStrategy?.[b.id];
+    // `rationale` è testo generato dall'LLM e può citare il nome del bot, cioè
+    // testo utente (issue #22). Il `.replace(/"/g,'&quot;')` di prima copriva solo
+    // le virgolette: reggeva finché il delimitatore dell'attributo è `"`, ma non
+    // escapava `&` (tooltip storpiato) né l'apice. `_escapeHtml` copre `& < > " '`.
     const stratBadge = strat
-      ? `<div class="bot-strategy-badge" title="${(strat.rationale || '').replace(/"/g, '&quot;')}">🧠 da strategia AI${strat.decidedAt ? ' · ' + new Date(strat.decidedAt).toLocaleDateString('it-IT') : ''}</div>`
+      ? `<div class="bot-strategy-badge" title="${this._escapeHtml(strat.rationale || '')}">🧠 da strategia AI${strat.decidedAt ? ' · ' + new Date(strat.decidedAt).toLocaleDateString('it-IT') : ''}</div>`
       : '';
 
     // AGENT-AWARE: badge actor — usa i campi arricchiti dall'API admin view se disponibili
@@ -4031,7 +4118,15 @@ class PerpsApp {
     const actorIcon = b.actorIcon || (isHermes ? '🤖' : '👤');
     const actorLabel = b.actorLabel || (isHermes ? 'Hermes' : 'Manuale');
     const agentBadgeClass = b.actorColor || (isHermes ? 'agent-badge-hermes' : 'agent-badge-manual');
-    const agentBadge = `<span class="agent-badge ${agentBadgeClass}" title="Controllato da: ${actorLabel} (${agentId})">${actorIcon} ${actorLabel}</span>`;
+    // Issue #22: di questi quattro campi NESSUNO era escapato, ed è il punto più
+    // sfruttabile dei tre nella card — `actor_label`/`actor_id` li scrive il
+    // chiamante di `botManager.createBot` (verificato: solo `id` è un randomUUID
+    // interno), quindi un agente esterno come Hermes. Un `"` in `actorLabel`
+    // chiudeva il `title=` e permetteva di iniettare un attributo vero.
+    // `actorColor` finisce in `class=` e `actorIcon` nel testo: stessa provenienza,
+    // stesso trattamento. I fallback restano intatti: si escapa il valore finale.
+    const actorLabelSafe = this._escapeHtml(actorLabel);
+    const agentBadge = `<span class="agent-badge ${this._escapeHtml(agentBadgeClass)}" title="Controllato da: ${actorLabelSafe} (${this._escapeHtml(agentId)})">${this._escapeHtml(actorIcon)} ${actorLabelSafe}</span>`;
 
     // Budget Ceiling info. Il separatore " · " iniziale è sparito con lo
     // spostamento nella riga di contesto: lì la spaziatura la fa il `gap` del
@@ -4086,7 +4181,7 @@ class PerpsApp {
     // Sicurezza: se il bot è gestito da agente, mostra l'icona lock sul pulsante edit
     const isManaged = Boolean(b.is_managed_by_agent || isHermes);
     const editBtn = isManaged
-      ? `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Bot gestito da Agente (${actorLabel}): richiede sblocco">🔒 ✏️</button>`
+      ? `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Bot gestito da Agente (${actorLabelSafe}): richiede sblocco">🔒 ✏️</button>`
       : `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Modifica bot">✏️</button>`;
 
     // Riga strategia: traduzione human-readable delle entryRules dal config

@@ -35,6 +35,13 @@ import {
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
 /**
+ * Master address del conto simulato condiviso dagli agenti. Era una stringa
+ * letterale ripetuta in tre punti: una costante sola evita che uno dei tre si
+ * disallinei senza che nessun test se ne accorga.
+ */
+export const PAPER_MASTER = 'paper_hermes';
+
+/**
  * `mergeStrategyConfig` ed `extractBotConfig` sono definite in
  * `perps/strategySchema.js` (funzioni pure sulla configurazione di strategia) e
  * ri-esportate qui: hanno un secondo consumatore fuori dal layer MCP
@@ -330,8 +337,65 @@ export async function handleBotControl({ bot_id, action }) {
  * - Position Uniqueness Gate (no doppio ingresso nello stesso verso su bot+coin),
  *   su due sorgenti: riga `positions` in DB e posizioni dell'account paper
  * - Risk Ceiling Hard-Gate (Max Leverage <= 5x, Account Exposure <= maxPositionUsd, Daily Loss Limit)
+ *
+ * ISSUE #27 / #26 — CHI SCRIVE SUL paperBroker. Questa funzione è un GUSCIO:
+ * se il processo non possiede il tick loop, delega a Express invece di mutare lo
+ * stato simulato in locale. Vedi il commento su `placeOrderPaperLocal`.
  */
-export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = null, leverage = null }) {
+export async function handlePlaceOrderPaper(args) {
+  // CRIT #7, Parte 1 estesa a `place_order_paper`: lo stato simulato lo scrive
+  // SOLO il processo che possiede il tick loop. Vedi `placeOrderPaperLocal` per
+  // il perché la delega è l'unico esito accettabile e il ripiego locale no.
+  if (!ownsTickLoop()) return delegatePlaceOrderPaper(args);
+  return placeOrderPaperLocal(args);
+}
+
+/**
+ * Delega dell'ordine paper al processo che possiede il tick loop (Express).
+ *
+ * PERCHÉ NON C'È UN RIPIEGO LOCALE, a differenza di `readBotStates`. Quella è
+ * una LETTURA: se Express non risponde si degrada al DB e si dichiara il
+ * degrado, perché una fotografia parziale è comunque meglio di niente. Questa è
+ * una SCRITTURA sullo stato simulato, e il ripiego locale sarebbe esattamente il
+ * difetto da eliminare — la seconda sorgente di scritture su (account, coin) che
+ * rende il merge di `_save()` un last-writer-wins (issue #26). Un ordine non
+ * eseguito è un fatto recuperabile (si ritenta); uno stato simulato corrotto da
+ * due scritture concorrenti non lo è, e non lascia nemmeno una traccia da cui
+ * accorgersene.
+ *
+ * Quindi: Express non raggiungibile = RIFIUTO ESPLICITO, con detto chiaramente
+ * che nessun ordine è partito in nessun processo. È l'alternativa che l'issue
+ * #26 stessa indica come accettabile («un rifiuto esplicito invece di una race
+ * silenziosa»), e costa meno di un lock distribuito che oggi non esiste.
+ */
+async function delegatePlaceOrderPaper(args) {
+  const res = await requestInternal('/internal/mcp/place-order-paper', args, { timeoutMs: 20000 });
+  if (!res.reached) {
+    const msg = `Processo Express non raggiungibile (${res.error}): l'ordine paper NON è stato eseguito in nessun processo. Lo stato simulato lo scrive solo chi esegue i bot; riprova quando il server principale risponde.`;
+    logMcpAudit('place_order_paper', { ...args, error: msg, delegated: true, executed: false, success: false });
+    return { success: false, error: msg, message: msg };
+  }
+  // La rotta ha già scritto il suo audit (ha eseguito lei): qui non si duplica.
+  // Un 4xx/5xx con un corpo vuoto resta comunque un fallimento da riportare.
+  if (!res.body) {
+    const msg = `Il processo Express ha risposto HTTP ${res.status} senza corpo: esito dell'ordine paper IGNOTO. Verificare lo stato della posizione prima di ritentare.`;
+    logMcpAudit('place_order_paper', { ...args, error: msg, delegated: true, success: false });
+    return { success: false, error: msg, message: msg };
+  }
+  return { ...res.body, delegated: true };
+}
+
+/**
+ * Esecuzione LOCALE dell'ordine paper — il corpo storico di questa funzione.
+ *
+ * Separata dal guscio di proposito, e non per eleganza: la rotta
+ * `/internal/mcp/place-order-paper` chiama QUESTA, non `handlePlaceOrderPaper`.
+ * Così anche se il ruolo del processo fosse dichiarato male (o non dichiarato
+ * affatto) la rotta non può mettersi a bussare a sé stessa — il default di
+ * `processRole` è «possiedo il loop», ma dipendere da quel default per evitare
+ * un anello chiuso sarebbe fragile. Stesso schema di `botManager.applyLifecycleLocal`.
+ */
+export async function placeOrderPaperLocal({ bot_id, side, size, entry_price = null, leverage = null }) {
   if (!bot_id) {
     return { success: false, message: 'Parametro bot_id obbligatorio.' };
   }
@@ -361,7 +425,7 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
 
   const coin = botRow.coin;
   const network = botRow.network || 'testnet';
-  const masterAddress = botRow.masterAddress || botRow.master_address || 'paper_hermes';
+  const masterAddress = botRow.masterAddress || botRow.master_address || PAPER_MASTER;
   const botConfig = extractBotConfig(botRow);
 
   // GUARDRAIL 1: INSTRUCTION OVERRIDE & BLACKLIST
@@ -531,6 +595,50 @@ export async function handlePlaceOrderPaper({ bot_id, side, size, entry_price = 
   }
 }
 
+/** Reti che il client sa indirizzare: tutto il resto non è una rete. */
+const KNOWN_NETWORKS = new Set(['testnet', 'mainnet']);
+
+/**
+ * ISSUE #19 — quale rete usare per leggere il conto simulato condiviso.
+ *
+ * CALCOLO PURO (nessun I/O, nessun DB): riceve le righe `bots` e restituisce la
+ * rete da passare al paperBroker. È pura di proposito — la decisione è l'unica
+ * parte interessante e va testabile senza montare uno snapshot intero.
+ *
+ * PERCHÉ NON BASTA UN DEFAULT. `paperBroker` indicizza lo stato sul solo master
+ * (`_acc(master)`), quindi la rete non sposta il conto: decide i mid con cui
+ * `_snapshot` marca a mercato e con cui `_evaluateTriggers` valuta i TP/SL
+ * simulati. Con la rete sbagliata l'uPNL e i trigger di un bot sono calcolati sui
+ * prezzi di un'ALTRA rete — numeri plausibili e mai segnalati.
+ *
+ * DISCORDANZA. Più bot possono condividere lo stesso conto simulato dichiarando
+ * reti diverse: è una configurazione incoerente, non un caso da appianare. Qui si
+ * sceglie la MAGGIORANZA (a pari merito l'ordine alfabetico, così l'esito non
+ * dipende dall'ordine delle righe) e si alza il flag `mixed`, che il chiamante
+ * traduce in un alert. Nessuna scelta sarebbe giusta per tutti i bot coinvolti:
+ * l'unica cosa sbagliata è non dirlo.
+ *
+ * @param {Array<object>} botRows righe `bots` grezze (o già camelCase)
+ * @param {string} paperMaster master del conto simulato
+ * @returns {{network: string, networks: string[], mixed: boolean}}
+ */
+export function resolvePaperNetwork(botRows, paperMaster = PAPER_MASTER) {
+  const counts = new Map();
+  for (const row of Array.isArray(botRows) ? botRows : []) {
+    const master = String(row?.masterAddress || row?.master_address || paperMaster).toLowerCase();
+    if (master !== String(paperMaster).toLowerCase()) continue;
+    const net = row?.network;
+    // Una rete illeggibile non è una rete: non conta come voto e non fa
+    // "discordanza". Il default si applica solo se NESSUNO ha votato.
+    if (!KNOWN_NETWORKS.has(net)) continue;
+    counts.set(net, (counts.get(net) || 0) + 1);
+  }
+  const networks = [...counts.keys()].sort();
+  if (networks.length === 0) return { network: 'testnet', networks: [], mixed: false };
+  const network = networks.reduce((best, n) => (counts.get(n) > counts.get(best) ? n : best), networks[0]);
+  return { network, networks, mixed: networks.length > 1 };
+}
+
 /**
  * 3. GET SYSTEM SNAPSHOT
  * Ritorna lo stato consolidato di tutti i bot, P&L cumulativo, uPNL e alert di sistema.
@@ -544,9 +652,12 @@ export async function handleGetSystemSnapshot() {
     const { bots, degraded } = await readBotStates();
     const killSwitch = riskAgent.isKillSwitchOn();
 
-    // Recupera lo stato aggregato paper
-    const paperMaster = 'paper_hermes';
-    const paperAcc = await paperBroker.getAccount(paperMaster, 'testnet').catch(() => ({
+    // Recupera lo stato aggregato paper.
+    // ISSUE #19 — la rete si LEGGE dalla configurazione dei bot che usano questo
+    // conto simulato, non è più scritta a mano: vedi `resolvePaperNetwork`.
+    const paperMaster = PAPER_MASTER;
+    const paperNet = resolvePaperNetwork(db.listBots(), paperMaster);
+    const paperAcc = await paperBroker.getAccount(paperMaster, paperNet.network).catch(() => ({
       equity: 10000,
       positions: [],
       accountValue: 10000
@@ -572,6 +683,16 @@ export async function handleGetSystemSnapshot() {
         level: 'warning',
         type: 'bot_states_degraded',
         message: `Stato dei bot letto dal DB e non dal processo che li esegue (${degraded}): status attendibile, ma ultima valutazione, ultimo tick e posizione in corso NON sono in questa risposta.`
+      });
+    }
+    if (paperNet.mixed) {
+      // Non è recuperabile in automatico: il conto simulato è UNO e i bot che lo
+      // condividono dichiarano reti diverse, quindi qualunque rete si scelga
+      // l'uPNL di una parte dei bot è marcato sui prezzi sbagliati.
+      alerts.push({
+        level: 'warning',
+        type: 'paper_network_mixed',
+        message: `I bot sul conto simulato ${paperMaster} dichiarano reti diverse (${paperNet.networks.join(', ')}): equity e uPNL di questo snapshot sono marcati sui prezzi di ${paperNet.network}. Allineare la rete dei bot o separare i conti simulati.`
       });
     }
 
@@ -912,7 +1033,7 @@ export async function handleRegisterBot({
   name,
   coin,
   network = 'testnet',
-  master_address = 'paper_hermes',
+  master_address = PAPER_MASTER,
   config = {},
   max_allocation_usd = null,
   actor_label = 'Hermes',

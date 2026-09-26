@@ -62,6 +62,121 @@ export function simulatedSlippage(tolerance) {
 }
 
 /**
+ * Margine con cui `getRealizedPnl` allarga all'indietro la finestra dei fill.
+ *
+ * NON è arbitrario e non va stretto per "sicurezza": `bot._registerClose` passa
+ * `position.openedAt`, cioè il `Date.now()` scritto in DB DOPO che il fill di
+ * apertura è già avvenuto. Senza margine il fill di apertura — e quindi la sua
+ * FEE — cadrebbe fuori dalla finestra, e il `net` di ogni trade risulterebbe
+ * migliore del vero. Il margine copre lo scarto fra il fill e la scrittura.
+ */
+const OPEN_FILL_MARGIN_MS = 1000;
+
+/**
+ * ISSUE #18 — quali fill, fra quelli nella finestra temporale, appartengono
+ * davvero alla posizione CORRENTE.
+ *
+ * IL DIFETTO. La finestra è `openedAt - OPEN_FILL_MARGIN_MS` (vedi sopra: serve
+ * a non perdere il fill di apertura). Il margine però è cieco su cosa lascia
+ * entrare: se sulla STESSA coin una posizione riapre entro un secondo dalla
+ * chiusura della precedente, dentro la finestra finisce anche il fill di
+ * CHIUSURA di quella precedente e il suo `closedPnl` viene sommato al PnL della
+ * posizione corrente. Misurato in produzione sulla flotta OPS-FLEET-02: `pnl
+ * -22.95` su un trade che valeva `-11.6`, cioè due chiusure contate come una.
+ *
+ * PERCHÉ NON SI RISOLVE STRINGENDO IL MARGINE. Un margine più piccolo non
+ * elimina la sovrapposizione, la rende solo più rara e più difficile da
+ * riprodurre — e toglie la garanzia per cui il margine esiste. La finestra
+ * temporale non è lo strumento giusto per separare due posizioni: la separazione
+ * è STRUTTURALE.
+ *
+ * SERVONO DUE PASSAGGI, e nessuno dei due basta da solo. Li ho scoperti in
+ * quest'ordine, e li lascio scritti perché il secondo sembra ridondante finché
+ * non si guarda la forma vera dei dati.
+ *
+ * PASSO 1 — la CODA orfana in testa alla finestra. Il caso di produzione è
+ * questo: la posizione precedente era aperta da molto (il suo `Open` è FUORI
+ * finestra) e si è chiusa dentro. La finestra comincia quindi con una chiusura
+ * senza apertura. Quei fill appartengono alla posizione precedente se, più
+ * avanti, un `Open` comincia quella nuova — e in quel caso si scartano.
+ * Se invece un `Open` non c'è affatto, quella coda è tutto ciò che si ha ed È la
+ * posizione corrente: è il caso di una posizione ADOTTATA da `bot._reconcile`,
+ * il cui `openedAt` è molto posteriore ai fill veri. Lì non si taglia niente —
+ * tagliare butterebbe via un PnL misurato per sostituirlo con il fallback
+ * dell'unrealized, cioè un numero inventato.
+ *
+ * PASSO 2 — la SIZE NETTA, per la posizione precedente contenuta INTERA nella
+ * finestra (apertura compresa). Il passo 1 da solo non la vede: il primo `Open`
+ * della finestra è il SUO, quindi non c'è nessuna coda orfana da tagliare e il
+ * difetto sopravvive — verificato da test, era la mia prima versione del fix.
+ * Si ripercorre allora la sequenza tenendo la size corrente (`Open …` somma,
+ * `Close …` sottrae): ogni volta che torna a zero una posizione è finita e il
+ * fill successivo ne apre un'altra. La posizione corrente è l'ULTIMO segmento.
+ * Questo regge da solo tutti gli altri casi veri — il DCA (la size cresce, stesso
+ * segmento), il TP parziale (la size scende ma non a zero, stesso segmento), la
+ * chiusura piena (la size azzera, segmento chiuso).
+ *
+ * Non si confrontano timestamp: a pari millisecondo non sono ordinabili. Conta
+ * l'ordine di inserimento in `acc.fills`, cronologico, che questa funzione
+ * preserva.
+ *
+ * Funzione PURA (nessun I/O, nessuno stato): vive qui perché interpreta la
+ * sequenza di fill, che è il dato di questo file, e non è matematica di rischio —
+ * stessa scelta già fatta per `bot._classifyCloseFills`.
+ *
+ * @param {Array<{dir: string, sz: number}>} inWindow fill della coin già filtrati
+ *   per finestra temporale, in ordine di inserimento
+ * @returns {Array} l'ultimo segmento di `inWindow` (sottoinsieme, stesso ordine)
+ */
+export function fillsOfCurrentPosition(inWindow) {
+  if (!Array.isArray(inWindow) || inWindow.length === 0) return [];
+
+  const isOpen = (f) => /open/i.test(f?.dir || '');
+
+  // PASSO 1 — nessuna apertura in finestra: è la coda di una posizione adottata,
+  // non c'è confine da trovare e non si tocca niente.
+  const firstOpen = inWindow.findIndex(isOpen);
+  if (firstOpen < 0) return inWindow;
+  // Scarta la coda orfana della posizione precedente.
+  const fills = firstOpen > 0 ? inWindow.slice(firstOpen) : inWindow;
+
+  // PASSO 2 — segmentazione sulla size netta. Da qui la sequenza comincia per
+  // costruzione con un'apertura, quindi la size parte positiva e `peak > 0`
+  // distingue una chiusura piena da una finestra malformata.
+  const last = fills.length - 1;
+  let start = 0;   // indice di inizio del segmento in corso
+  let size = 0;    // size netta della posizione dentro il segmento
+  let peak = 0;    // massimo raggiunto: serve alla tolleranza relativa
+
+  for (let i = 0; i <= last; i++) {
+    const f = fills[i];
+    const sz = Number(f?.sz);
+    // Una size illeggibile non sposta il confine e non propaga NaN: da sola non
+    // può chiudere né aprire un segmento. Il chiamante la segnala.
+    const delta = Number.isFinite(sz) ? Math.abs(sz) : 0;
+    size += isOpen(f) ? delta : -delta;
+    if (size > peak) peak = size;
+
+    // Chiusura piena: la size torna a zero DOPO essere stata positiva.
+    // La tolleranza è RELATIVA al massimo del segmento — un residuo così piccolo
+    // non è una size scambiabile, è errore di arrotondamento sui float; una
+    // soglia assoluta sarebbe sbagliata su coin con size dell'ordine di 1e-4.
+    //
+    // `peak > 0` è la guardia che distingue "posizione chiusa" da "size mai
+    // salita": senza di essa una sequenza di size illeggibili (tutte 0) sarebbe
+    // letta come una fila di posizioni chiuse e verrebbe tagliata via tutta.
+    if (peak > 0 && size <= peak * 1e-6) {
+      // Se il fill che chiude è l'ULTIMO della finestra, il segmento appena
+      // concluso È la posizione corrente: `start` non si muove, altrimenti si
+      // restituirebbe una lista vuota proprio nel caso che interessa
+      // (`_registerClose` chiama subito dopo la chiusura).
+      if (i < last) { start = i + 1; size = 0; peak = 0; }
+    }
+  }
+  return start > 0 ? fills.slice(start) : fills;
+}
+
+/**
  * Unione di due liste di fill per IDENTITÀ del fill, non "l'ultima vince".
  *
  * I fill non si cancellano mai (cade solo la coda oltre `MAX_PERSISTED_FILLS`),
@@ -666,12 +781,29 @@ export class PaperBroker {
    * `closingFills` espone i fill veri e propri (con il loro `oid`): serve a
    * `bot._registerClose` per capire QUALE ordine ha chiuso la posizione senza
    * fare una seconda lettura. Stessa forma di `hyperliquidClient.getRealizedPnl`.
+   *
+   * ISSUE #18 — il margine di `OPEN_FILL_MARGIN_MS` sulla finestra non basta da
+   * solo: vedi `fillsOfCurrentPosition`, che lo corregge sulla forma della
+   * sequenza invece di stringerlo.
    */
   async getRealizedPnl(masterAddress, coin, sinceTs) {
     const acc = this._acc(masterAddress);
-    const since = sinceTs ? sinceTs - 1000 : 0;
+    const since = sinceTs ? sinceTs - OPEN_FILL_MARGIN_MS : 0;
     const matchCoin = f => f.coin === coin || `${f.coin}-PERP` === coin || f.coin === coin.replace('-PERP', '');
-    const rel = acc.fills.filter(f => matchCoin(f) && f.time >= since);
+    const inWindow = acc.fills.filter(f => matchCoin(f) && f.time >= since);
+    // `sinceTs` falsy = «tutta la storia di questa coin»: è il senso letterale
+    // del parametro e l'uso dei test aggregati, e lì i segmenti NON si separano.
+    // Con un `sinceTs` vero il chiamante sta chiedendo UNA posizione (è come lo
+    // usa `bot._registerClose`, l'unico chiamante di produzione), e il confine
+    // fra posizioni va rispettato — vedi `fillsOfCurrentPosition`.
+    const rel = sinceTs ? fillsOfCurrentPosition(inWindow) : inWindow;
+    // Il confine si calcola sulle size: una size illeggibile lo renderebbe
+    // inaffidabile, e su un percorso che produce il PnL scritto in DB non può
+    // restare una cosa che nessuno viene a sapere.
+    const badSize = inWindow.filter(f => !Number.isFinite(Number(f?.sz)));
+    if (badSize.length) {
+      logger.warn(`Paper broker: ${badSize.length} fill su ${coin} senza size leggibile — il confine fra posizioni in getRealizedPnl potrebbe essere sbagliato`);
+    }
     const closing = rel.filter(f => /close/i.test(f.dir || ''));
     if (!closing.length) return null;
     const closedPnl = closing.reduce((s, f) => s + (f.closedPnl || 0), 0);

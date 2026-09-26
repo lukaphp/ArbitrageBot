@@ -696,6 +696,16 @@ due, e scatta la soglia di assenza: è quello il caso che conta.
 
    Aggiusta `ExecStart` se il repo non è in `/opt/arbitragebot/app`.
 
+   > ⚠️ **Se hai copiato `heartbeat-ping.sh` a mano PRIMA che questo branch
+   > fosse mergiato** (es. per attivare il dead-man's switch prima ancora di
+   > un deploy applicativo completo): quel file è **non tracciato** nel repo
+   > del VPS e il prossimo `git merge`/`git pull` del punto 4 **si rifiuta**
+   > con *"The following untracked working tree files would be overwritten by
+   > merge"*. Non è un conflitto reale — il contenuto in arrivo è lo stesso —
+   > ma va rimosso a mano prima del merge: `rm deploy/monitoring/heartbeat-ping.sh`
+   > (verifica prima con un `diff` contro `git show origin/master:...` che sia
+   > davvero identico, non dare per scontato). Capitato realmente il 26/09/2026.
+
 7. **Verifica che funzioni DAVVERO**, cioè che l'allarme scatti — un check verde non
    prova niente, prova solo che il ping arriva. **Verifica anche che il timer scatti
    da solo** prima di fidartene (punto 6): non basta che il ping manuale funzioni.

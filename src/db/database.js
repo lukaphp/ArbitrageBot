@@ -18,6 +18,9 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import logger from '../utils/logger.js';
+// Funzioni PURE sulla config di strategia (nessuna I/O, nessun ciclo di import:
+// `strategySchema.js` dipende solo da config/config.js).
+import { extractBotConfig, preserveDerivedConfig } from '../perps/strategySchema.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -414,6 +417,22 @@ export class PerpsDatabase {
     const newIsManaged = is_managed_by_agent !== undefined ? (is_managed_by_agent ? 1 : 0)
       : (isManagedByAgent !== undefined ? (isManagedByAgent ? 1 : 0) : undefined);
 
+    // ISSUE-56 — `config` in arrivo SOSTITUISCE `config_json`, ma i campi che
+    // scrive solo il backend (`backtestSummary`) non devono cadere per il solo
+    // fatto che il chiamante non li conosce: il form di modifica della UI
+    // ricostruisce la config da zero e cancellava il verdetto del backtest
+    // pre-flight a ogni rinomina, in silenzio. La conservazione sta QUI e non in
+    // `botManager.updateBot` perché questo è il punto unico da cui passa ogni
+    // scrittura di `config_json` di un bot esistente (UI, Telegram, MCP,
+    // `applyConfigPatch`): un client nuovo è protetto senza doverlo sapere.
+    // Il criterio e le alternative scartate stanno in `preserveDerivedConfig`.
+    const configJson = config == null
+      // Nessuna config nel payload = "non toccarla": si riscrive la stringa
+      // esistente, senza passare da un parse che su un JSON corrotto
+      // sostituirebbe la configurazione con un oggetto vuoto.
+      ? (existing.config_json || '{}')
+      : JSON.stringify(preserveDerivedConfig(extractBotConfig(existing), config));
+
     this.db.prepare(`
       UPDATE bots SET
         name = @name,
@@ -431,7 +450,7 @@ export class PerpsDatabase {
       id,
       name: name ?? existing.name,
       coin: coin ?? existing.coin,
-      configJson: JSON.stringify(config ?? JSON.parse(existing.config_json)),
+      configJson,
       status: status ?? existing.status,
       linkedAgentId: newLinkedAgentId ?? existing.linked_agent_id ?? 'user_manual',
       maxAllocationUsd: newMaxAllocationUsd !== undefined

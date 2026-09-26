@@ -243,6 +243,12 @@ export function deriveRiskAlerts({
   killSwitch = false,
   drawdown = {},
   sourceErrors = [],
+  // ISSUE #58 — posizioni reali vive che nessun bot `running` sta tracciando,
+  // già selezionate da `reconciler.findUnmanagedLivePositions`. Arrivano come
+  // PARAMETRO e non si calcolano qui: servirebbero i bot davvero ticcanti, cioè
+  // `botManager`, e questa funzione deve restare pura (default `[]`, così i
+  // chiamanti che non le passano — backtester, test esistenti — non cambiano).
+  unmanagedPositions = [],
   defaultMaxDailyLossUsd = 1000
 } = {}) {
   const alerts = [];
@@ -295,6 +301,23 @@ export function deriveRiskAlerts({
         'critical', 'exposure-limit', 'Esposizione oltre il limite',
         `Esposizione ${usd(exposure)} su un limite di ${usd(maxExposure)}. Le nuove aperture devono restare bloccate.`,
         'risk', `${Math.round(exposure / maxExposure * 100)}% del cap`
+      );
+    }
+    // ISSUE #58 — una posizione viva che nessuno sorveglia è `critical`, non
+    // `warning`: non c'è guardia stop loss, non c'è uscita su regola, e il sistema
+    // NON la chiuderà da sé. Il testo lo dice esplicitamente, altrimenti un
+    // avviso del genere viene letto come transitorio e si aspetta che passi.
+    if (unmanagedPositions.length) {
+      const elenco = unmanagedPositions
+        .map(u => `${String(u?.position?.side || '?').toUpperCase()} ${u?.coin || '?'}`)
+        .join(', ');
+      add(
+        'critical', 'position-unmanaged',
+        unmanagedPositions.length === 1
+          ? 'Posizione reale senza nessun bot che la gestisce'
+          : `${unmanagedPositions.length} posizioni reali senza nessun bot che le gestisce`,
+        `${elenco}: aperte sull'exchange, nessun bot in esecuzione le sta tracciando. Niente guardia stop loss, niente uscita su regola, niente TP/SL dinamico — l'unica protezione sono i trigger già sul book, che possono non scattare. NON si risolve da sé e il sistema non le chiuderà automaticamente: riavvia il bot, chiudi a mano, o lasciale così consapevolmente.`,
+        'positions', `${unmanagedPositions.length} non sorvegliate`
       );
     }
     if (maxPositions > 0 && positions.length >= maxPositions) {

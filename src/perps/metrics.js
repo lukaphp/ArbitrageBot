@@ -47,7 +47,8 @@ const COUNTER_HELP = {
   sl_verify_failures_total: 'Tick in cui la guardia dello stop loss non è riuscita a leggere gli ordini aperti (cecità, non chiusura).',
   sl_restore_failures_total: 'Ri-piazzamenti falliti di uno stop loss la cui assenza era già stata confermata da una lettura riuscita.',
   close_failures_total: 'Tentativi di chiusura a mercato che non hanno chiuso la posizione: rifiutati dall\'exchange, falliti con errore, o riempiti solo in parte.',
-  heavy_reads_coalesced_total: 'Letture Hyperliquid di peso 20 risparmiate riunendo richieste identiche già in volo sullo stesso wallet.'
+  heavy_reads_coalesced_total: 'Letture Hyperliquid di peso 20 risparmiate riunendo richieste identiche già in volo sullo stesso wallet.',
+  unmanaged_position_episodes_total: 'Episodi in cui una posizione reale aperta sull\'exchange non era tracciata da nessun bot in esecuzione. Conta gli EPISODI (uno per posizione finché la condizione persiste), non i controlli: richiede un intervento umano, non si risolve da sé.'
 };
 
 const startedAt = Date.now();

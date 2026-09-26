@@ -83,7 +83,7 @@ import { calculateDrawdown, mergeDrawdownState, deriveRiskAlerts, summarizeRisk,
 // per "Queue health" nella card EXECUTION STATUS della cockpit.
 import execQueue from './perps/execQueue.js';
 import paperBroker from './perps/paperBroker.js';
-import { reconcileStalePositions } from './perps/reconciler.js';
+import { reconcileStalePositions, findUnmanagedLivePositions } from './perps/reconciler.js';
 
 // Setup paths
 const __filename = fileURLToPath(import.meta.url);
@@ -740,9 +740,33 @@ class ArbitrageBotServer {
         .filter(fill => Number(fill.time) >= dayStart.getTime())
         .reduce((sum, fill) => sum + Number(fill.closedPnl || 0) - Number(fill.fee || 0), 0);
       const killSwitch = riskAgent.isKillSwitchOn();
+
+      // ISSUE #58 — posizioni REALI vive che nessun bot `running` sta tracciando.
+      // La stessa condizione che il watcher di `botManager` notifica ogni 60s: qui
+      // compare anche nella dashboard, perché una notifica Telegram si perde e il
+      // pannello Rischio è dove si va a guardare. La decisione è la funzione pura
+      // di `reconciler.js`; le posizioni PAPER sono escluse di proposito
+      // (`isPaper` dal merge), l'issue parla di denaro vero.
+      let unmanagedPositions = [];
+      try {
+        const runningBotIds = new Set(
+          [...botManager.bots.values()].filter(b => b.isTicking?.()).map(b => b.id)
+        );
+        unmanagedPositions = findUnmanagedLivePositions({
+          livePositions: (account?.positions || []).filter(p => !p.isPaper),
+          bots: db.listBots(),
+          runningBotIds,
+          address
+        });
+      } catch (error) {
+        // Non deve poter far fallire il pannello Rischio, ma un allarme mancato è
+        // un allarme mancato: va detto.
+        logger.error('Risk snapshot: controllo posizioni non sorvegliate fallito', error.message);
+      }
+
       const alerts = deriveRiskAlerts({
         now, address, account, orders, limits, bots, marketStatus, agent, killSwitch,
-        drawdown, sourceErrors,
+        drawdown, sourceErrors, unmanagedPositions,
         defaultMaxDailyLossUsd: config.HYPERLIQUID_CONFIG.risk.maxDailyLossUsd
       });
 
@@ -2581,6 +2605,9 @@ class ArbitrageBotServer {
         // ticcare dopo il boot, nessuno lo rimette in moto. Questo lo fa —
         // solo in quella direzione, mai riavviando un bot fermato apposta.
         botManager.startReconciliationWatcher();
+        // ISSUE #58 — il caso opposto del riconciliatore: la posizione reale è
+        // ancora là e nessun bot `running` la sorveglia. Avvisa, non ripara.
+        botManager.startUnmanagedPositionWatcher();
         // ADV-02: retention dei transcript di chat applicata all'avvio (oltre che
         // alla creazione di una nuova conversazione), così un deploy fermo per
         // settimane non si ritrova con mesi di storico oltre la soglia.

@@ -157,7 +157,70 @@ export function reconcileStalePositions({ openRows, livePositions, bots, running
   return orfane;
 }
 
+/**
+ * ISSUE #58 — IL CASO OPPOSTO: la posizione ESISTE ancora e nessuno la sorveglia.
+ *
+ * `findOrphanPositions` guarda una riga `positions` che non ha più riscontro sul
+ * live. Questa guarda una posizione VIVA sull'exchange, su un `master_address`
+ * gestito dalla piattaforma, che nessun bot `running` sta tracciando.
+ *
+ * PERCHÉ È UNA CONDIZIONE DA SEGNALARE E NON DA RIPARARE. Fermare un bot non
+ * chiude mai la sua posizione, ed è voluto (stesso principio "one-way" del
+ * kill-switch e della guardia SL). La conseguenza è che finché il bot resta fermo
+ * NESSUN componente sorveglia quella posizione: niente `_ensureStopLoss`, niente
+ * `_closeNow`, niente TP/SL dinamico. L'unica protezione residua sono i trigger
+ * già sul book, eseguiti dall'exchange — e possono fallire: book sottile, fill
+ * parziale, prezzo che li supera senza farli scattare (è esattamente il caso
+ * NEAR-PERP del 25/09/2026, CRIT-SLSTALE-25). Il riconciliatore non aiuta: agisce
+ * solo DOPO che la posizione è sparita. E riavviare il bot da soli è escluso per
+ * disegno — vedi il vincolo di direzione in `botManager.startReconciliationWatcher`:
+ * un bot `stopped` con una posizione aperta è la situazione tipica di chi ha
+ * fermato il bot APPOSTA per gestire l'uscita a mano.
+ *
+ * Quindi: serve una persona. L'unica cosa che il software può fare è dirlo, e
+ * dirlo in modo che non sembri un errore transitorio che si risolve da sé.
+ *
+ * L'UNITÀ DI CONFRONTO È LA COIN, NON IL LATO. Un bot `running` su quella coin
+ * adotta la posizione al tick successivo (`_reconcile`) qualunque sia il lato:
+ * confrontare anche il lato produrrebbe un falso allarme per tutta la finestra di
+ * adozione, e un alert che grida al lupo viene poi ignorato quando conta.
+ *
+ * GESTITO DALLA PIATTAFORMA = esiste almeno una riga `bots` con quel
+ * `master_address`. Su un wallet che la piattaforma non conosce non c'è niente da
+ * dire: nessuno si è mai impegnato a sorvegliarlo.
+ *
+ * Funzione PURA: nessun DB, nessun singleton, nessuna notifica. Il guscio che
+ * legge gli account e decide quando parlare sta in `botManager`.
+ *
+ * @param livePositions `account.positions` letto dall'exchange per `address`
+ * @param bots          righe `bots` (servono `id`, `coin`, `master_address`)
+ * @param runningBotIds Set degli id attualmente `running` (il FATTO, non l'intento)
+ * @param address       master address interrogato
+ * @returns [{ position, coin, bots }] — `bots` sono i bot fermi di quella coin,
+ *          `[]` se la posizione non appartiene a nessun bot noto
+ */
+export function findUnmanagedLivePositions({
+  livePositions = [], bots = [], runningBotIds = new Set(), address = null
+} = {}) {
+  const addr = String(address || '').toLowerCase();
+  if (!addr) return [];
+
+  const ofWallet = bots.filter(b => String(b?.master_address || '').toLowerCase() === addr);
+  // Wallet non gestito dalla piattaforma: nessuna aspettativa di sorveglianza.
+  if (!ofWallet.length) return [];
+
+  const out = [];
+  for (const position of livePositions) {
+    if (!position?.coin) continue;
+    const onCoin = ofWallet.filter(b => sameCoin(position.coin, b.coin));
+    // Un bot `running` su quella coin la sorveglia (o la adotta al prossimo tick).
+    if (onCoin.some(b => runningBotIds.has(b.id))) continue;
+    out.push({ position, coin: position.coin, bots: onCoin });
+  }
+  return out;
+}
+
 export default {
   CLOSE_REASON_STALE_ORPHAN, CLOSE_REASON_DUPLICATE_ADOPTION,
-  findOrphanPositions, reconcileStalePositions
+  findOrphanPositions, reconcileStalePositions, findUnmanagedLivePositions
 };

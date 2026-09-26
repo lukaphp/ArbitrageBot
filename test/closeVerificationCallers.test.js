@@ -50,6 +50,7 @@ db.init();
 
 const { default: app, serverInstance } = await import('../src/server.js');
 const { default: hyperliquid } = await import('../src/perps/hyperliquidClient.js');
+const { default: paperBroker } = await import('../src/perps/paperBroker.js');
 const { default: botManager } = await import('../src/perps/botManager.js');
 const { default: notifier } = await import('../src/perps/notifier.js');
 const { default: marketData } = await import('../src/perps/marketData.js');
@@ -101,11 +102,22 @@ serverInstance.io = { emit: (name, payload) => socketEvents.push({ name, payload
 // A. Pannello di chiusura manuale
 // ===========================================================================
 
+/**
+ * L'handler, dopo issue #35, prima DERIVA il broker di destinazione dallo stato
+ * dei due conti: qui si semina una posizione sul solo conto REALE, così
+ * l'instradamento è univoco e ciò che si misura resta la verifica dell'esito.
+ * Senza seminarla, la rotta si fermerebbe al 400 «nessuna posizione aperta» e
+ * questi casi passerebbero senza esercitare niente.
+ */
 async function callManualClose(closeImpl) {
   const orig = hyperliquid.closePosition;
   const origNet = hyperliquid.getNetwork;
+  const origAcc = hyperliquid.getAccount;
+  const origPeek = paperBroker.peekAccount;
   hyperliquid.closePosition = closeImpl;
   hyperliquid.getNetwork = () => 'testnet';
+  hyperliquid.getAccount = async () => ({ positions: [{ coin: 'NEAR-PERP', size: 99.9 }] });
+  paperBroker.peekAccount = async () => ({ positions: [] });
   socketEvents.length = 0;
   try {
     const handler = route('post', '/api/perps/positions/:coin/close');
@@ -115,6 +127,8 @@ async function callManualClose(closeImpl) {
   } finally {
     hyperliquid.closePosition = orig;
     hyperliquid.getNetwork = origNet;
+    hyperliquid.getAccount = origAcc;
+    paperBroker.peekAccount = origPeek;
   }
 }
 

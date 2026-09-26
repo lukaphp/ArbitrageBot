@@ -1558,39 +1558,97 @@ class ArbitrageBotServer {
     // `perps:position {closed:true}`, cioè cancellava dalla dashboard una
     // posizione ancora aperta sull'exchange. Nessun loop di retry qui (è
     // un'azione singola di una persona): basta riportare l'esito vero.
+    //
+    // ISSUE #35 (parte backend) — l'ordine va al broker che possiede DAVVERO
+    // quella posizione. La destinazione si DERIVA dallo stato del server (le
+    // posizioni lette dai due broker per quel wallet), mai da un flag `isPaper`
+    // nel corpo della richiesta: un client che lo dichiarasse sbagliato farebbe
+    // muovere denaro vero al posto di denaro simulato. Il campo `source`, se
+    // presente, può solo scegliere fra i candidati che esistono — vedi
+    // `riskManager.resolveCloseTarget`, dove sta tutta la decisione.
     app.post('/api/perps/positions/:coin/close', async (req, res) => {
       try {
-        const { masterAddress } = req.body;
+        const { masterAddress, source } = req.body || {};
         const coin = decodeURIComponent(req.params.coin);
-        const result = await hyperliquid.closePosition({ masterAddress, coin }, hyperliquid.getNetwork());
+        if (!masterAddress) return res.status(400).json({ success: false, error: 'masterAddress richiesto' });
+        const network = hyperliquid.getNetwork();
+
+        // Le due letture, in parallelo e senza effetti collaterali. `peekAccount`
+        // e non `getAccount`: quest'ultima farebbe scattare i trigger simulati
+        // come effetto collaterale di una lettura (vedi `mergeWithPaperAccount`).
+        const [realRes, paperRes] = await Promise.allSettled([
+          hyperliquid.getAccount(masterAddress, network),
+          paperBroker.peekAccount(masterAddress, network)
+        ]);
+        // Una lettura fallita NON vale come "niente aperto qui": sarebbe un
+        // instradamento deciso su un'ignoranza. Si rifiuta e lo si dice.
+        if (realRes.status === 'rejected') {
+          logger.error(`Chiusura ${coin}: account reale non leggibile (${realRes.reason?.message})`);
+          return res.status(502).json({
+            success: false,
+            error: `Impossibile stabilire se la posizione su ${coin} è reale o simulata: l'exchange non risponde (${realRes.reason?.message}). Nessun ordine è stato inviato.`
+          });
+        }
+        if (paperRes.status === 'rejected') {
+          logger.error(`Chiusura ${coin}: stato simulato non leggibile (${paperRes.reason?.message})`);
+          return res.status(502).json({
+            success: false,
+            error: `Impossibile stabilire se la posizione su ${coin} è reale o simulata: lo stato simulato non è leggibile (${paperRes.reason?.message}). Nessun ordine è stato inviato.`
+          });
+        }
+
+        const routing = riskManager.resolveCloseTarget({
+          coin,
+          realPositions: realRes.value?.positions || [],
+          paperPositions: paperRes.value?.positions || [],
+          requestedSource: source || null
+        });
+        if (!routing.target) {
+          return res.status(400).json({
+            success: false,
+            error: routing.reason,
+            data: { candidates: routing.candidates }
+          });
+        }
+
+        const broker = routing.target === 'paper' ? paperBroker : hyperliquid;
+        // `paperBroker.closePosition` è `placeMarketOrder` con `reduceOnly` più la
+        // risoluzione della size: la usa perché è il gemello esatto del percorso
+        // reale, quindi `interpretCloseResult` qui sotto vale identica sui due
+        // rami e la verifica dell'esito di #55 non ha un buco sul lato paper.
+        const result = await broker.closePosition({ masterAddress, coin }, network);
         const verdict = riskManager.interpretCloseResult(result, result?.requestedSz);
+        // Etichetta esplicita nei messaggi: su una chiusura che non è andata a
+        // buon fine, sapere QUALE dei due conti è rimasto esposto è la prima cosa
+        // che serve a chi legge.
+        const label = routing.target === 'paper' ? 'simulata' : 'reale';
 
         if (verdict.outcome === 'rejected') {
           // NIENTE `closed:true`: la posizione è ancora là. Un refresh della
           // dashboard sì — l'operatore deve vederla ancora aperta.
-          logger.error(`Chiusura manuale di ${coin} RIFIUTATA dall'exchange: ${verdict.reason}`);
+          logger.error(`Chiusura manuale (${label}) di ${coin} RIFIUTATA: ${verdict.reason}`);
           this.io.emit('perps:dashboardRefresh', { reason: 'close_rejected', coin });
           return res.status(400).json({
             success: false,
-            error: `Chiusura NON eseguita su ${coin}: ${verdict.reason}. La posizione è ancora aperta.`,
-            data: { outcome: verdict.outcome, reason: verdict.reason }
+            error: `Chiusura NON eseguita su ${coin} (posizione ${label}): ${verdict.reason}. La posizione è ancora aperta.`,
+            data: { outcome: verdict.outcome, reason: verdict.reason, source: routing.target }
           });
         }
 
         if (verdict.outcome === 'partial') {
-          logger.warn(`Chiusura manuale di ${coin} PARZIALE: ${verdict.reason}, residuo ${verdict.remaining}`);
+          logger.warn(`Chiusura manuale (${label}) di ${coin} PARZIALE: ${verdict.reason}, residuo ${verdict.remaining}`);
           this.io.emit('perps:dashboardRefresh', { reason: 'close_partial', coin });
           return res.status(409).json({
             success: false,
-            error: `Chiusura PARZIALE su ${coin}: ${verdict.reason}. Restano ${verdict.remaining} aperti.`,
-            data: { outcome: verdict.outcome, filled: verdict.filled, remaining: verdict.remaining, result }
+            error: `Chiusura PARZIALE su ${coin} (posizione ${label}): ${verdict.reason}. Restano ${verdict.remaining} aperti.`,
+            data: { outcome: verdict.outcome, filled: verdict.filled, remaining: verdict.remaining, source: routing.target, result }
           });
         }
 
-        this.io.emit('perps:position', { coin, closed: true });
+        this.io.emit('perps:position', { coin, closed: true, source: routing.target });
         // Notifica dashboard: ricarica bots + posizioni immediatamente
         this.io.emit('perps:dashboardRefresh', { reason: 'position_closed', coin });
-        res.json({ success: true, data: { ...result, outcome: verdict.outcome } });
+        res.json({ success: true, data: { ...result, outcome: verdict.outcome, source: routing.target } });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });
       }

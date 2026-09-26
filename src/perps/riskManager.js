@@ -548,6 +548,87 @@ export function interpretCloseResult(result, positionSize) {
   return { outcome: 'closed', filled, remaining: 0, sizeKnown: true, reason: null };
 }
 
+/**
+ * Confronto di coin tollerante al suffisso `-PERP`, come già altrove nel modulo:
+ * l'exchange e il DB non sono sempre d'accordo sulla forma del nome.
+ */
+function sameCoin(a, b) {
+  if (a == null || b == null) return false;
+  const norm = (c) => String(c).toUpperCase().replace(/-PERP$/, '');
+  return norm(a) === norm(b);
+}
+
+/**
+ * ISSUE #35 — A QUALE BROKER va la richiesta di chiudere (wallet, coin).
+ *
+ * IL DIFETTO. `POST /api/perps/positions/:coin/close` chiamava SEMPRE
+ * `hyperliquid.closePosition`. Dopo PR #33 il pannello "Posizioni attive" mostra
+ * anche le righe PAPER (con il loro pulsante "Chiudi"), e nello scenario misto —
+ * un bot reale e un bot paper sullo stesso wallet e sulla stessa coin — cliccare
+ * "Chiudi" su una riga che l'utente vede come simulata avrebbe chiuso quella
+ * VERA. Oggi è innocuo solo perché l'account reale è vuoto e
+ * `hyperliquid.closePosition` lancia «Nessuna posizione aperta»: fail-closed per
+ * struttura, non per disegno.
+ *
+ * LA DESTINAZIONE SI DERIVA, NON SI DICHIARA. L'instradamento è deciso da ciò che
+ * il server VEDE (posizioni lette dal broker reale e dal paperBroker per quel
+ * wallet), mai da un flag `isPaper` nel corpo della richiesta: un client che
+ * dichiarasse `isPaper` in modo sbagliato — per errore o di proposito — farebbe
+ * partire un ordine sul broker sbagliato, cioè muoverebbe denaro vero al posto di
+ * denaro simulato. È la stessa fonte già usata in lettura per esporre `isPaper`
+ * (`mergeAccountViews`), così le due viste non possono divergere.
+ *
+ * `requestedSource` HA UN SOLO POTERE: scegliere fra i candidati che esistono
+ * DAVVERO. Non può crearne uno. Se chiede `paper` e una posizione paper non c'è,
+ * la risposta è un rifiuto — non un ripiego sul broker reale.
+ *
+ * AMBIGUITÀ = RIFIUTO. Se su quella coppia esistono ENTRAMBE le posizioni e il
+ * chiamante non dice quale, non si indovina: l'issue stessa osserva che
+ * l'endpoint «non ha modo di sapere quale delle due l'utente intendeva», e su un
+ * percorso che muove denaro l'unica risposta corretta a una domanda ambigua è
+ * chiedere di riformularla. Chiudere quella sbagliata non è recuperabile.
+ *
+ * Funzione PURA: nessun I/O, nessuna dipendenza da singleton. Il guscio che legge
+ * i due account sta in `server.js`.
+ *
+ * @param {object} p
+ * @param {string} p.coin coin richiesta (con o senza `-PERP`)
+ * @param {Array}  p.paperPositions posizioni lette dal paperBroker per il wallet
+ * @param {Array}  p.realPositions  posizioni lette dall'exchange per il wallet
+ * @param {string|null} p.requestedSource `'paper'`/`'real'` se il chiamante lo
+ *   specifica, altrimenti `null`
+ * @returns {{target: 'paper'|'real'|null, candidates: string[], reason: string|null}}
+ */
+export function resolveCloseTarget({ coin, paperPositions = [], realPositions = [], requestedSource = null } = {}) {
+  const has = (list) => (Array.isArray(list) ? list : []).some(p => sameCoin(p?.coin, coin));
+  const candidates = [];
+  if (has(realPositions)) candidates.push('real');
+  if (has(paperPositions)) candidates.push('paper');
+
+  const wanted = requestedSource === 'paper' || requestedSource === 'real' ? requestedSource : null;
+
+  if (wanted) {
+    if (candidates.includes(wanted)) return { target: wanted, candidates, reason: null };
+    return {
+      target: null,
+      candidates,
+      reason: candidates.length
+        ? `nessuna posizione ${wanted === 'paper' ? 'simulata' : 'reale'} aperta su ${coin} (trovata invece: ${candidates.join(', ')})`
+        : `nessuna posizione ${wanted === 'paper' ? 'simulata' : 'reale'} aperta su ${coin}`
+    };
+  }
+
+  if (candidates.length === 1) return { target: candidates[0], candidates, reason: null };
+  if (candidates.length === 0) {
+    return { target: null, candidates, reason: `nessuna posizione aperta su ${coin}, né reale né simulata` };
+  }
+  return {
+    target: null,
+    candidates,
+    reason: `su ${coin} esistono sia una posizione REALE sia una SIMULATA: indicare quale chiudere (campo "source": "real" o "paper"). Nessun ordine è stato inviato.`
+  };
+}
+
 class RiskManager {
   /** Arrotonda la size al numero di decimali consentito dal mercato. */
   roundSize(size, szDecimals = 3) {
@@ -574,6 +655,9 @@ class RiskManager {
 
   /** CRIT-CLOSEFAKE-25 — anche come metodo, per i chiamanti che hanno il singleton. */
   interpretCloseResult(result, positionSize) { return interpretCloseResult(result, positionSize); }
+
+  /** ISSUE #35 — anche come metodo, per i chiamanti che hanno il singleton. */
+  resolveCloseTarget(input) { return resolveCloseTarget(input); }
 
   /**
    * Calcola la size (in unità di coin) da aprire.

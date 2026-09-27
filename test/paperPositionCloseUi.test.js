@@ -95,7 +95,7 @@ function rows(html) {
 
 test('una riga paper non offre il pulsante Chiudi', () => {
   const html = render([position({ isPaper: true })]);
-  assert.equal(html.includes('perps.closePosition'), false,
+  assert.equal(html.includes('data-action="close-position"'), false,
     'il pulsante instrada al broker reale: su una riga simulata non deve esistere');
   assert.equal(html.includes('>Chiudi<'), false, 'nessuna etichetta Chiudi sulla riga simulata');
 });
@@ -116,7 +116,7 @@ test('una riga reale conserva il pulsante Chiudi e non è marcata PAPER', () => 
   // Il caso che una mitigazione troppo larga romperebbe: chiudere a mano una
   // posizione VERA deve restare possibile.
   const html = render([position({ isPaper: false })]);
-  assert.match(html, /perps\.closePosition\('BTC-PERP'\)/);
+  assert.match(html, /data-action="close-position" data-coin="BTC-PERP"/);
   assert.match(html, />Chiudi</);
   assert.equal(html.includes('PAPER'), false);
   assert.equal(html.includes('gestita dal bot'), false);
@@ -133,18 +133,18 @@ test('scenario misto sulla stessa coin: un solo Chiudi, ed è sulla riga reale',
   ]);
   const [paperRow, realRow] = rows(html);
   assert.equal(rows(html).length, 2, 'precondizione: due righe rese, non fuse');
-  assert.equal((html.match(/perps\.closePosition/g) || []).length, 1,
+  assert.equal((html.match(/data-action="close-position"/g) || []).length, 1,
     'un solo pulsante di chiusura in tutta la tabella');
-  assert.equal(paperRow.includes('perps.closePosition'), false, 'non sulla riga simulata');
+  assert.equal(paperRow.includes('data-action="close-position"'), false, 'non sulla riga simulata');
   assert.match(paperRow, /Paper BTC/);
-  assert.match(realRow, /perps\.closePosition/, 'il pulsante appartiene alla riga reale');
+  assert.match(realRow, /data-action="close-position"/, 'il pulsante appartiene alla riga reale');
   assert.match(realRow, /Live BTC/);
 });
 
 test('il grafico resta disponibile anche sulle righe paper', () => {
   // Si toglie la sola azione che può fare danno: leggere il mercato non ne fa.
   const html = render([position({ isPaper: true })]);
-  assert.match(html, /perps\.openChart\('BTC-PERP'\)/);
+  assert.match(html, /data-action="open-chart" data-coin="BTC-PERP"/);
 });
 
 test('isPaper assente: la riga è trattata come reale, come fa l\'endpoint', () => {
@@ -154,7 +154,7 @@ test('isPaper assente: la riga è trattata come reale, come fa l\'endpoint', () 
   // quindi la descrizione corretta del comportamento, non un fail-open scelto a
   // caso — se un domani il payload perdesse il campo, va rivisto qui.
   const html = render([position({ isPaper: undefined })]);
-  assert.match(html, /perps\.closePosition/);
+  assert.match(html, /data-action="close-position"/);
   assert.equal(html.includes('PAPER'), false);
 });
 

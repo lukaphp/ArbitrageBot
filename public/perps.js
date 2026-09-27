@@ -1941,9 +1941,19 @@ class PerpsApp {
       // Deriva solo da numeri formattati, quindi non introduce markup di terzi.
       const pnlEur = this.fmtEur(p.unrealizedPnl);
       const coin = p.coin.includes('-PERP') ? p.coin : p.coin + '-PERP';
+      // Issue #60: `coin` finiva in un `onclick="perps.X('${coin}')"` — contesto
+      // stringa-JS dentro un attributo, dove `_escapeHtml` non basta (un
+      // apice spezzerebbe la stringa una volta decodificate le entity). Il
+      // valore va invece in un `data-*` (mai eseguito come codice) letto dal
+      // listener delegato in `_handleDelegatedClick`.
+      const coinSafe = this._escapeHtml(coin);
       const opened = p.openedAt ? new Date(p.openedAt).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '<span class="muted">—</span>';
+      // Issue #59: botName/coin/side arrivano da `bots.name`/config, scrivibili
+      // dall'utente o da un agente esterno — stessa classe di #9/#22/_renderFills,
+      // mai passata da _escapeHtml prima d'ora su questa tabella.
+      const botNameSafe = this._escapeHtml(p.botName);
       const botCell = p.botName
-        ? `<span class="hist-bot">${p.botName === 'Manuale' ? '✋ Manuale' : '🤖 ' + p.botName}</span>`
+        ? `<span class="hist-bot">${p.botName === 'Manuale' ? '✋ Manuale' : '🤖 ' + botNameSafe}</span>`
         : '<span class="muted">—</span>';
 
       // Riga SIMULATA (issue #35, parte UI). Due interventi sulla stessa riga.
@@ -1989,20 +1999,20 @@ class PerpsApp {
         : '';
       const closeAction = isPaper
         ? `<span class="muted" style="font-size:.75em" title="Posizione simulata: la chiusura manuale da qui non è disponibile, perché l'endpoint di chiusura instrada al broker reale. La chiude il bot, con i suoi TP/SL o con un segnale di uscita.">gestita dal bot</span>`
-        : `<button class="btn btn-sm btn-danger" onclick="perps.closePosition('${coin}')">Chiudi</button>`;
+        : `<button class="btn btn-sm btn-danger" data-action="close-position" data-coin="${coinSafe}">Chiudi</button>`;
 
       return `<tr>
         <td>${opened}</td>
         <td>${botCell}</td>
-        <td>${p.coin}${paperBadge}</td>
-        <td><span class="side-badge ${p.side}">${p.side.toUpperCase()}</span></td>
+        <td>${this._escapeHtml(p.coin)}${paperBadge}</td>
+        <td><span class="side-badge ${this._escapeHtml(p.side)}">${this._escapeHtml(String(p.side).toUpperCase())}</span></td>
         <td>${this.fmtNum(p.size)}</td>
         <td>${this.fmtUsd(p.entryPx)}</td>
         <td class="${pnlClass}">${this.fmtUsd(p.unrealizedPnl)}${pnlEur ? `<small class="cockpit-eur">≈ ${pnlEur}</small>` : ''}</td>
         <td>${p.leverage ? p.leverage + 'x' : '—'}</td>
         <td>${p.liquidationPx ? this.fmtUsd(p.liquidationPx) : '—'}</td>
         <td class="pos-actions">
-          <button class="btn btn-sm btn-outline" onclick="perps.openChart('${coin}')">📊</button>
+          <button class="btn btn-sm btn-outline" data-action="open-chart" data-coin="${coinSafe}">📊</button>
           ${closeAction}
         </td>
       </tr>`;
@@ -2015,7 +2025,9 @@ class PerpsApp {
     if (!sel) return;
     const names = [...new Set((this._allPositions || []).map(p => p.botName).filter(Boolean))].sort();
     const cur = sel.value;
-    sel.innerHTML = '<option value="">Tutti i bot</option>' + names.map(n => `<option value="${n}">${n}</option>`).join('');
+    // Issue #59: `n` è un nome bot non fidato, va escapato sia nel valore
+    // dell'attributo sia nel testo dell'opzione.
+    sel.innerHTML = '<option value="">Tutti i bot</option>' + names.map(n => `<option value="${this._escapeHtml(n)}">${this._escapeHtml(n)}</option>`).join('');
     if (names.includes(cur)) sel.value = cur;
   }
 
@@ -3693,6 +3705,45 @@ class PerpsApp {
   }
 
   /**
+   * Collega UNA volta i listener delegati per le azioni della bot-card e della
+   * tabella posizioni (issue #60). Va chiamato dopo che i due contenitori
+   * esistono nel DOM, non ad ogni render: `innerHTML` sostituisce solo i figli,
+   * non `#botsList`/`#positionsList` stessi, quindi il listener sopravvive a
+   * qualunque numero di re-render successivi.
+   */
+  _bindDelegatedActions() {
+    const positionsList = document.getElementById('positionsList');
+    if (positionsList) positionsList.addEventListener('click', (e) => this._handleDelegatedClick(e));
+    const botsList = document.getElementById('botsList');
+    if (botsList) botsList.addEventListener('click', (e) => this._handleDelegatedClick(e));
+  }
+
+  /**
+   * Dispatcher unico per i click su `[data-action]` (issue #60). Prima questi
+   * pulsanti erano `onclick="perps.X('${id}')"` inline: un contesto
+   * stringa-JS dentro un attributo, dove `_escapeHtml` non basta — le entity
+   * HTML si decodificano PRIMA che il motore JS veda la stringa, quindi un
+   * apice sopravviverebbe e romperebbe la chiamata. Un `data-*` non è mai
+   * codice: qualunque cosa contenga arriva qui come argomento di stringa
+   * inerte, mai come sorgente da eseguire — il vettore è chiuso per
+   * costruzione, non perché oggi gli id sono sempre UUID.
+   */
+  _handleDelegatedClick(event) {
+    const el = event.target.closest('[data-action]');
+    if (!el) return;
+    const { action, id, coin } = el.dataset;
+    switch (action) {
+      case 'close-position': this.closePosition(coin); break;
+      case 'open-chart': this.openChart(coin); break;
+      case 'start-bot': this.startBot(id); break;
+      case 'stop-bot': this.stopBot(id); break;
+      case 'edit-bot': this.editBot(id); break;
+      case 'open-bot-monitor': this.openBotMonitor(id); break;
+      case 'delete-bot': this.deleteBot(id); break;
+    }
+  }
+
+  /**
    * Traduce una singola entryRule JSON grezza in una stringa descrittiva.
    * Supporta: indicator (rsi, bollinger, ema, sma, price), funding, price_action.
    * Usato dalla card per mostrare la strategia configurata senza dover chiamare
@@ -4174,15 +4225,22 @@ class PerpsApp {
     const dotClass = crashed ? 'crashed' : (running ? 'online' : 'offline');
 
     // Azione principale: se crashed → "↩️ Riavvia", se running → "⏹️ Stop", else → "▶️ Avvia"
+    // Issue #60: `b.id` è oggi sempre un crypto.randomUUID() server-side, ma un
+    // `onclick="perps.X('${b.id}')"` resta un contesto stringa-JS dove
+    // `_escapeHtml` non protegge davvero (un apice sopravviverebbe alla
+    // decodifica delle entity). `data-id` più il listener delegato in
+    // `_handleDelegatedClick` chiudono la classe di vulnerabilità invece di
+    // affidarsi all'invariante "è sempre un UUID".
+    const idSafe = this._escapeHtml(b.id);
     const mainAction = crashed || !running
-      ? `<button class="btn btn-sm btn-long" onclick="perps.startBot('${b.id}')">${crashed ? '↩️ Riavvia' : '▶️ Avvia'}</button>`
-      : `<button class="btn btn-sm btn-secondary" onclick="perps.stopBot('${b.id}')">⏹️ Stop</button>`;
+      ? `<button class="btn btn-sm btn-long" data-action="start-bot" data-id="${idSafe}">${crashed ? '↩️ Riavvia' : '▶️ Avvia'}</button>`
+      : `<button class="btn btn-sm btn-secondary" data-action="stop-bot" data-id="${idSafe}">⏹️ Stop</button>`;
 
     // Sicurezza: se il bot è gestito da agente, mostra l'icona lock sul pulsante edit
     const isManaged = Boolean(b.is_managed_by_agent || isHermes);
     const editBtn = isManaged
-      ? `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Bot gestito da Agente (${actorLabelSafe}): richiede sblocco">🔒 ✏️</button>`
-      : `<button class="btn btn-sm btn-outline" onclick="perps.editBot('${b.id}')" title="Modifica bot">✏️</button>`;
+      ? `<button class="btn btn-sm btn-outline" data-action="edit-bot" data-id="${idSafe}" title="Bot gestito da Agente (${actorLabelSafe}): richiede sblocco">🔒 ✏️</button>`
+      : `<button class="btn btn-sm btn-outline" data-action="edit-bot" data-id="${idSafe}" title="Modifica bot">✏️</button>`;
 
     // Riga strategia: traduzione human-readable delle entryRules dal config
     const stratRules = this._describeEntryRules(b);
@@ -4223,9 +4281,9 @@ class PerpsApp {
       </div>
       <div class="bot-card-actions">
         ${mainAction}
-        <button class="btn btn-sm btn-outline" onclick="perps.openBotMonitor('${b.id}')">📡 Monitor</button>
+        <button class="btn btn-sm btn-outline" data-action="open-bot-monitor" data-id="${idSafe}">📡 Monitor</button>
         ${editBtn}
-        <button class="btn btn-sm btn-danger" onclick="perps.deleteBot('${b.id}')">🗑️</button>
+        <button class="btn btn-sm btn-danger" data-action="delete-bot" data-id="${idSafe}">🗑️</button>
       </div>
     </div>`;
   }
@@ -4926,6 +4984,7 @@ window.perps = perps;
 
 // Aggiorna il prezzo mostrato quando cambia il mercato selezionato e inizializza la vista Perps
 document.addEventListener('DOMContentLoaded', () => {
+  perps._bindDelegatedActions();
   const sel = document.getElementById('orderMarket');
   if (sel) sel.addEventListener('change', () => perps._updateMid());
   const botSel = document.getElementById('botMarket');

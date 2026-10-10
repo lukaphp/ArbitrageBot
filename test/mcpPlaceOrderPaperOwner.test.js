@@ -249,7 +249,7 @@ test('ROTTA: esegue l\'ordine in locale anche se il ruolo dichiarato è MCP', as
   try {
     const res = fakeRes();
     await route('post', ROUTE)(
-      { ip: '127.0.0.1', body: { bot_id: 'own-route-1', side: 'long', size: 1 } }, res
+      { ip: '127.0.0.1', socket: { remoteAddress: '127.0.0.1' }, body: { bot_id: 'own-route-1', side: 'long', size: 1 } }, res
     );
     assert.equal(res.body.success, true, `la rotta non ha eseguito: ${JSON.stringify(res.body)}`);
     assert.equal(intercepted.filter(i => i.path === ROUTE).length, 0,
@@ -262,7 +262,7 @@ test('ROTTA: esegue l\'ordine in locale anche se il ruolo dichiarato è MCP', as
 
 test('ROTTA: chiusa agli IP non loopback, come le altre /internal/*', async () => {
   const res = fakeRes();
-  await route('post', ROUTE)({ ip: '8.8.8.8', body: { bot_id: 'x', side: 'long', size: 1 } }, res);
+  await route('post', ROUTE)({ ip: '8.8.8.8', socket: { remoteAddress: '8.8.8.8' }, body: { bot_id: 'x', side: 'long', size: 1 } }, res);
   assert.equal(res.statusCode, 403);
   assert.equal(res.body.success, false);
 });
@@ -273,7 +273,7 @@ test('ROTTA: i guardrail restano applicati — non è una scorciatoia che li sal
   // passa dai controlli di `placeOrderPaperLocal` invece di scrivere diretto.
   reset();
   const res = fakeRes();
-  await route('post', ROUTE)({ ip: '127.0.0.1', body: { bot_id: 'non-esiste', side: 'long', size: 1 } }, res);
+  await route('post', ROUTE)({ ip: '127.0.0.1', socket: { remoteAddress: '127.0.0.1' }, body: { bot_id: 'non-esiste', side: 'long', size: 1 } }, res);
   assert.equal(res.statusCode, 200, 'un guardrail che rifiuta è una risposta valida, non un guasto HTTP');
   assert.equal(res.body.success, false);
   assert.match(res.body.message, /Bot non trovato/i);

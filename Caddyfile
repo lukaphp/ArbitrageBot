@@ -10,8 +10,17 @@
 # Socket.IO: il reverse_proxy di Caddy gestisce gli upgrade WebSocket in automatico,
 # quindi non serve configurazione extra.
 
+# /internal/* (issue #74): il ponte loopback tra il processo MCP Stdio ed
+# Express, dentro lo stesso container. Non ha login — l'app lo accetta solo da
+# un peer TCP loopback — e non deve essere nemmeno raggiungibile da qui: Caddy
+# risponde 404 prima del reverse_proxy. Difesa in profondità, non l'unica: il
+# controllo vero resta nell'app (`isLoopbackRequest`).
 :8080 {
     encode gzip
+
+    @internal path /internal /internal/*
+    respond @internal 404
+
     reverse_proxy app:3000
 
     header {
@@ -28,6 +37,8 @@
 #
 # trading.tuodominio.it {
 #     encode gzip
+#     @internal path /internal /internal/*
+#     respond @internal 404
 #     reverse_proxy app:3000
 #     header {
 #         Strict-Transport-Security "max-age=31536000; includeSubDomains"

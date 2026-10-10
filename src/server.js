@@ -30,7 +30,7 @@ import crypto from 'crypto';
 // Importa moduli bot
 import config, { isMainnetAllowed } from './config/config.js';
 import logger from './utils/logger.js';
-import { isInternalIp } from './utils/internalLoopback.js';
+import { isLoopbackRequest } from './utils/internalLoopback.js';
 
 // EVM-01: qui c'erano gli import della demo di arbitraggio EVM
 // (blockchainConnection, priceFeedManager, arbitrageAnalyzer, transactionExecutor).
@@ -2033,13 +2033,13 @@ class ArbitrageBotServer {
      * (register_bot, delete_bot, bot_control). Garantisce che la UI e le API
      * HTTP riflettano immediatamente lo stato del DB senza riavvio del container.
      *
-     * Sicurezza: nessun cookie richiesto, ma accettato SOLO da loopback (127.x)
-     * o dalla rete Docker interna (172.x). Qualsiasi altro IP riceve 403.
+     * Sicurezza: nessun cookie richiesto, ma accettato SOLO se il peer TCP è
+     * loopback (`isLoopbackRequest`, issue #74): conta il socket, non `req.ip`
+     * né `X-Forwarded-For`. Qualsiasi altra connessione riceve 403.
      */
     app.post('/internal/mcp/reload', async (req, res) => {
-      const ip = req.ip || req.socket?.remoteAddress || '';
-      if (!isInternalIp(ip)) {
-        logger.warn(`/internal/mcp/reload rifiutato da IP non loopback: ${ip}`);
+      if (!isLoopbackRequest(req)) {
+        logger.warn(`/internal/mcp/reload rifiutato: peer TCP non loopback ${req.socket?.remoteAddress || '(ignoto)'} (req.ip=${req.ip || '-'})`);
         return res.status(403).json({ success: false, error: 'Accesso non consentito' });
       }
       try {
@@ -2131,12 +2131,11 @@ class ArbitrageBotServer {
      * L'emit passa da `botManager.emitBotUpdate`, lo stesso metodo usato dal
      * ramo con `io` presente: i due percorsi non possono divergere.
      *
-     * Sicurezza: identica a `/internal/mcp/reload` (stesso `isInternalIp`).
+     * Sicurezza: identica a `/internal/mcp/reload` (stesso `isLoopbackRequest`).
      */
     app.post('/internal/mcp/bot-update', (req, res) => {
-      const ip = req.ip || req.socket?.remoteAddress || '';
-      if (!isInternalIp(ip)) {
-        logger.warn(`/internal/mcp/bot-update rifiutato da IP non loopback: ${ip}`);
+      if (!isLoopbackRequest(req)) {
+        logger.warn(`/internal/mcp/bot-update rifiutato: peer TCP non loopback ${req.socket?.remoteAddress || '(ignoto)'} (req.ip=${req.ip || '-'})`);
         return res.status(403).json({ success: false, error: 'Accesso non consentito' });
       }
       const state = req.body?.state;
@@ -2173,16 +2172,15 @@ class ArbitrageBotServer {
      * quando `update_strategy_params` ha scritto sul DB da un altro processo e
      * il loop sta ancora girando con i parametri vecchi.
      *
-     * Sicurezza: identica alle altre rotte interne (stesso `isInternalIp`).
+     * Sicurezza: identica alle altre rotte interne (stesso `isLoopbackRequest`).
      * Vale la pena dirlo esplicitamente: questa rotta AVVIA E FERMA bot che
      * muovono denaro simulato oggi e reale domani, quindi il cancello IP è
      * l'unica cosa che la separa dalla rete — non allargarlo senza cambiare
      * anche il modello di autenticazione.
      */
     app.post('/internal/mcp/bot-control', async (req, res) => {
-      const ip = req.ip || req.socket?.remoteAddress || '';
-      if (!isInternalIp(ip)) {
-        logger.warn(`/internal/mcp/bot-control rifiutato da IP non loopback: ${ip}`);
+      if (!isLoopbackRequest(req)) {
+        logger.warn(`/internal/mcp/bot-control rifiutato: peer TCP non loopback ${req.socket?.remoteAddress || '(ignoto)'} (req.ip=${req.ip || '-'})`);
         return res.status(403).json({ success: false, error: 'Accesso non consentito' });
       }
       const { bot_id: botId, action } = req.body || {};
@@ -2233,9 +2231,8 @@ class ArbitrageBotServer {
      * reale domani, e il cancello IP è l'unica cosa che la separa dalla rete.
      */
     app.post('/internal/mcp/place-order-paper', async (req, res) => {
-      const ip = req.ip || req.socket?.remoteAddress || '';
-      if (!isInternalIp(ip)) {
-        logger.warn(`/internal/mcp/place-order-paper rifiutato da IP non loopback: ${ip}`);
+      if (!isLoopbackRequest(req)) {
+        logger.warn(`/internal/mcp/place-order-paper rifiutato: peer TCP non loopback ${req.socket?.remoteAddress || '(ignoto)'} (req.ip=${req.ip || '-'})`);
         return res.status(403).json({ success: false, error: 'Accesso non consentito' });
       }
       try {
@@ -2273,9 +2270,8 @@ class ArbitrageBotServer {
      * Sola lettura: nessun effetto collaterale, si può chiamare per chiedere.
      */
     app.post('/internal/mcp/bot-states', (req, res) => {
-      const ip = req.ip || req.socket?.remoteAddress || '';
-      if (!isInternalIp(ip)) {
-        logger.warn(`/internal/mcp/bot-states rifiutato da IP non loopback: ${ip}`);
+      if (!isLoopbackRequest(req)) {
+        logger.warn(`/internal/mcp/bot-states rifiutato: peer TCP non loopback ${req.socket?.remoteAddress || '(ignoto)'} (req.ip=${req.ip || '-'})`);
         return res.status(403).json({ success: false, error: 'Accesso non consentito' });
       }
       try {

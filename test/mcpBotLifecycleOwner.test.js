@@ -340,7 +340,8 @@ function routeHandler(method, routePath) {
 async function callRoute(routePath, { ip = '127.0.0.1', body = {} } = {}) {
   const handler = routeHandler('post', routePath);
   const captured = { statusCode: 200, body: null };
-  await handler({ ip, socket: {}, body, query: {}, params: {} }, {
+  // Il cancello guarda il peer TCP (issue #74): l'indirizzo di prova va sul socket.
+  await handler({ ip, socket: { remoteAddress: ip }, body, query: {}, params: {} }, {
     status(c) { captured.statusCode = c; return this; },
     json(p) { captured.body = p; return this; }
   });
@@ -386,7 +387,7 @@ test('/internal/mcp/bot-control: cancello IP, azione e bot inesistente', async (
   const id = makeBot();
   botManager.loadFromDb();
 
-  for (const ip of ['203.0.113.10', '10.0.0.4', '192.168.1.9', '']) {
+  for (const ip of ['203.0.113.10', '10.0.0.4', '192.168.1.9', '172.18.0.3', '']) {
     const res = await callRoute(CONTROL, { ip, body: { bot_id: id, action: 'start' } });
     assert.equal(res.statusCode, 403, `IP ${ip || '(vuoto)'} respinto`);
   }

@@ -851,6 +851,54 @@ class RiskManager {
   }
 
   /**
+   * #76 — un prezzo di stop è UTILIZZABILE solo se è un numero finito e
+   * positivo. `null`, `NaN`, `0` e negativi non proteggono niente: la guardia
+   * li trattava tutti come «SL non previsto» (`!slPx`) e la posizione restava
+   * nuda senza che nessuno se ne accorgesse.
+   */
+  isValidStopPx(px) {
+    const n = Number(px);
+    return px != null && Number.isFinite(n) && n > 0;
+  }
+
+  /**
+   * #76 — lo stop loss CONFIGURATO è calcolabile con i dati a disposizione?
+   *
+   * Con `sl.mode: 'atr'` e candele non scaricate (`marketData.getSnapshot`
+   * ingoia l'errore) l'ATR è null e `computeTpSl` restituisce `slPx: null`
+   * senza dire niente: la posizione si apriva senza SL. Qui la domanda è
+   * esplicita, prima di qualunque ordine, e la risposta è un MOTIVO leggibile.
+   *
+   * Il motivo è volutamente stabile (niente prezzi nel testo): il chiamante lo
+   * usa come chiave dell'episodio di notifica, e un numero che cambia a ogni
+   * tick trasformerebbe un episodio in una raffica.
+   *
+   * @param refPx prezzo di riferimento (entry, o prezzo corrente prima del fill)
+   * @param ctx { atr } — lo STESSO ATR che verrà poi passato a `computeTpSl`
+   * @returns null se calcolabile o se lo SL non è configurato (lì non c'è
+   *   niente da calcolare: è una scelta di policy), altrimenti il motivo.
+   */
+  stopLossUncomputableReason(refPx, side, config, ctx = {}) {
+    const sl = config?.sl;
+    if (!sl?.enabled) return null;
+    const value = Number(sl.value);
+    if (sl.value == null || !Number.isFinite(value) || value <= 0) {
+      return `sl.value non valido (${String(sl.value)}): serve un numero maggiore di zero`;
+    }
+    if (sl.mode === 'atr') {
+      const atr = Number(ctx.atr);
+      if (ctx.atr == null || !Number.isFinite(atr) || atr <= 0) {
+        return 'ATR non disponibile (candele mancanti o insufficienti)';
+      }
+    }
+    const { slPx } = this.computeTpSl(refPx, side, config, ctx);
+    if (!this.isValidStopPx(slPx)) {
+      return `lo stop risultante non è un prezzo valido (sl.mode ${sl.mode || 'percent'}, sl.value ${sl.value})`;
+    }
+    return null;
+  }
+
+  /**
    * SEC-01: aggiorna una posizione dopo un fill di aggiunta DCA (mediazione).
    * Calcola il nuovo prezzo medio ponderato ed i nuovi TP/SL su quel prezzo,
    * con la STESSA configurazione (percent/atr/absolute) usata all'apertura —

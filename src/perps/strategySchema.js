@@ -40,6 +40,17 @@ export const VALID_INTERVALS = new Set([
 export const VALID_RULE_TYPES = new Set(['price', 'funding', 'external', 'indicator']);
 export const VALID_INDICATORS = new Set(['rsi', 'ema', 'sma', 'adx', 'macd', 'bollinger']);
 
+/**
+ * #71 — tetti della DCA, applicati in SCRITTURA (import, MCP). Ogni step
+ * aggiunge `size × sizeMultiplier` sulla size CORRENTE: con moltiplicatore 1
+ * la posizione raddoppia a ogni step (steps=4 → 16× l'ingresso). I gate di
+ * rischio a runtime (`bot._dcaGateBlock`) restano la protezione vera, anche per
+ * le config già in DB oltre questi limiti; questi tetti impediscono di
+ * scriverne di nuove.
+ */
+export const MAX_DCA_STEPS = 5;
+export const MAX_DCA_SIZE_MULTIPLIER = 2;
+
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const isNonEmptyString = (v) => typeof v === 'string' && v.trim().length > 0;
 
@@ -202,7 +213,12 @@ export function validateStrategyConfig(config, { prefix = '' } = {}) {
     const d = config.dca;
     if (!isPlainObject(d)) at('config.dca deve essere un oggetto.');
     else {
-      if (d.steps !== undefined && (!Number.isInteger(d.steps) || d.steps < 0)) at(`dca.steps non valido: ${d.steps}.`);
+      if (d.steps !== undefined && (!Number.isInteger(d.steps) || d.steps < 0 || d.steps > MAX_DCA_STEPS)) {
+        at(`dca.steps non valido: ${d.steps} (atteso un intero da 0 a ${MAX_DCA_STEPS}).`);
+      }
+      if (d.sizeMultiplier !== undefined && (!Number.isFinite(d.sizeMultiplier) || d.sizeMultiplier <= 0 || d.sizeMultiplier > MAX_DCA_SIZE_MULTIPLIER)) {
+        at(`dca.sizeMultiplier non valido: ${d.sizeMultiplier} (atteso un numero > 0 e <= ${MAX_DCA_SIZE_MULTIPLIER}).`);
+      }
       if (d.stepPercent !== undefined && (!Number.isFinite(d.stepPercent) || d.stepPercent <= 0)) at(`dca.stepPercent non valido: ${d.stepPercent}.`);
     }
   }
@@ -662,6 +678,7 @@ export function validateItemList(list, { maxItems = 100 } = {}) {
 
 export default {
   EXPORT_KIND, EXPORT_VERSION, VALID_INTERVALS, VALID_RULE_TYPES, VALID_INDICATORS,
+  MAX_DCA_STEPS, MAX_DCA_SIZE_MULTIPLIER,
   buildEnvelope, historyExportItem, botExportItem, exportFileName,
   validateStrategyConfig, validateItem, validateEnvelope, validateItemList,
   extractBotConfig, mergeStrategyConfig, normalizeStrategyConfig,

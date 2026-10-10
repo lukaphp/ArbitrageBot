@@ -53,7 +53,7 @@ db.init();
 
 const { default: app } = await import('../src/server.js');
 const { default: botManager } = await import('../src/perps/botManager.js');
-const { isInternalIp } = await import('../src/utils/internalLoopback.js');
+const { isLoopbackAddress } = await import('../src/utils/internalLoopback.js');
 
 botManager.bots.clear();
 
@@ -279,7 +279,8 @@ function routeHandler(method, routePath) {
 async function callEndpoint({ ip = '127.0.0.1', body = {} } = {}) {
   const handler = routeHandler('post', ENDPOINT);
   const captured = { statusCode: 200, body: null };
-  await handler({ ip, socket: {}, body, query: {}, params: {} }, {
+  // Il cancello guarda il peer TCP (issue #74): l'indirizzo di prova va sul socket.
+  await handler({ ip, socket: { remoteAddress: ip }, body, query: {}, params: {} }, {
     status(c) { captured.statusCode = c; return this; },
     json(p) { captured.body = p; return this; }
   });
@@ -315,14 +316,16 @@ test('/internal/mcp/bot-update: stesso cancello IP di /internal/mcp/reload', asy
   const io = fakeIo();
   botManager.io = io;
   try {
-    for (const ip of ['203.0.113.10', '10.0.0.4', '192.168.1.9', '']) {
+    // 172.x è la rete Docker: Caddy, Grafana, il gateway di `tailscale serve`.
+    // Fino a #74 era ammessa, ed era proprio il buco.
+    for (const ip of ['203.0.113.10', '10.0.0.4', '192.168.1.9', '172.17.0.3', '']) {
       const res = await callEndpoint({ ip, body: { state: stateOf('bot-route-2', 'close') } });
       assert.equal(res.statusCode, 403, `IP ${ip || '(vuoto)'} deve essere respinto`);
       assert.equal(res.body.success, false);
     }
     assert.equal(io.emitted.length, 0, 'un IP respinto non emette nulla ai browser');
 
-    for (const ip of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '172.17.0.3']) {
+    for (const ip of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
       const res = await callEndpoint({ ip, body: { state: stateOf('bot-route-2', 'hold') } });
       assert.equal(res.statusCode, 200, `IP ${ip} deve essere ammesso`);
     }
@@ -352,12 +355,13 @@ test('/internal/mcp/bot-update: senza client Socket.IO risponde 200 con emitted:
   assert.deepEqual(res.body, { success: true, emitted: false });
 });
 
-test('isInternalIp: la regola è una sola, condivisa da tutte le rotte interne', () => {
-  for (const ip of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '172.17.0.2', '172.31.255.1']) {
-    assert.equal(isInternalIp(ip), true, `${ip} è interno`);
+test('isLoopbackAddress: la regola è una sola, condivisa da tutte le rotte interne', () => {
+  for (const ip of ['127.0.0.1', '127.255.0.9', '::1', '::ffff:127.0.0.1']) {
+    assert.equal(isLoopbackAddress(ip), true, `${ip} è loopback`);
   }
-  for (const ip of ['', null, undefined, '10.0.0.1', '192.168.0.1', '203.0.113.1', '1.172.0.1', '127.0.0.1.evil.com']) {
-    assert.equal(isInternalIp(ip), false, `${ip} NON è interno`);
+  for (const ip of ['', null, undefined, '172.17.0.2', '172.31.255.1', '::ffff:172.18.0.3',
+    '10.0.0.1', '192.168.0.1', '203.0.113.1', '1.172.0.1', '127.0.0.1.evil.com', '::ffff:127.0.0.1.evil.com']) {
+    assert.equal(isLoopbackAddress(ip), false, `${ip} NON è loopback`);
   }
 });
 

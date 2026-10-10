@@ -15,8 +15,8 @@
  * duplicati (il client in `src/mcp/tools.js`, il controllo IP in
  * `src/server.js`):
  *
- *  - `isInternalIp(ip)`  — lato server: chi può chiamare `/internal/*`;
- *  - `postInternal(...)` — lato client: la POST fire-and-forget.
+ *  - `isLoopbackRequest(req)` — lato server: chi può chiamare `/internal/*`;
+ *  - `postInternal(...)`       — lato client: la POST fire-and-forget.
  *
  * Sta in `src/utils/` e non in `src/mcp/` per una ragione di dipendenze, non di
  * gusto: `src/mcp/tools.js` importa già `src/perps/botManager.js`, quindi far
@@ -25,23 +25,68 @@
  */
 
 import http from 'http';
+import net from 'net';
 
 /**
- * IP ammessi sulle rotte `/internal/*`: loopback (i due processi nello stesso
- * container) e rete Docker interna (172.x). Nessun cookie richiesto — la
- * protezione è la raggiungibilità, quindi qui non si allarga nulla senza
- * cambiare anche il modello di rischio.
+ * MODELLO DI FIDUCIA DELLE ROTTE `/internal/*` (issue #74)
+ * --------------------------------------------------------
  *
- * Estratto senza modifiche dal controllo inline di `/internal/mcp/reload`: se
- * un giorno quella regola cambia deve cambiare per TUTTE le rotte interne
- * insieme, non per quella che qualcuno si ricorda di aggiornare.
+ * Le rotte interne non chiedono cookie né token: la loro unica protezione è CHI
+ * riesce ad aprire la connessione. L'unico chiamante legittimo è il processo
+ * MCP Stdio che gira DENTRO lo stesso container (`docker exec -i … node
+ * src/mcp/server.js`) e bussa con `postInternal`/`requestInternal` su
+ * `127.0.0.1`. Quindi si ammette soltanto il loopback, e lo si legge dal peer
+ * TCP vero (`req.socket.remoteAddress`), MAI da `req.ip`.
+ *
+ * Perché non `req.ip`: con `trust proxy 1` Express lo ricava
+ * dall'`X-Forwarded-For` scritto da Caddy, cioè dal peer che vede CADDY. Dietro
+ * `tailscale serve` → porta pubblicata → proxy Docker quel peer è il gateway
+ * della rete Docker (172.x): ogni richiesta arrivata dalla tailnet sembrava
+ * "interna". E un `X-Forwarded-For` lo può scrivere chiunque. Il socket invece
+ * non si falsifica: una connessione che arriva da Caddy, da Grafana o da
+ * qualunque altro container della rete `web` ha un indirizzo 172.x, e viene
+ * respinta.
+ *
+ * Il vecchio `isInternalIp` ammetteva anche `172.*` "per la rete Docker
+ * interna" (f030e8b), ma nessun chiamante l'ha mai usata: il ponte è sempre
+ * stato loopback. Quel prefisso apriva le rotte a tutto ciò che passa da Caddy.
+ *
+ * Difesa in profondità: Caddy risponde 404 a `/internal/*` prima del
+ * `reverse_proxy` (vedi Caddyfile), così le rotte non sono nemmeno raggiungibili
+ * dalla tailnet. Questo controllo resta comunque la regola che conta, perché
+ * vale anche per chi arriva direttamente su `app:3000` dalla rete Docker.
+ *
+ * Una regola sola per TUTTE le rotte interne: se cambia, cambia insieme per
+ * tutte, non per quella che qualcuno si ricorda di aggiornare. Allargarla
+ * (un'altra rete, un altro container) significa cambiare il modello di rischio:
+ * a quel punto serve un segreto condiviso, non un prefisso IP.
  */
-export function isInternalIp(ip) {
-  const s = String(ip || '');
-  return s === '127.0.0.1'
-    || s === '::1'
-    || s.startsWith('::ffff:127.')
-    || s.startsWith('172.');
+
+/**
+ * `true` se l'indirizzo è di loopback: `127.0.0.0/8`, `::1`, oppure un IPv4
+ * loopback mappato in IPv6 (`::ffff:127.x.y.z`, quello che Node riporta quando
+ * il server ascolta su un socket dual-stack). Funzione pura, nessun I/O.
+ *
+ * @param {string|null|undefined} addr  indirizzo del peer, come lo dà Node
+ * @returns {boolean}
+ */
+export function isLoopbackAddress(addr) {
+  const s = String(addr || '');
+  if (s === '::1') return true;
+  const v4 = s.startsWith('::ffff:') ? s.slice(7) : s;
+  return net.isIPv4(v4) && v4.startsWith('127.');
+}
+
+/**
+ * Il cancello di `/internal/*`: la richiesta arriva da una connessione TCP di
+ * loopback? Legge `req.socket.remoteAddress` e ignora di proposito `req.ip` e
+ * ogni intestazione `X-Forwarded-*` (vedi il modello di fiducia sopra).
+ *
+ * @param {import('http').IncomingMessage} req
+ * @returns {boolean}
+ */
+export function isLoopbackRequest(req) {
+  return isLoopbackAddress(req?.socket?.remoteAddress);
 }
 
 /** Porta di Express: stessa risoluzione di `src/server.js` (i due processi condividono l'env). */
@@ -142,4 +187,4 @@ async function _request(path, payload, { timeoutMs, wantBody }) {
   }
 }
 
-export default { isInternalIp, postInternal, requestInternal };
+export default { isLoopbackAddress, isLoopbackRequest, postInternal, requestInternal };

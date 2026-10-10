@@ -8,6 +8,9 @@
  *   nel formato `scrypt$<saltHex>$<hashHex>` (genera con scripts/hash-password.js).
  * - Dopo il login viene emesso un token di sessione firmato HMAC con
  *   `SESSION_SECRET`, salvato in un cookie httpOnly. Nessuno stato server-side.
+ * - Gli agenti esterni (Hermes) si autenticano con una chiave API dedicata,
+ *   `HERMES_API_KEY`, solo via header: mai con i segreti crittografici (#75,
+ *   vedi il blocco sopra `requireAuth`).
  *
  * In sviluppo, se `APP_PASSWORD_HASH` non è impostato, l'auth è DISATTIVA per
  * comodità. In produzione `validateConfig` rende il hash obbligatorio, quindi
@@ -99,29 +102,87 @@ export function cookieOptions() {
 
 export const COOKIE = COOKIE_NAME;
 
+/**
+ * CHIAVE API PER LE CHIAMATE MACCHINA (#75)
+ * -----------------------------------------
+ * Oltre al cookie di sessione e al token firmato, `requireAuth` accetta UNA sola
+ * credenziale "macchina": `HERMES_API_KEY`, per agenti esterni (Hermes via
+ * `/api/mcp`, script). Regole:
+ *
+ * - Mai `SESSION_SECRET` né `AGENT_ENCRYPTION_KEY`. Prima erano accettati anche
+ *   loro: chi otteneva "la API key" otteneva la chiave che decifra le chiavi
+ *   agent (anche nei backup) o il segreto con cui forgiare sessioni. Una
+ *   credenziale API deve poter trapelare ed essere ruotata senza trascinarsi
+ *   dietro la cifratura. Per lo stesso motivo, se `HERMES_API_KEY` coincide con
+ *   uno dei due segreti viene ignorata (con un warning): riusare il valore
+ *   riaprirebbe esattamente la stessa falla.
+ * - Lunghezza minima `MACHINE_KEY_MIN_LENGTH`: una chiave più corta è
+ *   indovinabile, quindi viene ignorata (warning una volta sola) invece che
+ *   accettata in silenzio.
+ * - Trasporti: solo header (`Authorization: Bearer <chiave>` o `x-api-key`).
+ *   Niente più `?apiKey=` in query: l'URL finisce nella history, nei log del
+ *   reverse proxy e nel Referer.
+ * - Confronto timing-safe: entrambi i lati passano da sha256 prima di
+ *   `timingSafeEqual`, così i buffer hanno sempre la stessa lunghezza e il
+ *   tempo di risposta non rivela nemmeno la lunghezza della chiave.
+ */
+const MACHINE_KEY_MIN_LENGTH = 24;
+const warnedMachineKey = new Set();
+
+function warnMachineKeyOnce(reason, message) {
+  if (warnedMachineKey.has(reason)) return;
+  warnedMachineKey.add(reason);
+  logger.warn(message);
+}
+
+/** La chiave API macchina valida, oppure null se assente/inutilizzabile. */
+function machineApiKey() {
+  const key = process.env.HERMES_API_KEY;
+  if (!key) return null;
+  if (key.length < MACHINE_KEY_MIN_LENGTH) {
+    warnMachineKeyOnce('short',
+      `Auth: HERMES_API_KEY più corta di ${MACHINE_KEY_MIN_LENGTH} caratteri, ignorata (genera con: openssl rand -hex 32)`);
+    return null;
+  }
+  if (key === process.env.SESSION_SECRET || key === process.env.AGENT_ENCRYPTION_KEY) {
+    warnMachineKeyOnce('reused',
+      'Auth: HERMES_API_KEY coincide con un segreto crittografico (sessione o cifratura), ignorata: usa una chiave dedicata');
+    return null;
+  }
+  return key;
+}
+
+/** Confronto timing-safe tra stringhe di lunghezza qualsiasi (via sha256). */
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+/** True se `provided` è la chiave API macchina configurata. */
+function verifyApiKey(provided) {
+  if (typeof provided !== 'string' || !provided) return false;
+  const expected = machineApiKey();
+  if (!expected) return false;
+  return safeEqual(provided, expected);
+}
+
 /** Middleware Express: blocca le richieste non autenticate con 401. */
 export function requireAuth(req, res, next) {
   if (!isAuthEnabled()) return next(); // auth disattivata (solo sviluppo)
   const token = req.cookies?.[COOKIE_NAME];
   if (verifyToken(token)) return next();
 
-  // Supporto Bearer token per chiamate API / MCP da agenti esterni (es. Hermes)
+  // Bearer: token di sessione firmato, oppure la chiave API macchina (es. Hermes)
   const authHeader = req.headers?.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
     const bearer = authHeader.slice(7).trim();
     if (verifyToken(bearer)) return next();
-    if (process.env.SESSION_SECRET && bearer === process.env.SESSION_SECRET) return next();
-    if (process.env.AGENT_ENCRYPTION_KEY && bearer === process.env.AGENT_ENCRYPTION_KEY) return next();
-    if (process.env.HERMES_API_KEY && bearer === process.env.HERMES_API_KEY) return next();
+    if (verifyApiKey(bearer)) return next();
   }
 
-  // Supporto header x-api-key o query apiKey per MCP HTTP
-  const apiKey = req.headers?.['x-api-key'] || req.query?.apiKey;
-  if (apiKey) {
-    if (process.env.SESSION_SECRET && apiKey === process.env.SESSION_SECRET) return next();
-    if (process.env.AGENT_ENCRYPTION_KEY && apiKey === process.env.AGENT_ENCRYPTION_KEY) return next();
-    if (process.env.HERMES_API_KEY && apiKey === process.env.HERMES_API_KEY) return next();
-  }
+  // Header x-api-key per MCP HTTP. La query `?apiKey=` NON è più accettata (#75).
+  if (verifyApiKey(req.headers?.['x-api-key'])) return next();
 
   return res.status(401).json({ success: false, error: 'Non autenticato' });
 }

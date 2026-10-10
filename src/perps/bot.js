@@ -18,7 +18,7 @@ import paperBroker from './paperBroker.js';
 import marketData from './marketData.js';
 import strategyEngine from './strategyEngine.js';
 import riskManager, { DYNAMIC_SIZING_DEFAULTS } from './riskManager.js';
-import portfolio from './portfolio.js';
+import portfolio, { checkExposure } from './portfolio.js';
 import notifier from './notifier.js';
 import predictor from './predictor.js';
 import * as ind from './indicators.js';
@@ -26,6 +26,7 @@ import metrics from './metrics.js';
 import jev from '../agents/jev.js';
 import db from '../db/database.js';
 import { normalizeStrategyConfig } from './strategySchema.js';
+import { readKillSwitch } from './killSwitch.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
 
@@ -143,6 +144,16 @@ export class PerpsBot {
     // detto. Dopo un riavvio si rinotifica al più una volta — l'errore da non
     // rifare era l'opposto, cioè perdere il blocco stesso.
     this._overtradingEpisode = null;
+    // #72 — episodio di kill switch già notificato ('attivo' | 'lettura' | null).
+    // Stesso principio di `_overtradingEpisode`: una notifica per episodio, non
+    // per tick; si azzera alla prima apertura tentata con il flag spento.
+    this._killSwitchEpisode = null;
+    // #71 — episodio di step DCA saltato già notificato
+    // ('<posizione>:<step>:<motivo>' | null). Stesso principio: il movimento
+    // avverso persiste per molti tick, la notifica è una per episodio. La
+    // chiave include posizione e step, così una posizione nuova o lo step
+    // successivo bloccato per lo stesso motivo vengono comunque detti.
+    this._dcaBlockEpisode = null;
     // Guardia SL — stato dei due contatori, tenuti DISTINTI di proposito perché
     // contano due cose diverse (vedi `_ensureStopLoss`):
     //  - `_slVerifyFailures`: quante volte di fila NON siamo riusciti a leggere
@@ -645,6 +656,16 @@ export class PerpsBot {
   }
 
   async _openPosition(side, snapshot, account) {
+    // #72 — kill switch PRIMA di tutto: niente sizing, niente MTF/ML (chiamate
+    // di rete), niente ordini. Sta qui e non nel tick perché blocca solo
+    // l'INGRESSO: con il flag attivo il bot resta running e `_manageOpen`
+    // continua a gestire SL, TP, trailing e chiusure delle posizioni aperte.
+    const ks = this._killSwitchBlock(side);
+    if (ks) {
+      this.lastEval = { action: 'hold', reason: ks, ts: Date.now() };
+      return;
+    }
+
     const market = marketData.getMarkets().find(m => m.coin === this.coin);
     const szDecimals = market?.szDecimals ?? 3;
     const leverage = this.config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage;
@@ -1035,6 +1056,42 @@ export class PerpsBot {
       ? ` (${verdict.opens} aperture nella finestra corrente)`
       : '';
     notifier.notify(`▶️ <b>${this.name}</b> (${this.coin}): frequenza di apertura <b>rientrata</b>${dettaglio} — nuove aperture di nuovo consentite.`);
+  }
+
+  /**
+   * #72 — gate del kill switch sulle NUOVE aperture. Ritorna il motivo (stringa)
+   * se bloccato, altrimenti null.
+   *
+   * Prima di #72 il flag lo leggeva solo il RiskAgent: `/api/agents/killswitch`
+   * annunciava «nuove aperture bloccate» mentre i bot a regole continuavano ad
+   * aprire. Qui si blocca SOLO l'ingresso — fermare il bot lascerebbe le
+   * posizioni aperte senza chi ne gestisce i trigger.
+   *
+   * Fail-closed (vedi `killSwitch.js`): flag illeggibile = aperture sospese, con
+   * un motivo DIVERSO da "attivo", perché all'operatore si dice cosa è successo
+   * davvero. Una notifica per episodio; passare da "attivo" a "non leggibile" è
+   * un episodio nuovo e va detto.
+   */
+  _killSwitchBlock(side) {
+    const { on, readError } = readKillSwitch();
+    if (!on) {
+      this._killSwitchEpisode = null;
+      return null;
+    }
+    const kind = readError ? 'lettura' : 'attivo';
+    const motivo = readError
+      ? `Kill switch non leggibile (${readError}): nuove aperture sospese per prudenza`
+      : 'Kill switch attivo: nuove aperture bloccate';
+    logger.warn(`Bot ${this.name}: apertura ${this.coin} non eseguita — ${motivo}`);
+    if (this._killSwitchEpisode !== kind) {
+      this._killSwitchEpisode = kind;
+      if (readError) {
+        notifier.notify(`⚠️ <b>${this.name}</b> (${this.coin}): stato del kill switch non leggibile (${readError}) — nuove aperture sospese per prudenza. Le posizioni aperte restano gestite.`, { urgent: true });
+      } else {
+        notifier.notify(`🛑 <b>${this.name}</b> (${this.coin}): segnale <b>${String(side).toUpperCase()}</b> non eseguito — <b>kill switch attivo</b>. Il bot resta attivo e continua a gestire le posizioni aperte.`);
+      }
+    }
+    return motivo;
   }
 
   /** Conferma multi-timeframe: true se il TF superiore concorda col lato (o se disattivata). */
@@ -1522,7 +1579,8 @@ export class PerpsBot {
     // DEBT-01: e che i TP attivi non siano più di quanti la strategia prevede.
     await this._sweepExcessTakeProfits(readOrders);
     // DCA: aggiunge alla posizione su movimento avverso (mediazione del prezzo)
-    await this._maybeDca(snapshot);
+    // #71: con l'`account` del tick, che serve ai gate di rischio dell'aggiunta.
+    await this._maybeDca(snapshot, account);
     // Trailing stop — PLACE-THEN-CANCEL: piazza il nuovo trigger PRIMA di
     // cancellare il vecchio, così non esiste mai una finestra senza SL.
     const atrVal = this._usesAtr() ? ind.atr(snapshot.candles, this.config.atrPeriod || 14) : null;
@@ -1550,8 +1608,15 @@ export class PerpsBot {
     }
   }
 
-  /** DCA basico: aggiunge alla posizione se il prezzo va contro di una soglia. */
-  async _maybeDca(snapshot) {
+  /**
+   * DCA basico: aggiunge alla posizione se il prezzo va contro di una soglia.
+   *
+   * #71 — ogni aggiunta passa dagli stessi gate dell'apertura, perché impegna
+   * capitale nuovo esattamente come un'apertura (vedi `_dcaGateBlock`). Uno
+   * step bloccato NON viene consumato: `dcaCount` resta invariato e lo step
+   * torna valutabile al tick successivo, se la condizione che lo blocca cade.
+   */
+  async _maybeDca(snapshot, account) {
     const dca = this.config.dca;
     if (!dca || !dca.steps) return;
     const done = this.position.dcaCount || 0;
@@ -1566,12 +1631,33 @@ export class PerpsBot {
       ? (originalEntry - snapshot.price) / originalEntry
       : (snapshot.price - originalEntry) / originalEntry;
     // Soglia progressiva: step 1 a stepPercent, step 2 a 2×stepPercent, ...
-    if (adverse * 100 < dca.stepPercent * (done + 1)) return;
+    // #71 — scritta in negativo (`!(… >= …)`) di proposito: con un prezzo NaN
+    // la forma `adverse < soglia` era falsa e la DCA PARTIVA. Così un movimento
+    // non calcolabile non fa scattare niente.
+    if (!(adverse * 100 >= dca.stepPercent * (done + 1))) return;
+    const step = done + 1;
+    let locked = false;
     try {
       const market = marketData.getMarkets().find(m => m.coin === this.coin);
       const szDec = market?.szDecimals ?? 3;
       const addSize = riskManager.roundSize(this.position.size * (dca.sizeMultiplier || 1), szDec);
       if (addSize <= 0) return;
+
+      // #71 — gate di rischio, in ordine; il primo che blocca salta lo step.
+      if (this._dcaGateBlock(step, snapshot.price, addSize, account)) return;
+
+      // CRIT-03 sul percorso DCA: stesso lock per (master, coin) dell'apertura,
+      // così un'aggiunta e un'apertura di un altro bot sullo stesso mercato del
+      // wallet non si sovrappongono. NIENTE `reserveOpenSlot`: la posizione
+      // esiste già ed è già contata fra le concorrenti.
+      if (!execQueue.acquireOpenLock(this.masterAddress, this.coin)) {
+        this._blockDca(step, 'lock', `operazione già in corso su ${this.coin} per questo wallet (un altro bot ha il lock)`);
+        return;
+      }
+      locked = true;
+      // Tutti i gate passati: l'episodio di blocco (se c'era) è chiuso.
+      this._dcaBlockEpisode = null;
+
       const order = await this.broker.placeMarketOrder({
         masterAddress: this.masterAddress, coin: this.coin,
         isBuy: this.position.side === 'long', size: addSize, slippage: this.config.slippage ?? 0.02
@@ -1630,7 +1716,68 @@ export class PerpsBot {
       await this._replaceTpSl(updated.tpPx, updated.slPx, `DCA #${this.position.dcaCount}`);
     } catch (error) {
       logger.debug(`Bot ${this.name}: DCA fallito`, error.message);
+    } finally {
+      // Rilasciato solo se preso da QUESTA chiamata: un lock tenuto da un
+      // altro bot non va toccato.
+      if (locked) execQueue.releaseOpenLock(this.masterAddress, this.coin);
     }
+  }
+
+  /**
+   * #71 — gate di rischio di uno step DCA, nell'ordine:
+   *  a. kill switch (fail-closed, stessa lettura di `_killSwitchBlock`);
+   *  b-d. `riskManager.checkDcaAdd`: dati finiti, `checkLimits` (leva, perdita
+   *       giornaliera), tetto di notional e Budget Ceiling sul TOTALE post-DCA;
+   *  e. esposizione di portafoglio con la sola AGGIUNTA (`checkExposure`): non
+   *     `canOpen()`, che bloccherebbe la DCA anche per il conteggio delle
+   *     posizioni concorrenti — dove questa è già contata — e per il cooldown
+   *     da perdite, che riguarda il rientro e non la gestione.
+   * Ritorna il motivo (stringa) se bloccato, altrimenti null. Sincrona: nessun
+   * `await` fra i controlli e il lock preso dal chiamante.
+   */
+  _dcaGateBlock(step, price, addSize, account) {
+    const { on, readError } = readKillSwitch();
+    if (on) {
+      if (readError) {
+        const motivo = `kill switch non leggibile (${readError}), aggiunte sospese per prudenza`;
+        return this._blockDca(step, 'killswitch-lettura', motivo,
+          `⚠️ <b>${this.name}</b> (${this.coin}): stato del kill switch non leggibile (${readError}) — step DCA #${step} <b>saltato</b> per prudenza. La posizione resta gestita (SL, TP, trailing).`,
+          { urgent: true });
+      }
+      return this._blockDca(step, 'killswitch', 'kill switch attivo',
+        `🛑 <b>${this.name}</b> (${this.coin}): step DCA #${step} <b>saltato</b> — <b>kill switch attivo</b>. La posizione resta gestita (SL, TP, trailing), nessuna aggiunta.`);
+    }
+
+    const leverage = this.config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage;
+    const verdict = riskManager.checkDcaAdd(this.config, {
+      account, position: this.position, price, addSize, leverage,
+      dailyPnl: this.dailyPnl, maxAllocationUsd: this.maxAllocationUsd
+    });
+    if (!verdict.ok) return this._blockDca(step, verdict.kind, verdict.reason);
+
+    const exposure = checkExposure({
+      positions: account?.positions, plannedNotional: verdict.addNotional,
+      maxTotalExposureUsd: portfolio.getLimits().maxTotalExposureUsd
+    });
+    if (!exposure.ok) return this._blockDca(step, 'esposizione', `portafoglio: ${exposure.reason}`);
+
+    return null;
+  }
+
+  /**
+   * #71 — registra uno step DCA saltato: `lastEval` in hold con il motivo, log
+   * a ogni tick, notifica UNA volta per episodio (posizione, step, motivo).
+   * Lo step NON è consumato: qui non si tocca `dcaCount`.
+   */
+  _blockDca(step, kind, motivo, text = null, opts = undefined) {
+    this.lastEval = { action: 'hold', reason: `DCA #${step} saltato: ${motivo}`, ts: Date.now() };
+    logger.warn(`Bot ${this.name}: step DCA #${step} su ${this.coin} non eseguito — ${motivo}`);
+    const key = `${this.position?.id ?? '?'}:${step}:${kind}`;
+    if (this._dcaBlockEpisode !== key) {
+      this._dcaBlockEpisode = key;
+      notifier.notify(text || `⚠️ <b>${this.name}</b> (${this.coin}): step DCA #${step} <b>saltato</b> — ${motivo}. Posizione invariata; lo step resta disponibile se la condizione rientra.`, opts);
+    }
+    return motivo;
   }
 
   /**

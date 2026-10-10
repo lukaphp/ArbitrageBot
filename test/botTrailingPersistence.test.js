@@ -43,6 +43,9 @@ let MID = 100;
 client.getMid = async () => MID;
 client.roundPx = (px) => Math.round(px * 1e4) / 1e4;
 
+// #71: la DCA passa dai gate di rischio, che leggono l'`account` del tick.
+const ACCOUNT = { equity: 10000, positions: [] };
+
 /** Apre una posizione long riproducendo lo stato lasciato da _openPosition. */
 async function openLong(bot, config, master, coin) {
   const order = await paperBroker.placeMarketOrder({ masterAddress: master, coin, isBuy: true, size: 1 }, 'testnet');
@@ -80,7 +83,7 @@ test('trailing dopo un DCA: originalEntryPx e dcaCount sopravvivono al riavvio',
 
   // --- DCA #1: prezzo sotto la soglia del 2% sull'ingresso originale ---
   MID = 97.5;
-  await bot._maybeDca({ price: MID, candles: [] });
+  await bot._maybeDca({ price: MID, candles: [] }, ACCOUNT);
   assert.equal(bot.position.dcaCount, 1, 'precondizione: un DCA eseguito');
   const avgEntry = bot.position.entryPx;
 
@@ -120,7 +123,7 @@ test('trailing dopo un DCA: originalEntryPx e dcaCount sopravvivono al riavvio',
   // avverso ben oltre la soglia (prima ne partiva uno, capitale non previsto).
   const sizeBefore = rebooted.position.size;
   MID = 90;
-  await rebooted._maybeDca({ price: MID, candles: [] });
+  await rebooted._maybeDca({ price: MID, candles: [] }, ACCOUNT);
   assert.equal(rebooted.position.dcaCount, 1, 'nessun DCA extra dopo il riavvio');
   assert.equal(rebooted.position.size, sizeBefore, 'size invariata: nessun capitale aggiuntivo impegnato');
 });

@@ -939,6 +939,92 @@ class RiskManager {
     }
     return { ok: true, reason: 'OK' };
   }
+
+  /**
+   * #71 — i gate di rischio di un'aggiunta DCA. Prima `_maybeDca` aggiungeva
+   * `size × sizeMultiplier` senza passare da NESSUN controllo dell'apertura:
+   * con steps=4 e moltiplicatore 1 la posizione arrivava a 16× il tetto pensato
+   * per un ingresso, con il prezzo che andava contro.
+   *
+   * Qui la parte DECIDIBILE in isolamento, nell'ordine in cui si applica:
+   *  1. dati: prezzo, size, aggiunta, equity, leva e PnL di giornata finiti —
+   *     FAIL-CLOSED: un NaN attraversa ogni confronto `>`/`<=` come "falso",
+   *     cioè come un via libera; qui vale un blocco;
+   *  2. `checkLimits` (leva, equity, perdita giornaliera) con il plan
+   *     dell'ORDINE che si sta per piazzare, cioè l'aggiunta — stessa
+   *     semantica dell'apertura, dove il plan è l'ordine;
+   *  3. tetto di notional sul TOTALE post-DCA (`(size + aggiunta) × prezzo`):
+   *     è il tetto della POSIZIONE, e una DCA lo supera per costruzione se lo
+   *     si guarda solo sull'aggiunta;
+   *  4. Budget Ceiling sul totale post-DCA, se impostato (un valore non
+   *     numerico blocca: è un limite dichiarato che non sappiamo leggere).
+   * Kill switch, esposizione di portafoglio e lock restano nel bot: dipendono
+   * da stato globale (DB, altri bot), non dagli argomenti.
+   *
+   * Nessun ridimensionamento dell'aggiunta per farla stare nei limiti: lo step
+   * si SALTA. Un'aggiunta ridotta in silenzio sarebbe una strategia diversa da
+   * quella configurata, e sposterebbe l'entry medio in un modo che nessuno ha
+   * scelto.
+   *
+   * `kind` è una chiave STABILE del motivo (senza i numeri, che cambiano a ogni
+   * tick con il prezzo): serve al chiamante per notificare una volta per
+   * episodio invece che a ogni tick.
+   *
+   * @param {object} p { account, position, price, addSize, leverage, dailyPnl, maxAllocationUsd }
+   * @returns {{ ok: boolean, kind?: string, reason?: string, addNotional?: number, totalNotional?: number }}
+   */
+  checkDcaAdd(config, { account, position, price, addSize, leverage, dailyPnl = 0, maxAllocationUsd = null } = {}) {
+    const size = Number(position?.size);
+    const px = Number(price);
+    const add = Number(addSize);
+    const equity = Number(account?.equity ?? account?.accountValue);
+    const lev = Number(leverage);
+    const pnl = Number(dailyPnl);
+    const invalidi = [];
+    if (!Number.isFinite(px) || px <= 0) invalidi.push(`prezzo ${price}`);
+    if (!Number.isFinite(size) || size <= 0) invalidi.push(`size posizione ${position?.size}`);
+    if (!Number.isFinite(add) || add <= 0) invalidi.push(`aggiunta ${addSize}`);
+    if (!Number.isFinite(equity)) invalidi.push(`equity ${account?.equity ?? account?.accountValue}`);
+    if (!Number.isFinite(lev) || lev <= 0) invalidi.push(`leva ${leverage}`);
+    if (!Number.isFinite(pnl)) invalidi.push(`PnL di giornata ${dailyPnl}`);
+    if (invalidi.length) {
+      return { ok: false, kind: 'dati', reason: `dati non validi (${invalidi.join(', ')})` };
+    }
+
+    const addNotional = add * px;
+    const totalNotional = (size + add) * px;
+    if (!Number.isFinite(addNotional) || !Number.isFinite(totalNotional)) {
+      return { ok: false, kind: 'dati', reason: `notional non calcolabile (aggiunta ${addNotional}, totale ${totalNotional})` };
+    }
+
+    const check = this.checkLimits(config, account, { notionalUsd: addNotional, leverage: lev }, pnl);
+    if (!check.ok) {
+      return { ok: false, kind: `limiti:${check.reason.replace(/[\d.,]+/g, '#')}`, reason: check.reason, addNotional, totalNotional };
+    }
+
+    const { maxPositionUsd: maxPos } = resolveMaxPositionUsd(config);
+    if (totalNotional > maxPos) {
+      return {
+        ok: false, kind: 'tetto', addNotional, totalNotional,
+        reason: `notional post-DCA ${totalNotional.toFixed(2)}$ oltre il massimo per posizione (${maxPos}$)`
+      };
+    }
+
+    if (maxAllocationUsd != null) {
+      const budget = Number(maxAllocationUsd);
+      if (!Number.isFinite(budget)) {
+        return { ok: false, kind: 'budget', addNotional, totalNotional, reason: `Budget Ceiling non leggibile (${maxAllocationUsd})` };
+      }
+      if (totalNotional > budget) {
+        return {
+          ok: false, kind: 'budget', addNotional, totalNotional,
+          reason: `Budget Ceiling: notional post-DCA ${totalNotional.toFixed(2)}$ supera il limite di ${budget}$`
+        };
+      }
+    }
+
+    return { ok: true, addNotional, totalNotional };
+  }
 }
 
 export default new RiskManager();

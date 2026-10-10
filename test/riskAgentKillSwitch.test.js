@@ -36,7 +36,7 @@ db.init();
 const { default: portfolio } = await import('../src/perps/portfolio.js');
 const { default: riskAgent } = await import('../src/agents/riskAgent.js');
 
-portfolio.setLimits({ maxConcurrentPositions: 3, maxTotalExposureUsd: 1e9, maxConsecutiveLosses: 99 });
+portfolio.setLimits({ maxConcurrentPositions: 3, maxTotalExposureUsd: 1e7, maxConsecutiveLosses: 99 });
 
 const MASTER = '0xAbC0000000000000000000000000000000000001';
 

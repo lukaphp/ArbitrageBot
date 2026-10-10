@@ -48,7 +48,7 @@ const { default: riskAgent } = await import('../src/agents/riskAgent.js');
 
 // Cap esplicito: il test non deve dipendere dai default né inciampare
 // nell'esposizione totale o nel cooldown da perdite consecutive.
-portfolio.setLimits({ maxConcurrentPositions: 3, maxTotalExposureUsd: 1e9, maxConsecutiveLosses: 99 });
+portfolio.setLimits({ maxConcurrentPositions: 3, maxTotalExposureUsd: 1e7, maxConsecutiveLosses: 99 });
 db.setSetting('killswitch', 'off');
 
 const MASTER = '0xAbC0000000000000000000000000000000000001';

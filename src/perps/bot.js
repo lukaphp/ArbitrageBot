@@ -2347,9 +2347,14 @@ export class PerpsBot {
     const feeStr = fee ? ` · fee ${fee.toFixed(2)}$` : '';
     notifier.notify(`🔴 <b>${this.name}</b> ha chiuso (${closeReason}) — PnL ${emoji} ${net.toFixed(2)}$${feeStr} · giornaliero ${this.dailyPnl.toFixed(2)}$`);
 
-    // Stop automatico se superato il limite di perdita giornaliera
-    const maxDailyLoss = this.config.risk?.maxDailyLossUsd ?? HYPERLIQUID_CONFIG.risk.maxDailyLossUsd;
-    if (this.dailyPnl <= -Math.abs(maxDailyLoss)) {
+    // Stop automatico se superato il limite di perdita giornaliera.
+    // #79 — lo STESSO limite effettivo del gate d'apertura (globale stretto
+    // dall'override del bot, mai allargato): con due letture diverse un bot con
+    // override più largo restava acceso oltre la soglia che il gate applica.
+    // Limite globale inservibile → `limit` null: le aperture sono già bloccate
+    // da `checkLimits`, qui non c'è una soglia da confrontare.
+    const { limit: maxDailyLoss } = riskManager.resolveRiskLimit(this.config, 'maxDailyLossUsd', { absolute: true });
+    if (maxDailyLoss != null && this.dailyPnl <= -maxDailyLoss) {
       logger.warn(`Bot ${this.name}: limite perdita giornaliera raggiunto, arresto`);
       notifier.notify(`🛑 <b>${this.name}</b>: limite perdita giornaliera raggiunto, bot fermato.`, { urgent: true });
       this.stop();

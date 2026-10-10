@@ -18,7 +18,7 @@ import paperBroker from './paperBroker.js';
 import marketData from './marketData.js';
 import strategyEngine from './strategyEngine.js';
 import riskManager, { DYNAMIC_SIZING_DEFAULTS } from './riskManager.js';
-import portfolio from './portfolio.js';
+import portfolio, { checkExposure } from './portfolio.js';
 import notifier from './notifier.js';
 import predictor from './predictor.js';
 import * as ind from './indicators.js';
@@ -26,6 +26,7 @@ import metrics from './metrics.js';
 import jev from '../agents/jev.js';
 import db from '../db/database.js';
 import { normalizeStrategyConfig } from './strategySchema.js';
+import { readKillSwitch } from './killSwitch.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
 
@@ -143,6 +144,28 @@ export class PerpsBot {
     // detto. Dopo un riavvio si rinotifica al più una volta — l'errore da non
     // rifare era l'opposto, cioè perdere il blocco stesso.
     this._overtradingEpisode = null;
+    // #72 — episodio di kill switch già notificato ('attivo' | 'lettura' | null).
+    // Stesso principio di `_overtradingEpisode`: una notifica per episodio, non
+    // per tick; si azzera alla prima apertura tentata con il flag spento.
+    this._killSwitchEpisode = null;
+    // #71 — episodio di step DCA saltato già notificato
+    // ('<posizione>:<step>:<motivo>' | null). Stesso principio: il movimento
+    // avverso persiste per molti tick, la notifica è una per episodio. La
+    // chiave include posizione e step, così una posizione nuova o lo step
+    // successivo bloccato per lo stesso motivo vengono comunque detti.
+    this._dcaBlockEpisode = null;
+    // #76 — tre episodi distinti attorno allo SL «non c'è», perché sono tre
+    // situazioni diverse con tre destinatari diversi:
+    //  - `_slUncomputableEpisode`: motivo per cui un'APERTURA è stata saltata
+    //    (SL configurato ma non calcolabile). Una notifica per episodio; si
+    //    azzera alla prima apertura che passa il controllo.
+    //  - `_slMissingEpisode`: id della posizione GIÀ APERTA con SL configurato
+    //    ma non calcolabile, già segnalata con l'allarme urgente.
+    //  - `_noSlByConfigWarned`: id della posizione già segnalata come «senza
+    //    SL per configurazione» — legittima, detta una volta e basta.
+    this._slUncomputableEpisode = null;
+    this._slMissingEpisode = null;
+    this._noSlByConfigWarned = null;
     // Guardia SL — stato dei due contatori, tenuti DISTINTI di proposito perché
     // contano due cose diverse (vedi `_ensureStopLoss`):
     //  - `_slVerifyFailures`: quante volte di fila NON siamo riusciti a leggere
@@ -205,6 +228,7 @@ export class PerpsBot {
       dcaCount: trailing.dcaCount || 0,
       tpPx: row.tp_px, slPx: row.sl_px, openedAt: row.opened_at,
       slOid: trailing.slOid || null,
+      slStale: trailing.slStale || null, // #76, vedi `_replaceTpSl`
       // Oid dei trigger di take profit. Servono a riconoscere QUALE ordine ha
       // chiuso la posizione (vedi `_classifyCloseFills`): senza persisterli, dopo
       // un riavvio il bot non saprebbe più distinguere un TP scattato da una
@@ -244,6 +268,14 @@ export class PerpsBot {
   _reportConfigIssues() {
     if (this._configChanges?.length) {
       logger.warn(`Bot ${this.name} (${this.coin}): regole in formato non canonico, interpretate comunque`, { correzioni: this._configChanges });
+    }
+
+    // #76 — SL non previsto dalla config: è una scelta di policy, non un guasto,
+    // e il bot non viene bloccato. Ma va detto, una volta per avvio: chi legge
+    // il log deve poter distinguere «senza SL per scelta» da «SL non
+    // calcolabile». La notifica arriva per POSIZIONE (vedi `_warnNoSlByConfig`).
+    if (!this.config.sl?.enabled) {
+      logger.warn(`Bot ${this.name} (${this.coin}): stop-loss non abilitato nella strategia — le posizioni aperte da questo bot non avranno SL per configurazione`);
     }
 
     // BUG-SIZECAP-01 — parametri di rischio DICHIARATI in un percorso che
@@ -645,6 +677,28 @@ export class PerpsBot {
   }
 
   async _openPosition(side, snapshot, account) {
+    // #72 — kill switch PRIMA di tutto: niente sizing, niente MTF/ML (chiamate
+    // di rete), niente ordini. Sta qui e non nel tick perché blocca solo
+    // l'INGRESSO: con il flag attivo il bot resta running e `_manageOpen`
+    // continua a gestire SL, TP, trailing e chiusure delle posizioni aperte.
+    const ks = this._killSwitchBlock(side);
+    if (ks) {
+      this.lastEval = { action: 'hold', reason: ks, ts: Date.now() };
+      return;
+    }
+
+    // #76 — SL configurato ma non calcolabile → NON si apre (fail-closed).
+    // L'ATR si calcola UNA volta qui e lo stesso valore si riusa dopo il fill
+    // per `computeTpSl`: verifica e calcolo vero non possono divergere. Sta
+    // prima dei gate di rete (MTF/ML) perché costa solo un conto sulle candele
+    // già in memoria, e fuori dalla sezione critica sincrona.
+    const atrVal = this._usesAtr() ? ind.atr(snapshot.candles || [], this.config.atrPeriod || 14) : null;
+    const slBlock = this._slUncomputableBlock(side, snapshot, atrVal);
+    if (slBlock) {
+      this.lastEval = { action: 'hold', reason: slBlock, ts: Date.now() };
+      return;
+    }
+
     const market = marketData.getMarkets().find(m => m.coin === this.coin);
     const szDecimals = market?.szDecimals ?? 3;
     const leverage = this.config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage;
@@ -846,9 +900,15 @@ export class PerpsBot {
       if (slippage != null) {
         logger.info(`Bot ${this.name}: slippage apertura ${this.coin} ${(slippage * 100).toFixed(4)}% (riferimento ${snapshot.price}, eseguito ${order.avgPx})`);
       }
-      // ATR corrente per gli stop adattivi (mode 'atr'); null se non configurati.
-      const atrVal = this._usesAtr() ? ind.atr(snapshot.candles, this.config.atrPeriod || 14) : null;
-      const { tpPx, slPx } = riskManager.computeTpSl(entryPx, side, this.config, { atr: atrVal });
+      // ATR: lo STESSO valore già verificato prima dell'ordine (#76).
+      const { tpPx, slPx: slPxCalc } = riskManager.computeTpSl(entryPx, side, this.config, { atr: atrVal });
+      // #76 — difesa in profondità: il controllo pre-ordine usava il prezzo del
+      // tick, il calcolo vero usa l'entry eseguito. Se nonostante tutto lo SL
+      // configurato non esce valido, non si prosegue in silenzio: lo stato
+      // resta senza `slPx` (mai un NaN in DB) e la guardia lo riprende in
+      // carico a ogni tick (`_ensureStopLoss`, ramo «SL non calcolabile»).
+      const slMissing = !!this.config.sl?.enabled && !riskManager.isValidStopPx(slPxCalc);
+      const slPx = slMissing ? null : slPxCalc;
 
       // SEC-08: mai una seconda riga `open` per lo stesso bot+coin. Se una riga
       // esiste già, qualcuno ha registrato questa stessa apertura mentre eravamo
@@ -886,6 +946,9 @@ export class PerpsBot {
         notifier.notify(`⚠️ <b>${this.name}</b>: all'apertura su ${this.coin} esisteva già la riga posizione #${posId} — riusata (nessun duplicato). Verificare i trigger attivi sull'exchange.`);
         await this._replaceTpSl(tpPx, slPx, 'riga posizione preesistente all\'apertura');
       }
+      if (slMissing) {
+        this._raiseSlMissing(`calcolo dello SL non riuscito dopo il fill (entry ${entryPx}, valore ${slPxCalc})`);
+      }
       // Garanzia: nessuna posizione resta senza stop loss (chiude se non riesce a piazzarlo).
       await this._ensureStopLoss();
 
@@ -909,6 +972,137 @@ export class PerpsBot {
       // con il rischio opposto di contare posizioni già chiuse: non fatto qui.
       execQueue.releaseOpenSlot(this.masterAddress);
     }
+  }
+
+  /**
+   * #76 — gate «SL configurato ma non calcolabile» sulle NUOVE aperture.
+   * Ritorna il motivo (stringa) se bloccato, altrimenti null.
+   *
+   * Prima, con `sl.mode: 'atr'` e candele non scaricate, l'apertura procedeva,
+   * `slPx` usciva null e la guardia SL lo leggeva come «SL non previsto»: la
+   * posizione restava aperta senza stop e nessuno se ne accorgeva. Fail-closed:
+   * senza uno SL calcolabile l'ingresso non avviene. Con SL non abilitato
+   * nella config il gate non blocca: è una scelta di policy (vedi
+   * `_warnNoSlByConfig`).
+   *
+   * Una notifica per episodio (stesso principio di `_lastSizingBlockReason`):
+   * il segnale persiste per molti tick e le candele possono restare assenti
+   * a lungo.
+   */
+  _slUncomputableBlock(side, snapshot, atr) {
+    const motivo = riskManager.stopLossUncomputableReason(snapshot?.price, side, this.config, { atr });
+    if (!motivo) {
+      this._slUncomputableEpisode = null;
+      return null;
+    }
+    const reason = `SL configurato ma non calcolabile: ${motivo}`;
+    const candele = (snapshot?.candles || []).length;
+    logger.warn(`Bot ${this.name}: apertura ${side} ${this.coin} non eseguita — ${reason} (candele disponibili: ${candele})`);
+    if (this._slUncomputableEpisode !== motivo) {
+      this._slUncomputableEpisode = motivo;
+      notifier.notify(`⚠️ <b>${this.name}</b> (${this.coin}): segnale <b>${String(side).toUpperCase()}</b> non eseguito — stop-loss configurato ma <b>non calcolabile</b> (${motivo}). Nessuna apertura senza SL; riprovo ai prossimi segnali.`);
+    }
+    return reason;
+  }
+
+  /**
+   * #76 — allarme URGENTE: posizione aperta con SL configurato ma senza uno
+   * stop calcolabile. Log a ogni tick (è uno stato che deve restare visibile
+   * finché dura), notifica una volta per posizione. La posizione NON viene
+   * chiusa: non sapere dove mettere lo stop non è un motivo per uscire a
+   * mercato, e la guardia ritenta il calcolo al tick successivo.
+   */
+  _raiseSlMissing(motivo, { keptOld = false } = {}) {
+    if (!this.position) return;
+    const { side, size, id, slPx } = this.position;
+    if (keptOld) {
+      // Uno stop c'è ancora, ma è quello di PRIMA: soglia calcolata sul vecchio
+      // entry e size del vecchio piazzamento. Dopo una DCA copre solo la parte
+      // di posizione che esisteva allora — va detto in questi termini.
+      logger.error(`Bot ${this.name}: SL di ${side} ${size} ${this.coin} non ricalcolabile (${motivo}) — mantengo lo stop precedente (soglia ${slPx ?? 'n/d'}), dimensionato sulla size precedente. Riprovo al prossimo tick.`);
+    } else {
+      logger.error(`Bot ${this.name}: posizione ${side} ${size} ${this.coin} SENZA stop-loss — SL configurato ma non calcolabile (${motivo}). Riprovo al prossimo tick; la posizione non viene chiusa.`);
+    }
+    if (this._slMissingEpisode === id) return;
+    this._slMissingEpisode = id;
+    if (keptOld) {
+      notifier.notify(`🚨 <b>${this.name}</b>: stop-loss <b>non ricalcolabile</b> su ${this.coin} (${motivo}) — mantengo lo SL precedente (soglia ${slPx ?? 'n/d'}). Attenzione: è dimensionato sulla size PRECEDENTE, quindi se la posizione è cresciuta (DCA) ne copre solo una parte (size attuale ${size}). Riprovo il ricalcolo a ogni tick; la posizione NON viene chiusa.`, { urgent: true });
+    } else {
+      notifier.notify(`🚨 <b>${this.name}</b>: posizione <b>${String(side).toUpperCase()}</b> ${size} ${this.coin} <b>SENZA stop-loss</b>: SL configurato ma non calcolabile (${motivo}). Riprovo a ogni tick; la posizione NON viene chiusa — verificare manualmente.`, { urgent: true });
+    }
+  }
+
+  /**
+   * #76 — posizione senza SL PER CONFIGURAZIONE (sl non abilitato). È legittima
+   * e non blocca niente, ma va detto una volta per posizione — aperta, adottata
+   * o ritrovata dopo un riavvio passano tutte dalla guardia, quindi questo è
+   * l'unico punto che le copre tutte.
+   */
+  _warnNoSlByConfig() {
+    const { side, size, id } = this.position;
+    if (this._noSlByConfigWarned === id) return;
+    this._noSlByConfigWarned = id;
+    logger.warn(`Bot ${this.name}: posizione ${side} ${size} ${this.coin} senza stop-loss per configurazione (sl non abilitato nella strategia)`);
+    notifier.notify(`ℹ️ <b>${this.name}</b>: posizione <b>${String(side).toUpperCase()}</b> ${size} ${this.coin} senza stop-loss <b>per configurazione</b> (sl non abilitato nella strategia) — nessuna protezione automatica sulle perdite.`);
+  }
+
+  /**
+   * #76 — ricalcola lo SL di una posizione aperta che non ce l'ha, dall'entry
+   * della posizione e con dati FRESCHI. Le candele si chiedono direttamente a
+   * `marketData.getCandles` e non si prendono dallo snapshot del tick, perché
+   * `getSnapshot` ingoia l'errore e restituisce `[]`: qui l'errore serve, va
+   * nel motivo dell'allarme. Una richiesta in più per tick, solo finché la
+   * posizione resta in questo stato anomalo (e la cache di `marketData` la
+   * evita quando le candele ci sono già).
+   *
+   * Copre l'adozione in `_reconcile` (ATR dallo snapshot, che può essere vuoto),
+   * il caso post-fill di `_openPosition` e le righe ritrovate dopo un riavvio.
+   *
+   * Con `slStale` (uno stop VECCHIO tenuto da `_replaceTpSl` perché il nuovo
+   * non era piazzabile — tipicamente dopo una DCA) non basta scrivere `slPx`:
+   * la guardia troverebbe il vecchio trigger sul book e lo terrebbe, con la
+   * soglia e la size di prima. Si passa quindi da `_replaceTpSl`, che piazza il
+   * nuovo sulla size corrente e solo dopo cancella il vecchio.
+   *
+   * @returns true se la posizione ha ora uno `slPx` valido da sorvegliare
+   */
+  async _recoverStopPx() {
+    const pos = this.position;
+    let atr = null;
+    let fetchError = null;
+    if (this.config.sl?.mode === 'atr') {
+      try {
+        const candles = await marketData.getCandles(this.coin, this.config.candleInterval || '15m');
+        atr = ind.atr(candles || [], this.config.atrPeriod || 14);
+      } catch (error) {
+        fetchError = error?.message || String(error);
+      }
+      // La posizione è la stessa di prima dell'attesa? (il tick è serializzato
+      // da `busy`, ma un controllo costa meno di un SL scritto sulla riga sbagliata)
+      if (this.position !== pos) return false;
+    }
+    const motivo = riskManager.stopLossUncomputableReason(pos.entryPx, pos.side, this.config, { atr });
+    if (motivo) {
+      this._raiseSlMissing(fetchError ? `${motivo}; candele non scaricate: ${fetchError}` : motivo, { keptOld: !!pos.slStale });
+      // Uno stop vecchio ancora valido resta sorvegliato dalla guardia normale.
+      return riskManager.isValidStopPx(pos.slPx);
+    }
+    const { slPx } = riskManager.computeTpSl(pos.entryPx, pos.side, this.config, { atr });
+    if (pos.slStale) {
+      await this._replaceTpSl(pos.tpPx, slPx, `SL ricalcolato (${pos.slStale})`);
+      if (this.position !== pos) return false;
+      // Sostituzione non riuscita: `_replaceTpSl` ha già allarmato e tenuto lo stop vecchio.
+      if (pos.slStale) return riskManager.isValidStopPx(pos.slPx);
+    } else {
+      pos.slPx = slPx;
+      db.updatePosition(pos.id, { sl_px: slPx });
+    }
+    logger.warn(`Bot ${this.name}: stop-loss ricalcolato per ${pos.side} ${pos.size} ${this.coin} @ entry ${pos.entryPx} → ${slPx}`);
+    if (this._slMissingEpisode === pos.id) {
+      notifier.notify(`✅ <b>${this.name}</b>: stop-loss di nuovo calcolabile su ${this.coin} (${slPx}) — lo ripiazzo.`);
+    }
+    this._slMissingEpisode = null;
+    return true;
   }
 
   /** True se la strategia usa stop/trailing ATR (per calcolare l'ATR solo se serve). */
@@ -1037,6 +1231,42 @@ export class PerpsBot {
     notifier.notify(`▶️ <b>${this.name}</b> (${this.coin}): frequenza di apertura <b>rientrata</b>${dettaglio} — nuove aperture di nuovo consentite.`);
   }
 
+  /**
+   * #72 — gate del kill switch sulle NUOVE aperture. Ritorna il motivo (stringa)
+   * se bloccato, altrimenti null.
+   *
+   * Prima di #72 il flag lo leggeva solo il RiskAgent: `/api/agents/killswitch`
+   * annunciava «nuove aperture bloccate» mentre i bot a regole continuavano ad
+   * aprire. Qui si blocca SOLO l'ingresso — fermare il bot lascerebbe le
+   * posizioni aperte senza chi ne gestisce i trigger.
+   *
+   * Fail-closed (vedi `killSwitch.js`): flag illeggibile = aperture sospese, con
+   * un motivo DIVERSO da "attivo", perché all'operatore si dice cosa è successo
+   * davvero. Una notifica per episodio; passare da "attivo" a "non leggibile" è
+   * un episodio nuovo e va detto.
+   */
+  _killSwitchBlock(side) {
+    const { on, readError } = readKillSwitch();
+    if (!on) {
+      this._killSwitchEpisode = null;
+      return null;
+    }
+    const kind = readError ? 'lettura' : 'attivo';
+    const motivo = readError
+      ? `Kill switch non leggibile (${readError}): nuove aperture sospese per prudenza`
+      : 'Kill switch attivo: nuove aperture bloccate';
+    logger.warn(`Bot ${this.name}: apertura ${this.coin} non eseguita — ${motivo}`);
+    if (this._killSwitchEpisode !== kind) {
+      this._killSwitchEpisode = kind;
+      if (readError) {
+        notifier.notify(`⚠️ <b>${this.name}</b> (${this.coin}): stato del kill switch non leggibile (${readError}) — nuove aperture sospese per prudenza. Le posizioni aperte restano gestite.`, { urgent: true });
+      } else {
+        notifier.notify(`🛑 <b>${this.name}</b> (${this.coin}): segnale <b>${String(side).toUpperCase()}</b> non eseguito — <b>kill switch attivo</b>. Il bot resta attivo e continua a gestire le posizioni aperte.`);
+      }
+    }
+    return motivo;
+  }
+
   /** Conferma multi-timeframe: true se il TF superiore concorda col lato (o se disattivata). */
   async _mtfConfirm(side) {
     const mtf = this.config.mtfConfirm;
@@ -1100,6 +1330,9 @@ export class PerpsBot {
       dcaCount: this.position?.dcaCount ?? persisted.dcaCount ?? 0,
       slOid: this.position?.slOid ?? null,
       tpOids: this.position?.tpOids ?? persisted.tpOids ?? [],
+      // #76 — stop vecchio tenuto in attesa di ricalcolo: sopravvive al riavvio,
+      // altrimenti uno SL dimensionato sulla size pre-DCA resterebbe per sempre.
+      slStale: this.position?.slStale || null,
       ...extra
     });
   }
@@ -1256,7 +1489,8 @@ export class PerpsBot {
    * Se invece ne trova PIÙ DI UNO, tiene quello tracciato e cancella gli altri
    * (SEC-08): girando a ogni tick, è anche il punto in cui uno stato già sporco
    * — come i 2 SL trovati sul VPS — rientra da solo, senza cancellazioni a mano.
-   * No-op se la strategia non prevede SL.
+   * Se la strategia non prevede SL avvisa una volta per posizione e non fa
+   * altro; se lo prevede ma `slPx` manca, prova a ricalcolarlo (#76).
    *
    * `price` (opzionale) è il prezzo corrente del tick: serve solo alla FASE 2,
    * per non ri-piazzare un trigger che il mercato ha già superato
@@ -1265,7 +1499,30 @@ export class PerpsBot {
    * autorizza a lasciare la posizione scoperta.
    */
   async _ensureStopLoss(readOrders, price = null) {
-    if (!this.position || !this.position.slPx) return;
+    if (!this.position) return;
+
+    // #76 — «nessuno SL» ha due significati opposti, e qui prima erano uno solo
+    // (`!slPx` → return):
+    //  a. SL non previsto dalla config: scelta di policy. Nessuna azione per
+    //     tick, un avviso per posizione. Uno `slPx` valido presente comunque
+    //     (trailing, o config cambiata a posizione aperta) resta sorvegliato
+    //     come prima: si esce solo quando non c'è niente da sorvegliare.
+    //  b. SL previsto ma `slPx` assente o non valido (ATR non calcolabile,
+    //     posizione adottata, calcolo post-fill fallito): si ricalcola con dati
+    //     freschi; se non riesce, allarme urgente e nuovo tentativo al tick
+    //     successivo. Mai una chiusura per questo motivo.
+    //  c. SL previsto e stop VECCHIO tenuto perché il nuovo non era piazzabile
+    //     (`slStale`, vedi `_replaceTpSl`): stesso ricalcolo; se non riesce, si
+    //     continua a sorvegliare lo stop vecchio, che è meglio di nessuno.
+    const slInvalid = !riskManager.isValidStopPx(this.position.slPx);
+    if (slInvalid && !this.config.sl?.enabled) {
+      this._warnNoSlByConfig();
+      return;
+    }
+    if (this.config.sl?.enabled && (slInvalid || this.position.slStale)) {
+      if (!(await this._recoverStopPx())) return;
+      if (!this.position) return;
+    }
 
     // FASE 1 — VERIFICA. È l'unico punto in cui si acquisisce CONOSCENZA sullo
     // stato del book, ed è tenuto separato da tutto il resto proprio perché il
@@ -1522,7 +1779,8 @@ export class PerpsBot {
     // DEBT-01: e che i TP attivi non siano più di quanti la strategia prevede.
     await this._sweepExcessTakeProfits(readOrders);
     // DCA: aggiunge alla posizione su movimento avverso (mediazione del prezzo)
-    await this._maybeDca(snapshot);
+    // #71: con l'`account` del tick, che serve ai gate di rischio dell'aggiunta.
+    await this._maybeDca(snapshot, account);
     // Trailing stop — PLACE-THEN-CANCEL: piazza il nuovo trigger PRIMA di
     // cancellare il vecchio, così non esiste mai una finestra senza SL.
     const atrVal = this._usesAtr() ? ind.atr(snapshot.candles, this.config.atrPeriod || 14) : null;
@@ -1538,6 +1796,9 @@ export class PerpsBot {
         const oldOid = this.position.slOid;
         this.position.slPx = roundedSl;
         this.position.slOid = res.oid;
+        // #76 — il trailing ha appena piazzato uno stop sulla size CORRENTE e più
+        // favorevole: uno stop «vecchio» in attesa di ricalcolo non c'è più.
+        if (res.oid) this.position.slStale = null;
         db.updatePosition(this.position.id, { sl_px: roundedSl, trailing_json: this._trailingJson() });
         // Solo ora rimuovo il vecchio SL (se diverso da quello nuovo).
         if (oldOid && res.oid && oldOid !== res.oid) {
@@ -1550,8 +1811,15 @@ export class PerpsBot {
     }
   }
 
-  /** DCA basico: aggiunge alla posizione se il prezzo va contro di una soglia. */
-  async _maybeDca(snapshot) {
+  /**
+   * DCA basico: aggiunge alla posizione se il prezzo va contro di una soglia.
+   *
+   * #71 — ogni aggiunta passa dagli stessi gate dell'apertura, perché impegna
+   * capitale nuovo esattamente come un'apertura (vedi `_dcaGateBlock`). Uno
+   * step bloccato NON viene consumato: `dcaCount` resta invariato e lo step
+   * torna valutabile al tick successivo, se la condizione che lo blocca cade.
+   */
+  async _maybeDca(snapshot, account) {
     const dca = this.config.dca;
     if (!dca || !dca.steps) return;
     const done = this.position.dcaCount || 0;
@@ -1566,12 +1834,33 @@ export class PerpsBot {
       ? (originalEntry - snapshot.price) / originalEntry
       : (snapshot.price - originalEntry) / originalEntry;
     // Soglia progressiva: step 1 a stepPercent, step 2 a 2×stepPercent, ...
-    if (adverse * 100 < dca.stepPercent * (done + 1)) return;
+    // #71 — scritta in negativo (`!(… >= …)`) di proposito: con un prezzo NaN
+    // la forma `adverse < soglia` era falsa e la DCA PARTIVA. Così un movimento
+    // non calcolabile non fa scattare niente.
+    if (!(adverse * 100 >= dca.stepPercent * (done + 1))) return;
+    const step = done + 1;
+    let locked = false;
     try {
       const market = marketData.getMarkets().find(m => m.coin === this.coin);
       const szDec = market?.szDecimals ?? 3;
       const addSize = riskManager.roundSize(this.position.size * (dca.sizeMultiplier || 1), szDec);
       if (addSize <= 0) return;
+
+      // #71 — gate di rischio, in ordine; il primo che blocca salta lo step.
+      if (this._dcaGateBlock(step, snapshot.price, addSize, account)) return;
+
+      // CRIT-03 sul percorso DCA: stesso lock per (master, coin) dell'apertura,
+      // così un'aggiunta e un'apertura di un altro bot sullo stesso mercato del
+      // wallet non si sovrappongono. NIENTE `reserveOpenSlot`: la posizione
+      // esiste già ed è già contata fra le concorrenti.
+      if (!execQueue.acquireOpenLock(this.masterAddress, this.coin)) {
+        this._blockDca(step, 'lock', `operazione già in corso su ${this.coin} per questo wallet (un altro bot ha il lock)`);
+        return;
+      }
+      locked = true;
+      // Tutti i gate passati: l'episodio di blocco (se c'era) è chiuso.
+      this._dcaBlockEpisode = null;
+
       const order = await this.broker.placeMarketOrder({
         masterAddress: this.masterAddress, coin: this.coin,
         isBuy: this.position.side === 'long', size: addSize, slippage: this.config.slippage ?? 0.02
@@ -1630,7 +1919,68 @@ export class PerpsBot {
       await this._replaceTpSl(updated.tpPx, updated.slPx, `DCA #${this.position.dcaCount}`);
     } catch (error) {
       logger.debug(`Bot ${this.name}: DCA fallito`, error.message);
+    } finally {
+      // Rilasciato solo se preso da QUESTA chiamata: un lock tenuto da un
+      // altro bot non va toccato.
+      if (locked) execQueue.releaseOpenLock(this.masterAddress, this.coin);
     }
+  }
+
+  /**
+   * #71 — gate di rischio di uno step DCA, nell'ordine:
+   *  a. kill switch (fail-closed, stessa lettura di `_killSwitchBlock`);
+   *  b-d. `riskManager.checkDcaAdd`: dati finiti, `checkLimits` (leva, perdita
+   *       giornaliera), tetto di notional e Budget Ceiling sul TOTALE post-DCA;
+   *  e. esposizione di portafoglio con la sola AGGIUNTA (`checkExposure`): non
+   *     `canOpen()`, che bloccherebbe la DCA anche per il conteggio delle
+   *     posizioni concorrenti — dove questa è già contata — e per il cooldown
+   *     da perdite, che riguarda il rientro e non la gestione.
+   * Ritorna il motivo (stringa) se bloccato, altrimenti null. Sincrona: nessun
+   * `await` fra i controlli e il lock preso dal chiamante.
+   */
+  _dcaGateBlock(step, price, addSize, account) {
+    const { on, readError } = readKillSwitch();
+    if (on) {
+      if (readError) {
+        const motivo = `kill switch non leggibile (${readError}), aggiunte sospese per prudenza`;
+        return this._blockDca(step, 'killswitch-lettura', motivo,
+          `⚠️ <b>${this.name}</b> (${this.coin}): stato del kill switch non leggibile (${readError}) — step DCA #${step} <b>saltato</b> per prudenza. La posizione resta gestita (SL, TP, trailing).`,
+          { urgent: true });
+      }
+      return this._blockDca(step, 'killswitch', 'kill switch attivo',
+        `🛑 <b>${this.name}</b> (${this.coin}): step DCA #${step} <b>saltato</b> — <b>kill switch attivo</b>. La posizione resta gestita (SL, TP, trailing), nessuna aggiunta.`);
+    }
+
+    const leverage = this.config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage;
+    const verdict = riskManager.checkDcaAdd(this.config, {
+      account, position: this.position, price, addSize, leverage,
+      dailyPnl: this.dailyPnl, maxAllocationUsd: this.maxAllocationUsd
+    });
+    if (!verdict.ok) return this._blockDca(step, verdict.kind, verdict.reason);
+
+    const exposure = checkExposure({
+      positions: account?.positions, plannedNotional: verdict.addNotional,
+      maxTotalExposureUsd: portfolio.getLimits().maxTotalExposureUsd
+    });
+    if (!exposure.ok) return this._blockDca(step, 'esposizione', `portafoglio: ${exposure.reason}`);
+
+    return null;
+  }
+
+  /**
+   * #71 — registra uno step DCA saltato: `lastEval` in hold con il motivo, log
+   * a ogni tick, notifica UNA volta per episodio (posizione, step, motivo).
+   * Lo step NON è consumato: qui non si tocca `dcaCount`.
+   */
+  _blockDca(step, kind, motivo, text = null, opts = undefined) {
+    this.lastEval = { action: 'hold', reason: `DCA #${step} saltato: ${motivo}`, ts: Date.now() };
+    logger.warn(`Bot ${this.name}: step DCA #${step} su ${this.coin} non eseguito — ${motivo}`);
+    const key = `${this.position?.id ?? '?'}:${step}:${kind}`;
+    if (this._dcaBlockEpisode !== key) {
+      this._dcaBlockEpisode = key;
+      notifier.notify(text || `⚠️ <b>${this.name}</b> (${this.coin}): step DCA #${step} <b>saltato</b> — ${motivo}. Posizione invariata; lo step resta disponibile se la condizione rientra.`, opts);
+    }
+    return motivo;
   }
 
   /**
@@ -1651,6 +2001,15 @@ export class PerpsBot {
    * noi), quindi va cercato sul book invece di leggerlo da `this.position.slOid`:
    * senza questo, un SL estraneo resterebbe vivo accanto a quello nuovo — cioè
    * esattamente l'ordine orfano osservato sul VPS.
+   *
+   * #76 — con SL configurato, il vecchio SL si cancella SOLO se il nuovo è stato
+   * davvero piazzato (prezzo valido e oid restituito). Prima uno `slPx` null
+   * (ATR non calcolabile) cancellava lo stop esistente e scriveva null in
+   * stato e DB: dopo una DCA — cioè proprio mentre il prezzo va contro la
+   * posizione — la posizione restava nuda. Ora lo stop precedente resta
+   * (`slPx`/`slOid` invariati), la posizione viene marcata `slStale` e la
+   * guardia ritenta il ricalcolo a ogni tick (`_recoverStopPx`). Con SL non
+   * abilitato il comportamento è quello di prima.
    *
    * @param reason contesto usato nei log/notifiche (es. 'DCA', 'adozione…').
    */
@@ -1689,23 +2048,33 @@ export class PerpsBot {
       }
 
       let newSlOid = null;
-      if (slPx) {
+      if (riskManager.isValidStopPx(slPx)) {
         const res = await this.broker.placeTriggerOrder({
           masterAddress: this.masterAddress, coin: this.coin, isBuy: closeIsBuy,
           size: this.position.size, triggerPx: slPx, tpsl: 'sl'
         }, this.network);
-        newSlOid = res.oid;
+        newSlOid = res?.oid ?? null;
       }
+      // #76 — SL configurato ma nuovo SL non piazzato: si TIENE il vecchio.
+      const keepOldSl = !!this.config.sl?.enabled && newSlOid == null;
+      const hadOldSl = oldSlOid != null || riskManager.isValidStopPx(this.position.slPx);
 
       // 2) Stato/DB aggiornati SUBITO dopo il piazzamento (ancora prima di
       // cancellare i vecchi trigger): da qui in poi la posizione è coperta
       // dai nuovi trigger, non più da quelli vecchi.
       this.position.tpPx = tpPx;
-      this.position.slPx = slPx;
-      this.position.slOid = newSlOid;
       this.position.tpOids = newTpOids;
+      if (keepOldSl) {
+        // `slStale` solo se uno stop vecchio esiste davvero: senza, non c'è
+        // niente da sostituire e la guardia segue il percorso «SL mancante».
+        this.position.slStale = hadOldSl ? reason : null;
+      } else {
+        this.position.slPx = slPx;
+        this.position.slOid = newSlOid;
+        this.position.slStale = null;
+      }
       db.updatePosition(this.position.id, {
-        entry_px: this.position.entryPx, size: this.position.size, tp_px: tpPx, sl_px: slPx,
+        entry_px: this.position.entryPx, size: this.position.size, tp_px: tpPx, sl_px: this.position.slPx,
         trailing_json: this._trailingJson()
       });
 
@@ -1713,8 +2082,14 @@ export class PerpsBot {
       for (const o of oldTpOrders) {
         await this.broker.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: o.oid }, this.network).catch(() => {});
       }
-      if (oldSlOid && oldSlOid !== newSlOid) {
+      if (!keepOldSl && oldSlOid && oldSlOid !== newSlOid) {
         await this.broker.cancelOrder({ masterAddress: this.masterAddress, coin: this.coin, oid: oldSlOid }, this.network).catch(() => {});
+      }
+      if (keepOldSl) {
+        const perche = riskManager.isValidStopPx(slPx)
+          ? `nuovo SL ${slPx} non accettato dal broker (oid nullo)`
+          : `nuovo SL non calcolabile (${slPx})`;
+        this._raiseSlMissing(`${reason}: ${perche}`, { keptOld: hadOldSl });
       }
 
       logger.info(`🎯 Bot ${this.name}: TP/SL ri-piazzati (${reason}) → size ${this.position.size} @ entry ${this.position.entryPx.toFixed(4)} (TP ${tpPx ?? '—'} · SL ${slPx ?? '—'})`);

@@ -851,6 +851,54 @@ class RiskManager {
   }
 
   /**
+   * #76 — un prezzo di stop è UTILIZZABILE solo se è un numero finito e
+   * positivo. `null`, `NaN`, `0` e negativi non proteggono niente: la guardia
+   * li trattava tutti come «SL non previsto» (`!slPx`) e la posizione restava
+   * nuda senza che nessuno se ne accorgesse.
+   */
+  isValidStopPx(px) {
+    const n = Number(px);
+    return px != null && Number.isFinite(n) && n > 0;
+  }
+
+  /**
+   * #76 — lo stop loss CONFIGURATO è calcolabile con i dati a disposizione?
+   *
+   * Con `sl.mode: 'atr'` e candele non scaricate (`marketData.getSnapshot`
+   * ingoia l'errore) l'ATR è null e `computeTpSl` restituisce `slPx: null`
+   * senza dire niente: la posizione si apriva senza SL. Qui la domanda è
+   * esplicita, prima di qualunque ordine, e la risposta è un MOTIVO leggibile.
+   *
+   * Il motivo è volutamente stabile (niente prezzi nel testo): il chiamante lo
+   * usa come chiave dell'episodio di notifica, e un numero che cambia a ogni
+   * tick trasformerebbe un episodio in una raffica.
+   *
+   * @param refPx prezzo di riferimento (entry, o prezzo corrente prima del fill)
+   * @param ctx { atr } — lo STESSO ATR che verrà poi passato a `computeTpSl`
+   * @returns null se calcolabile o se lo SL non è configurato (lì non c'è
+   *   niente da calcolare: è una scelta di policy), altrimenti il motivo.
+   */
+  stopLossUncomputableReason(refPx, side, config, ctx = {}) {
+    const sl = config?.sl;
+    if (!sl?.enabled) return null;
+    const value = Number(sl.value);
+    if (sl.value == null || !Number.isFinite(value) || value <= 0) {
+      return `sl.value non valido (${String(sl.value)}): serve un numero maggiore di zero`;
+    }
+    if (sl.mode === 'atr') {
+      const atr = Number(ctx.atr);
+      if (ctx.atr == null || !Number.isFinite(atr) || atr <= 0) {
+        return 'ATR non disponibile (candele mancanti o insufficienti)';
+      }
+    }
+    const { slPx } = this.computeTpSl(refPx, side, config, ctx);
+    if (!this.isValidStopPx(slPx)) {
+      return `lo stop risultante non è un prezzo valido (sl.mode ${sl.mode || 'percent'}, sl.value ${sl.value})`;
+    }
+    return null;
+  }
+
+  /**
    * SEC-01: aggiorna una posizione dopo un fill di aggiunta DCA (mediazione).
    * Calcola il nuovo prezzo medio ponderato ed i nuovi TP/SL su quel prezzo,
    * con la STESSA configurazione (percent/atr/absolute) usata all'apertura —
@@ -938,6 +986,92 @@ class RiskManager {
       return { ok: false, reason: `Limite di perdita giornaliera raggiunto (${maxDailyLoss}$)` };
     }
     return { ok: true, reason: 'OK' };
+  }
+
+  /**
+   * #71 — i gate di rischio di un'aggiunta DCA. Prima `_maybeDca` aggiungeva
+   * `size × sizeMultiplier` senza passare da NESSUN controllo dell'apertura:
+   * con steps=4 e moltiplicatore 1 la posizione arrivava a 16× il tetto pensato
+   * per un ingresso, con il prezzo che andava contro.
+   *
+   * Qui la parte DECIDIBILE in isolamento, nell'ordine in cui si applica:
+   *  1. dati: prezzo, size, aggiunta, equity, leva e PnL di giornata finiti —
+   *     FAIL-CLOSED: un NaN attraversa ogni confronto `>`/`<=` come "falso",
+   *     cioè come un via libera; qui vale un blocco;
+   *  2. `checkLimits` (leva, equity, perdita giornaliera) con il plan
+   *     dell'ORDINE che si sta per piazzare, cioè l'aggiunta — stessa
+   *     semantica dell'apertura, dove il plan è l'ordine;
+   *  3. tetto di notional sul TOTALE post-DCA (`(size + aggiunta) × prezzo`):
+   *     è il tetto della POSIZIONE, e una DCA lo supera per costruzione se lo
+   *     si guarda solo sull'aggiunta;
+   *  4. Budget Ceiling sul totale post-DCA, se impostato (un valore non
+   *     numerico blocca: è un limite dichiarato che non sappiamo leggere).
+   * Kill switch, esposizione di portafoglio e lock restano nel bot: dipendono
+   * da stato globale (DB, altri bot), non dagli argomenti.
+   *
+   * Nessun ridimensionamento dell'aggiunta per farla stare nei limiti: lo step
+   * si SALTA. Un'aggiunta ridotta in silenzio sarebbe una strategia diversa da
+   * quella configurata, e sposterebbe l'entry medio in un modo che nessuno ha
+   * scelto.
+   *
+   * `kind` è una chiave STABILE del motivo (senza i numeri, che cambiano a ogni
+   * tick con il prezzo): serve al chiamante per notificare una volta per
+   * episodio invece che a ogni tick.
+   *
+   * @param {object} p { account, position, price, addSize, leverage, dailyPnl, maxAllocationUsd }
+   * @returns {{ ok: boolean, kind?: string, reason?: string, addNotional?: number, totalNotional?: number }}
+   */
+  checkDcaAdd(config, { account, position, price, addSize, leverage, dailyPnl = 0, maxAllocationUsd = null } = {}) {
+    const size = Number(position?.size);
+    const px = Number(price);
+    const add = Number(addSize);
+    const equity = Number(account?.equity ?? account?.accountValue);
+    const lev = Number(leverage);
+    const pnl = Number(dailyPnl);
+    const invalidi = [];
+    if (!Number.isFinite(px) || px <= 0) invalidi.push(`prezzo ${price}`);
+    if (!Number.isFinite(size) || size <= 0) invalidi.push(`size posizione ${position?.size}`);
+    if (!Number.isFinite(add) || add <= 0) invalidi.push(`aggiunta ${addSize}`);
+    if (!Number.isFinite(equity)) invalidi.push(`equity ${account?.equity ?? account?.accountValue}`);
+    if (!Number.isFinite(lev) || lev <= 0) invalidi.push(`leva ${leverage}`);
+    if (!Number.isFinite(pnl)) invalidi.push(`PnL di giornata ${dailyPnl}`);
+    if (invalidi.length) {
+      return { ok: false, kind: 'dati', reason: `dati non validi (${invalidi.join(', ')})` };
+    }
+
+    const addNotional = add * px;
+    const totalNotional = (size + add) * px;
+    if (!Number.isFinite(addNotional) || !Number.isFinite(totalNotional)) {
+      return { ok: false, kind: 'dati', reason: `notional non calcolabile (aggiunta ${addNotional}, totale ${totalNotional})` };
+    }
+
+    const check = this.checkLimits(config, account, { notionalUsd: addNotional, leverage: lev }, pnl);
+    if (!check.ok) {
+      return { ok: false, kind: `limiti:${check.reason.replace(/[\d.,]+/g, '#')}`, reason: check.reason, addNotional, totalNotional };
+    }
+
+    const { maxPositionUsd: maxPos } = resolveMaxPositionUsd(config);
+    if (totalNotional > maxPos) {
+      return {
+        ok: false, kind: 'tetto', addNotional, totalNotional,
+        reason: `notional post-DCA ${totalNotional.toFixed(2)}$ oltre il massimo per posizione (${maxPos}$)`
+      };
+    }
+
+    if (maxAllocationUsd != null) {
+      const budget = Number(maxAllocationUsd);
+      if (!Number.isFinite(budget)) {
+        return { ok: false, kind: 'budget', addNotional, totalNotional, reason: `Budget Ceiling non leggibile (${maxAllocationUsd})` };
+      }
+      if (totalNotional > budget) {
+        return {
+          ok: false, kind: 'budget', addNotional, totalNotional,
+          reason: `Budget Ceiling: notional post-DCA ${totalNotional.toFixed(2)}$ supera il limite di ${budget}$`
+        };
+      }
+    }
+
+    return { ok: true, addNotional, totalNotional };
   }
 }
 

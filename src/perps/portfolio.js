@@ -45,6 +45,37 @@ const DEFAULTS = {
 
 const COOLDOWN_KEY = 'portfolio_cooldowns';
 
+/**
+ * #71 — il solo controllo di ESPOSIZIONE totale, estratto da `canOpen()` perché
+ * serve anche all'aggiunta DCA. `canOpen()` conta pure le posizioni
+ * concorrenti e il cooldown da perdite consecutive: due domande che per una
+ * DCA non hanno senso (la posizione è già contata fra le concorrenti, e il
+ * cooldown riguarda il RIENTRO a mercato, non la gestione di una posizione
+ * aperta). L'esposizione invece sì: un'aggiunta impegna capitale nuovo
+ * esattamente come un'apertura. Una sola implementazione, due chiamanti.
+ *
+ * `positions` contiene già la posizione che si sta mediando (con il suo
+ * `positionValue`): il chiamante DCA passa come `plannedNotional` la sola
+ * AGGIUNTA, mai il totale post-DCA, altrimenti la conterebbe due volte.
+ *
+ * FAIL-CLOSED su un totale non finito: prima un `plannedNotional` NaN rendeva
+ * falso il confronto `>` e il controllo passava.
+ *
+ * Funzione PURA.
+ * @returns {{ ok: boolean, reason?: string, totalNotional: number }}
+ */
+export function checkExposure({ positions, plannedNotional = 0, maxTotalExposureUsd }) {
+  const list = Array.isArray(positions) ? positions : [];
+  const totalNotional = list.reduce((s, p) => s + (p.positionValue || 0), 0) + plannedNotional;
+  if (!Number.isFinite(totalNotional)) {
+    return { ok: false, totalNotional, reason: `Esposizione totale non calcolabile (${totalNotional}), apertura negata per prudenza` };
+  }
+  if (totalNotional > maxTotalExposureUsd) {
+    return { ok: false, totalNotional, reason: `Esposizione totale ${totalNotional.toFixed(0)}$ oltre il limite (${maxTotalExposureUsd}$)` };
+  }
+  return { ok: true, totalNotional };
+}
+
 export class Portfolio {
   constructor() {
     this.cooldowns = new Map(); // botId -> timestamp di fine cooldown
@@ -245,10 +276,8 @@ export class Portfolio {
       return { ok: false, reason: `Max posizioni concorrenti (${L.maxConcurrentPositions}) raggiunto${detail}` };
     }
 
-    const totalNotional = positions.reduce((s, p) => s + (p.positionValue || 0), 0) + plannedNotional;
-    if (totalNotional > L.maxTotalExposureUsd) {
-      return { ok: false, reason: `Esposizione totale ${totalNotional.toFixed(0)}$ oltre il limite (${L.maxTotalExposureUsd}$)` };
-    }
+    const exposure = checkExposure({ positions, plannedNotional, maxTotalExposureUsd: L.maxTotalExposureUsd });
+    if (!exposure.ok) return { ok: false, reason: exposure.reason };
 
     if (consecutiveLosses >= L.maxConsecutiveLosses) {
       // Nessuna scrittura qui: l'attivazione è di `recordLoss()`.

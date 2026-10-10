@@ -1992,6 +1992,12 @@ class ArbitrageBotServer {
      *    flag. NON ferma i bot in esecuzione (quello è `/api/perps/killswitch`) e
      *    non chiude posizioni. Annunciare un effetto non prodotto è il modo
      *    peggiore di sbagliare: l'operatore crederebbe di essere protetto.
+     *
+     * #72 — «nuove aperture bloccate» vale per TUTTI: fino a #72 il flag lo
+     * leggeva solo il RiskAgent e i bot a regole continuavano ad aprire. Ora
+     * `PerpsBot` lo legge prima di ogni apertura (`src/perps/killSwitch.js`):
+     * i bot restano in esecuzione e gestiscono le posizioni già aperte, ma non
+     * ne aprono di nuove.
      */
     app.post('/api/agents/killswitch', (req, res) => {
       const on = req.body?.on !== false;

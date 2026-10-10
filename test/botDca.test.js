@@ -46,6 +46,9 @@ let MID = 100;
 client.getMid = async () => MID;
 client.roundPx = (px) => Math.round(px * 1e4) / 1e4;
 
+// #71: la DCA passa dai gate di rischio, che leggono l'`account` del tick.
+const ACCOUNT = { equity: 10000, positions: [] };
+
 test('DCA: due aggiunte ricalcolano entry medio e ri-piazzano TP/SL sulla size totale', async () => {
   const master = '0xDCA1';
   const coin = 'DCA-PERP';
@@ -78,7 +81,7 @@ test('DCA: due aggiunte ricalcolano entry medio e ri-piazzano TP/SL sulla size t
 
   // --- DCA #1: prezzo scende del ~2.55% dall'originale (supera la soglia 1×2%) ---
   MID = 97.5;
-  await bot._maybeDca({ price: MID, candles: [] });
+  await bot._maybeDca({ price: MID, candles: [] }, ACCOUNT);
   assert.equal(bot.position.dcaCount, 1, 'primo step DCA eseguito');
   assert.equal(bot.position.size, 2, 'size raddoppiata (sizeMultiplier=1)');
   assert.equal(bot.position.originalEntryPx, entryPx, 'ingresso originale invariato dopo il DCA');
@@ -95,7 +98,7 @@ test('DCA: due aggiunte ricalcolano entry medio e ri-piazzano TP/SL sulla size t
     'il prezzo di test deve discriminare soglia-su-originale da soglia-su-medio');
 
   MID = 96.0;
-  await bot._maybeDca({ price: MID, candles: [] });
+  await bot._maybeDca({ price: MID, candles: [] }, ACCOUNT);
   assert.equal(bot.position.dcaCount, 2, 'secondo step DCA eseguito (soglia calcolata sull\'originale)');
   assert.equal(bot.position.size, 4, 'size raddoppiata di nuovo: 2 + 2');
   assert.equal(bot.position.originalEntryPx, entryPx, 'ingresso originale ancora invariato dopo il secondo DCA');

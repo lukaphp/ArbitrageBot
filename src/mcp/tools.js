@@ -16,8 +16,8 @@ import riskAgent from '../agents/riskAgent.js';
 import logger from '../utils/logger.js';
 import { postInternal, requestInternal } from '../utils/internalLoopback.js';
 import { ownsTickLoop } from '../utils/processRole.js';
-import { mergeStrategyConfig, extractBotConfig, validateStrategyConfig } from '../perps/strategySchema.js';
-import { auditRiskConfig } from '../perps/riskManager.js';
+import { mergeStrategyConfig, extractBotConfig } from '../perps/strategySchema.js';
+import { validateConfigForWrite } from '../perps/configGate.js';
 import { runBacktest } from '../perps/backtester.js';
 import {
   validateInstructionOverride,
@@ -125,130 +125,12 @@ export function validateDynamicSizingParams(source) {
 }
 
 /**
- * Regola d'ingresso segnaposto, valida per costruzione. Vedi
- * `validateConfigForWrite`: serve SOLO a neutralizzare il controllo "nessuna
- * regola d'ingresso" senza andare a cercare quell'errore nella lista per
- * sottostringa (un messaggio riscritto in `strategySchema` renderebbe muto
- * questo cancello senza far fallire nessun test).
+ * `validateConfigForWrite` — il cancello di scrittura sulla config intera (#46) —
+ * vive in `perps/configGate.js` (#78): lo usano anche le rotte della dashboard,
+ * che non devono importare il layer MCP per averlo. Ri-esportata qui perché i
+ * due tool MCP la chiamano e i test esistenti la importano da questo file.
  */
-const RULE_PLACEHOLDER = Object.freeze([Object.freeze({ type: 'price', op: '>', value: 0, signal: 'long' })]);
-
-/**
- * CANCELLO DI SCRITTURA SULLA CONFIG INTERA (#46)
- * ==============================================
- *
- * `register_bot` e `update_strategy_params` validavano leva, `maxPositionUsd` e
- * i parametri di sizing dinamico come SCALARI ISOLATI: nessuno dei due ha mai
- * guardato la configurazione NEL SUO INSIEME prima di persisterla. Due incidenti
- * consecutivi sono nati da lì, e in entrambi i casi il sintomo è stato il
- * silenzio:
- *
- *  - BUG-RULESHAPE-01: `entryRules` scritte da un agente con `signal:
- *    'open_long'` invece di `'long'` e senza `type` — 46 ore di flotta accesa,
- *    puntuale a ogni tick, senza un solo segnale;
- *  - BUG-SIZECAP-01: `sizing.maxPositionUsd` / `strategyParams.leverage`, cioè
- *    percorsi che il motore non legge — leva dichiarata 5x e applicata 2x per
- *    mesi, corretta a mano sui bot BTC/SOL il 26/09/2026.
- *
- * I due fix di allora hanno reso il sistema TOLLERANTE e RUMOROSO a valle, ma
- * non impediscono che una config inservibile venga scritta. Questo è il
- * cancello a monte, e riusa le DUE funzioni che già sanno riconoscere i due
- * casi, senza duplicarne la logica:
- *
- *  1. `validateStrategyConfig` — la FORMA (regola di tipo sconosciuto,
- *     intervallo inesistente, `sizing.value` assente, leva oltre il massimo…);
- *  2. `riskManager.auditRiskConfig` — il PERCORSO (un parametro di rischio
- *     dichiarato in un campo che nessun controllo legge).
- *
- * Sono due domande diverse — "è scritta bene?" e "verrà applicata?" — e restano
- * in due funzioni diverse, come già impostato nel codice.
- *
- * DUE DECISIONI, entrambe volute:
- *
- * a) TUTTI gli avvisi di `auditRiskConfig` bloccano, compreso `maxPositionUsd`
- *    dichiarato due volte con valori diversi — che a differenza degli altri HA
- *    un fallback sicuro documentato (`resolveMaxPositionUsd` applica il più
- *    restrittivo). Quel fallback è una disciplina di LETTURA, nata per
- *    interpretare config che esistono già; non è il permesso di SCRIVERE
- *    un'ambiguità nuova. Nel momento della scrittura il chiamante è presente e
- *    può dire quale dei due numeri intendeva: accettarlo qui significherebbe far
- *    operare il bot con un tetto che nessuno ha scritto in quel campo, e l'unico
- *    posto che lo direbbe è un log all'avvio. In più, bloccare su TUTTA la lista
- *    evita di classificare per sottostringa il testo libero che quella funzione
- *    restituisce: una riga nuova in `auditRiskConfig` è automaticamente coperta,
- *    invece di passare in silenzio perché non corrisponde a nessun pattern.
- *    Il percorso di LETTURA non cambia: `resolveMaxPositionUsd` continua ad
- *    applicare il più restrittivo per i bot già in DB.
- *
- * b) «Nessuna regola d'ingresso» NON blocca. È l'unico caso in cui la config è
- *    inservibile ma VISIBILE: il bot non apre mai, la UI non mostra regole, e
- *    `runBacktestGate` scrive già `inconclusive` con il motivo dentro la config.
- *    È inoltre una decisione già presa altrove nel codice (un `register_bot`
- *    senza `entryRules` crea il bot di proposito, senza scaricare candele), e
- *    non è questo il cancello dove ribaltarla. Il male dei due incidenti era
- *    l'INVISIBILITÀ: `signal: 'open_long'` sembra una strategia funzionante a
- *    chiunque la guardi, `entryRules` assente no. Tutto il RESTO della config
- *    viene comunque validato anche quando le regole mancano.
- *
- * Funzione PURA: nessun log, nessun DB, nessuna notifica — restituisce il
- * rifiuto e lascia al chiamante (che ha il contesto MCP) l'audit e la risposta.
- * Esportata perché è la parte decidibile in isolamento, senza passare dalle due
- * conferme.
- *
- * @param {object} config configurazione CANDIDATA COMPLETA: per `register_bot`
- *   la config del nuovo bot, per `update_strategy_params` quella attuale FUSA
- *   con la patch (`mergeStrategyConfig`), cioè quella con cui il bot opererebbe.
- * @returns {{ ok: boolean, error?: string, guardrail?: string, issues?: string[] }}
- */
-export function validateConfigForWrite(config) {
-  const cfg = isPlainObject(config) ? config : {};
-
-  // Config su cui si misura la FORMA. È una copia — mai mutazione dell'oggetto
-  // del chiamante — con due sole differenze rispetto alla candidata:
-  //
-  //  - i blocchi AZZERATI (`risk: null`) non ci sono. Per il motore un blocco a
-  //    `null` è indistinguibile dall'assenza (ogni lettura è `cfg.risk?.x`) ed è
-  //    il modo documentato di cancellarlo (vedi `mergeStrategyConfig`);
-  //    `validateStrategyConfig`, nato sull'import di un FILE dove `risk: null` è
-  //    un errore di scrittura, lo rifiuta. La tolleranza sta qui e non lì: qui si
-  //    rifiuta una config inservibile, non un'operazione legittima.
-  //  - se le regole d'ingresso mancano, al loro posto c'è il segnaposto: così
-  //    l'unico errore che sparisce è quello dell'assenza (decisione (b) sopra) e
-  //    tutto il resto della config viene comunque validato.
-  const forSchema = {};
-  for (const [key, value] of Object.entries(cfg)) {
-    if (value !== null) forSchema[key] = value;
-  }
-  if (!Array.isArray(forSchema.entryRules) || !forSchema.entryRules.length) {
-    forSchema.entryRules = RULE_PLACEHOLDER;
-  }
-
-  const schemaErrors = validateStrategyConfig(forSchema);
-
-  if (schemaErrors.length) {
-    return {
-      ok: false,
-      guardrail: 'strategy_schema',
-      issues: schemaErrors,
-      error: `GUARDRAIL_VIOLATION: Configurazione di strategia non valida — ${schemaErrors.join(' ')}`
-    };
-  }
-
-  // Forma valida non significa "verrà applicata": un tetto o una leva scritti in
-  // un campo che il motore non legge passano ogni controllo di schema.
-  const riskIssues = auditRiskConfig(cfg);
-  if (riskIssues.length) {
-    return {
-      ok: false,
-      guardrail: 'risk_config',
-      issues: riskIssues,
-      error: 'GUARDRAIL_VIOLATION: Parametri di rischio che il motore non applicherebbe come dichiarati — '
-        + `${riskIssues.join(' ')} Usa i campi canonici: leverage (radice) e maxPositionUsd (radice oppure risk.maxPositionUsd, uno solo).`
-    };
-  }
-
-  return { ok: true };
-}
+export { validateConfigForWrite };
 
 /**
  * Notifica il processo Express HTTP di sincronizzare botManager dal DB.
@@ -292,10 +174,15 @@ const BACKTEST_GATE_LOOKBACK_DAYS = 30;
  *
  * @param {object} config configurazione di strategia CANDIDATA (già fusa, nel
  *   caso di un aggiornamento: è quella con cui il bot opererebbe davvero)
+ * Esportata per le rotte della dashboard (#78): creare o modificare un bot dalla
+ * UI passa dallo STESSO cancello, con la stessa soglia e lo stesso riassunto
+ * salvato in config. Cosa cambia lì è solo la risposta a un `blocked` (una
+ * conferma esplicita dell'operatore invece del rifiuto secco), non la misura.
+ *
  * @param {string} coin coin normalizzata (es. `SOL-PERP`)
  * @returns {Promise<{verdict: string, blocked: boolean, reason: string, summary: object}>}
  */
-async function runBacktestGate(config, coin) {
+export async function runBacktestGate(config, coin) {
   const entryRules = Array.isArray(config?.entryRules) ? config.entryRules : null;
   let result;
 

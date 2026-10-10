@@ -326,7 +326,7 @@ export const DERIVED_CONFIG_KEYS = {
  * mentre un falso negativo terrebbe in vita un "✅ superato" su una strategia
  * che nessuno ha verificato.
  */
-function sameConfigValue(a, b) {
+export function sameConfigValue(a, b) {
   if (a === b) return true;
   try {
     return JSON.stringify(a) === JSON.stringify(b);

@@ -193,6 +193,10 @@ class PerpsApp {
       // Codice applicativo opzionale: permette a chi chiama di distinguere gli
       // errori senza dover interpretare il testo del messaggio.
       if (data.code) err.code = data.code;
+      // Il corpo intero della risposta di errore, per chi ha bisogno dei campi
+      // strutturati (es. `errors` del cancello di config, `backtestSummary` del
+      // backtest gate — #78) invece del solo messaggio.
+      err.payload = data;
       throw err;
     }
     return data.data ?? data;
@@ -4949,12 +4953,30 @@ class PerpsApp {
     const config = this._buildBotConfig();
     if (!config) return;
 
+    // #78 — la stessa richiesta, eventualmente ripetuta UNA volta con la
+    // conferma esplicita dell'operatore dopo un 409 `BACKTEST_GATE`. Si rimanda
+    // esattamente la config che il server ha misurato, non il form riletto.
+    const send = (confirmBacktestOverride) => {
+      const extra = confirmBacktestOverride ? { confirmBacktestOverride: true } : {};
+      return id
+        ? this.api(`/api/perps/bots/${id}`, { method: 'PATCH', body: JSON.stringify({ name, coin, config, ...extra }) })
+        : this.api('/api/perps/bots', { method: 'POST', body: JSON.stringify({ name, coin, masterAddress: this.address, config, ...extra }) });
+    };
+
     try {
       let created = null;
-      if (id) {
-        await this.api(`/api/perps/bots/${id}`, { method: 'PATCH', body: JSON.stringify({ name, coin, config }) });
-      } else {
-        created = await this.api('/api/perps/bots', { method: 'POST', body: JSON.stringify({ name, coin, masterAddress: this.address, config }) });
+      let saved;
+      try {
+        saved = await send(false);
+      } catch (e) {
+        if (e.code !== 'BACKTEST_GATE') throw e;
+        // Conferma negata: come le altre conferme di questo file, nessuna
+        // scrittura e il modale resta aperto con la config da correggere.
+        if (!confirm(this._backtestGateConfirmText(e.payload?.backtestSummary, e.message))) return;
+        saved = await send(true);
+      }
+      if (!id) {
+        created = saved;
         // CRIT-03-EXTRA — il bot è creato comunque (non è un errore): se sul
         // mercato c'è già un altro bot in esecuzione sullo stesso wallet, la
         // risposta porta `warning` e va mostrato, altrimenti un avviso che nessuno
@@ -4975,7 +4997,43 @@ class PerpsApp {
       this._closeModal('botModal');
       await this.loadBots();
       this.loadStrategyHistory?.();
-    } catch (e) { this.toast('Errore salvataggio: ' + e.message, 'error'); }
+    } catch (e) {
+      // #78 — un rifiuto del cancello di config porta la lista degli errori:
+      // si mostrano quelli (leggibili) invece del messaggio aggregato.
+      const errors = Array.isArray(e.payload?.errors) ? e.payload.errors.filter(Boolean) : [];
+      this.toast(errors.length
+        ? 'Configurazione non valida, bot non salvato: ' + errors.join(' · ')
+        : 'Errore salvataggio: ' + e.message, 'error');
+    }
+  }
+
+  /**
+   * #78 — testo della conferma dopo un 409 `BACKTEST_GATE`: il server ha misurato
+   * la strategia in perdita netta e chiede all'operatore se salvarla comunque.
+   *
+   * Testo SEMPLICE per `confirm()`, lo stesso schema delle altre conferme di
+   * questo file: nessun markup viene interpretato, quindi i valori arrivati dal
+   * server non passano da `_escapeHtml` (in un dialogo di testo le entità HTML
+   * comparirebbero letterali). I numeri mancanti diventano `n/d`, mai `NaN`.
+   */
+  _backtestGateConfirmText(summary, fallbackMessage) {
+    const s = summary && typeof summary === 'object' ? summary : {};
+    const num = (v, d = 2) => (v == null || !Number.isFinite(Number(v)) ? 'n/d' : Number(v).toFixed(d));
+    const pct = (v) => (v == null || !Number.isFinite(Number(v)) ? 'n/d' : (Number(v) * 100).toFixed(1) + '%');
+    const where = [s.coin, s.interval, s.lookbackDays != null ? `ultimi ${s.lookbackDays} giorni` : null]
+      .filter(Boolean).join(' · ');
+    const lines = [
+      '⚠️ Backtest Gate: la strategia è in perdita netta sul backtest.',
+      '',
+      where ? `Mercato: ${where}` : null,
+      `Trade: ${s.trades ?? 'n/d'} · Profit factor: ${num(s.profitFactor)} · Win rate: ${pct(s.winRate)}`,
+      `PnL totale: ${s.totalPnl == null ? 'n/d' : this.fmtUsd(s.totalPnl)} · Expectancy: ${num(s.expectancy)}$/trade · Drawdown max: ${s.maxDrawdownPct == null ? 'n/d' : num(s.maxDrawdownPct) + '%'}`,
+      '',
+      s.reason || fallbackMessage || '',
+      '',
+      'Salvare comunque il bot? La scelta viene registrata nell\'audit.'
+    ];
+    return lines.filter(l => l !== null).join('\n');
   }
 }
 

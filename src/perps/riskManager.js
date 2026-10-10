@@ -292,6 +292,66 @@ export function auditRiskConfig(config) {
 }
 
 /**
+ * #79 — limite di rischio EFFETTIVO per un bot: il globale
+ * (`HYPERLIQUID_CONFIG.risk[key]`) stretto dall'eventuale override del bot
+ * (`config.risk[key]`), mai allargato.
+ *
+ * Prima `checkLimits` leggeva `config.risk?.maxLeverage ?? globale`: l'override
+ * del bot SOSTITUIVA il globale, quindi un bot (o un agente che ne scrive la
+ * config) poteva alzarsi da solo la leva massima o la perdita giornaliera
+ * tollerata. Un limite globale che il singolo bot può superare non è un limite.
+ * Stessa disciplina di `resolveMaxPositionUsd`: vince il più restrittivo.
+ *
+ * Un override inservibile (stringa, 0, negativo, NaN) NON vale come "nessun
+ * limite": viene ignorato, resta il globale, e la cosa è riportata in `ignored`.
+ *
+ * Il globale non utilizzabile (non finito o non positivo — es.
+ * `PERPS_MAX_LEVERAGE=Infinity`) dà `limit: null` e il motivo in
+ * `invalidGlobal`: il chiamante deve BLOCCARE. Non c'è un numero prudente da
+ * inventare al posto di quello dichiarato, e "nessun tetto" non è prudente.
+ *
+ * `absolute: true` confronta i valori assoluti: per `maxDailyLossUsd` il segno
+ * è sempre stato irrilevante (`-Math.abs(...)` nel confronto), quindi `-500` e
+ * `500` dicono la stessa cosa e restano entrambi validi.
+ *
+ * Funzione PURA: nessun log. Le righe le dice il chiamante I/O.
+ *
+ * @param {object} config config del bot (può mancare)
+ * @param {'maxLeverage'|'maxDailyLossUsd'} key
+ * @param {{ absolute?: boolean }} opts
+ * @returns {{ limit: number|null, global: number, override: number|null, ignored: string[], invalidGlobal: string|null }}
+ */
+export function resolveRiskLimit(config, key, { absolute = false } = {}) {
+  const cfg = config && typeof config === 'object' ? config : {};
+  const norm = (valore) => {
+    if (valore === undefined || valore === null) return null;
+    const n = Number(valore);
+    const v = absolute ? Math.abs(n) : n;
+    return Number.isFinite(v) && v > 0 ? v : NaN;
+  };
+
+  const ignored = [];
+  const rawOverride = cfg.risk && typeof cfg.risk === 'object' ? cfg.risk[key] : undefined;
+  let override = norm(rawOverride);
+  if (Number.isNaN(override)) {
+    ignored.push(`risk.${key}: valore non utilizzabile (${typeof rawOverride === 'number' ? String(rawOverride) : JSON.stringify(rawOverride)}), ignorato — resta il limite globale`);
+    override = null;
+  }
+
+  const rawGlobal = HYPERLIQUID_CONFIG.risk?.[key];
+  const global = norm(rawGlobal);
+  if (global === null || Number.isNaN(global)) {
+    return {
+      limit: null, global: Number(rawGlobal), override, ignored,
+      invalidGlobal: `limite globale ${key} non utilizzabile (${String(rawGlobal)})`
+    };
+  }
+
+  const limit = override === null ? global : Math.min(global, override);
+  return { limit, global, override, ignored, invalidGlobal: null };
+}
+
+/**
  * OVERTRADING — limiti di FREQUENZA di apertura, di default per tutti i bot.
  *
  * 4 aperture in 30 minuti è il ritmo oltre il quale una strategia a candele
@@ -646,6 +706,9 @@ class RiskManager {
   resolveMaxPositionUsd(config) { return resolveMaxPositionUsd(config); }
   auditRiskConfig(config) { return auditRiskConfig(config); }
 
+  /** #79 — anche come metodo, per i chiamanti che hanno il singleton. */
+  resolveRiskLimit(config, key, opts) { return resolveRiskLimit(config, key, opts); }
+
   /** OVERTRADING — anche come metodi, per i chiamanti che hanno il singleton. */
   resolveOvertradingLimits(config) { return resolveOvertradingLimits(config); }
   checkOvertrading(limits, input) { return checkOvertrading(limits, input); }
@@ -851,6 +914,54 @@ class RiskManager {
   }
 
   /**
+   * #76 — un prezzo di stop è UTILIZZABILE solo se è un numero finito e
+   * positivo. `null`, `NaN`, `0` e negativi non proteggono niente: la guardia
+   * li trattava tutti come «SL non previsto» (`!slPx`) e la posizione restava
+   * nuda senza che nessuno se ne accorgesse.
+   */
+  isValidStopPx(px) {
+    const n = Number(px);
+    return px != null && Number.isFinite(n) && n > 0;
+  }
+
+  /**
+   * #76 — lo stop loss CONFIGURATO è calcolabile con i dati a disposizione?
+   *
+   * Con `sl.mode: 'atr'` e candele non scaricate (`marketData.getSnapshot`
+   * ingoia l'errore) l'ATR è null e `computeTpSl` restituisce `slPx: null`
+   * senza dire niente: la posizione si apriva senza SL. Qui la domanda è
+   * esplicita, prima di qualunque ordine, e la risposta è un MOTIVO leggibile.
+   *
+   * Il motivo è volutamente stabile (niente prezzi nel testo): il chiamante lo
+   * usa come chiave dell'episodio di notifica, e un numero che cambia a ogni
+   * tick trasformerebbe un episodio in una raffica.
+   *
+   * @param refPx prezzo di riferimento (entry, o prezzo corrente prima del fill)
+   * @param ctx { atr } — lo STESSO ATR che verrà poi passato a `computeTpSl`
+   * @returns null se calcolabile o se lo SL non è configurato (lì non c'è
+   *   niente da calcolare: è una scelta di policy), altrimenti il motivo.
+   */
+  stopLossUncomputableReason(refPx, side, config, ctx = {}) {
+    const sl = config?.sl;
+    if (!sl?.enabled) return null;
+    const value = Number(sl.value);
+    if (sl.value == null || !Number.isFinite(value) || value <= 0) {
+      return `sl.value non valido (${String(sl.value)}): serve un numero maggiore di zero`;
+    }
+    if (sl.mode === 'atr') {
+      const atr = Number(ctx.atr);
+      if (ctx.atr == null || !Number.isFinite(atr) || atr <= 0) {
+        return 'ATR non disponibile (candele mancanti o insufficienti)';
+      }
+    }
+    const { slPx } = this.computeTpSl(refPx, side, config, ctx);
+    if (!this.isValidStopPx(slPx)) {
+      return `lo stop risultante non è un prezzo valido (sl.mode ${sl.mode || 'percent'}, sl.value ${sl.value})`;
+    }
+    return null;
+  }
+
+  /**
    * SEC-01: aggiorna una posizione dopo un fill di aggiunta DCA (mediazione).
    * Calcola il nuovo prezzo medio ponderato ed i nuovi TP/SL su quel prezzo,
    * con la STESSA configurazione (percent/atr/absolute) usata all'apertura —
@@ -911,33 +1022,176 @@ class RiskManager {
   }
 
   /**
+   * #79 — un override di rischio ignorato va DETTO, ma una volta sola: checkLimits
+   * gira a ogni tick di ogni bot, e la stessa riga ogni 10 secondi seppellirebbe
+   * proprio l'avviso che deve farsi notare. La chiave è il testo, che contiene
+   * campo e valore: una config cambiata (un altro valore sbagliato) riavvisa.
+   */
+  _warnOnce(riga) {
+    if (!this._avvisiDati) this._avvisiDati = new Set();
+    if (this._avvisiDati.has(riga)) return;
+    this._avvisiDati.add(riga);
+    logger.warn(riga);
+  }
+
+  /**
    * Controlla i limiti di rischio prima di aprire. Ritorna { ok, reason }.
+   *
+   * #79 — due difetti chiusi qui:
+   *  - leva massima e perdita giornaliera sono il GLOBALE stretto dall'override
+   *    del bot, mai allargato (vedi `resolveRiskLimit`); un override inservibile
+   *    è ignorato con un warn, un globale inservibile BLOCCA;
+   *  - FAIL-CLOSED sugli ingressi: un NaN rendeva falso ogni confronto
+   *    (`NaN > maxLev`, `NaN <= 0`, `NaN <= -x`) e il controllo rispondeva OK.
+   *    Leva, notional, equity e PnL di giornata devono essere numeri finiti;
+   *    `null` conta come assente, non come zero (`Number(null)` è 0, e uno 0
+   *    passerebbe tutte le guardie da valore valido).
+   *
    * @param account { accountValue }
    * @param plan    { notionalUsd, leverage }
    * @param dailyPnl perdita/profitto realizzato oggi (USD)
    */
   checkLimits(config, account, plan, dailyPnl = 0) {
-    const maxLev = config.risk?.maxLeverage ?? HYPERLIQUID_CONFIG.risk.maxLeverage;
-    if ((plan.leverage || 0) > maxLev) {
+    const cfg = config && typeof config === 'object' ? config : {};
+    const lim = (key, opts) => {
+      const r = resolveRiskLimit(cfg, key, opts);
+      for (const riga of r.ignored) this._warnOnce(`checkLimits: ${riga}`);
+      return r;
+    };
+
+    const levLimit = lim('maxLeverage');
+    if (levLimit.invalidGlobal) {
+      return { ok: false, reason: `${levLimit.invalidGlobal}: apertura negata per prudenza` };
+    }
+    const maxLev = levLimit.limit;
+    const lev = plan?.leverage == null ? NaN : Number(plan.leverage);
+    if (!Number.isFinite(lev) || lev <= 0) {
+      return { ok: false, reason: `Leva non valida (${plan?.leverage}): apertura negata per prudenza` };
+    }
+    if (lev > maxLev) {
       return { ok: false, reason: `Leva ${plan.leverage}x oltre il massimo (${maxLev}x)` };
     }
-    const equity = account.equity ?? account.accountValue;
+
+    const rawEquity = account?.equity ?? account?.accountValue;
+    const equity = rawEquity == null ? NaN : Number(rawEquity);
+    if (!Number.isFinite(equity)) {
+      return { ok: false, reason: `Equity non leggibile (${rawEquity}): apertura negata per prudenza` };
+    }
     if (equity <= 0) {
       return { ok: false, reason: 'Equity nullo o insufficiente' };
     }
+
     // BUG-SIZECAP-01 — stesso tetto di `sizePosition`, risolto dalla stessa
     // funzione: due letture diverse significherebbero che il controllo approva
     // ciò che il calcolo non avrebbe dovuto produrre (ed è esattamente quello
     // che succedeva con il tetto scritto alla radice).
-    const { maxPositionUsd: maxPos } = resolveMaxPositionUsd(config);
-    if (plan.notionalUsd > maxPos * 1.001) {
-      return { ok: false, reason: `Notional ${plan.notionalUsd.toFixed(0)}$ oltre il massimo (${maxPos}$)` };
+    const notional = plan?.notionalUsd == null ? NaN : Number(plan.notionalUsd);
+    if (!Number.isFinite(notional)) {
+      return { ok: false, reason: `Notional non valido (${plan?.notionalUsd}): apertura negata per prudenza` };
     }
-    const maxDailyLoss = config.risk?.maxDailyLossUsd ?? HYPERLIQUID_CONFIG.risk.maxDailyLossUsd;
-    if (dailyPnl <= -Math.abs(maxDailyLoss)) {
-      return { ok: false, reason: `Limite di perdita giornaliera raggiunto (${maxDailyLoss}$)` };
+    const { maxPositionUsd: maxPos } = resolveMaxPositionUsd(cfg);
+    if (notional > maxPos * 1.001) {
+      return { ok: false, reason: `Notional ${notional.toFixed(0)}$ oltre il massimo (${maxPos}$)` };
+    }
+
+    const lossLimit = lim('maxDailyLossUsd', { absolute: true });
+    if (lossLimit.invalidGlobal) {
+      return { ok: false, reason: `${lossLimit.invalidGlobal}: apertura negata per prudenza` };
+    }
+    const pnl = dailyPnl == null ? NaN : Number(dailyPnl);
+    if (!Number.isFinite(pnl)) {
+      return { ok: false, reason: `PnL di giornata non valido (${dailyPnl}): apertura negata per prudenza` };
+    }
+    if (pnl <= -lossLimit.limit) {
+      return { ok: false, reason: `Limite di perdita giornaliera raggiunto (${lossLimit.limit}$)` };
     }
     return { ok: true, reason: 'OK' };
+  }
+
+  /**
+   * #71 — i gate di rischio di un'aggiunta DCA. Prima `_maybeDca` aggiungeva
+   * `size × sizeMultiplier` senza passare da NESSUN controllo dell'apertura:
+   * con steps=4 e moltiplicatore 1 la posizione arrivava a 16× il tetto pensato
+   * per un ingresso, con il prezzo che andava contro.
+   *
+   * Qui la parte DECIDIBILE in isolamento, nell'ordine in cui si applica:
+   *  1. dati: prezzo, size, aggiunta, equity, leva e PnL di giornata finiti —
+   *     FAIL-CLOSED: un NaN attraversa ogni confronto `>`/`<=` come "falso",
+   *     cioè come un via libera; qui vale un blocco;
+   *  2. `checkLimits` (leva, equity, perdita giornaliera) con il plan
+   *     dell'ORDINE che si sta per piazzare, cioè l'aggiunta — stessa
+   *     semantica dell'apertura, dove il plan è l'ordine;
+   *  3. tetto di notional sul TOTALE post-DCA (`(size + aggiunta) × prezzo`):
+   *     è il tetto della POSIZIONE, e una DCA lo supera per costruzione se lo
+   *     si guarda solo sull'aggiunta;
+   *  4. Budget Ceiling sul totale post-DCA, se impostato (un valore non
+   *     numerico blocca: è un limite dichiarato che non sappiamo leggere).
+   * Kill switch, esposizione di portafoglio e lock restano nel bot: dipendono
+   * da stato globale (DB, altri bot), non dagli argomenti.
+   *
+   * Nessun ridimensionamento dell'aggiunta per farla stare nei limiti: lo step
+   * si SALTA. Un'aggiunta ridotta in silenzio sarebbe una strategia diversa da
+   * quella configurata, e sposterebbe l'entry medio in un modo che nessuno ha
+   * scelto.
+   *
+   * `kind` è una chiave STABILE del motivo (senza i numeri, che cambiano a ogni
+   * tick con il prezzo): serve al chiamante per notificare una volta per
+   * episodio invece che a ogni tick.
+   *
+   * @param {object} p { account, position, price, addSize, leverage, dailyPnl, maxAllocationUsd }
+   * @returns {{ ok: boolean, kind?: string, reason?: string, addNotional?: number, totalNotional?: number }}
+   */
+  checkDcaAdd(config, { account, position, price, addSize, leverage, dailyPnl = 0, maxAllocationUsd = null } = {}) {
+    const size = Number(position?.size);
+    const px = Number(price);
+    const add = Number(addSize);
+    const equity = Number(account?.equity ?? account?.accountValue);
+    const lev = Number(leverage);
+    const pnl = Number(dailyPnl);
+    const invalidi = [];
+    if (!Number.isFinite(px) || px <= 0) invalidi.push(`prezzo ${price}`);
+    if (!Number.isFinite(size) || size <= 0) invalidi.push(`size posizione ${position?.size}`);
+    if (!Number.isFinite(add) || add <= 0) invalidi.push(`aggiunta ${addSize}`);
+    if (!Number.isFinite(equity)) invalidi.push(`equity ${account?.equity ?? account?.accountValue}`);
+    if (!Number.isFinite(lev) || lev <= 0) invalidi.push(`leva ${leverage}`);
+    if (!Number.isFinite(pnl)) invalidi.push(`PnL di giornata ${dailyPnl}`);
+    if (invalidi.length) {
+      return { ok: false, kind: 'dati', reason: `dati non validi (${invalidi.join(', ')})` };
+    }
+
+    const addNotional = add * px;
+    const totalNotional = (size + add) * px;
+    if (!Number.isFinite(addNotional) || !Number.isFinite(totalNotional)) {
+      return { ok: false, kind: 'dati', reason: `notional non calcolabile (aggiunta ${addNotional}, totale ${totalNotional})` };
+    }
+
+    const check = this.checkLimits(config, account, { notionalUsd: addNotional, leverage: lev }, pnl);
+    if (!check.ok) {
+      return { ok: false, kind: `limiti:${check.reason.replace(/[\d.,]+/g, '#')}`, reason: check.reason, addNotional, totalNotional };
+    }
+
+    const { maxPositionUsd: maxPos } = resolveMaxPositionUsd(config);
+    if (totalNotional > maxPos) {
+      return {
+        ok: false, kind: 'tetto', addNotional, totalNotional,
+        reason: `notional post-DCA ${totalNotional.toFixed(2)}$ oltre il massimo per posizione (${maxPos}$)`
+      };
+    }
+
+    if (maxAllocationUsd != null) {
+      const budget = Number(maxAllocationUsd);
+      if (!Number.isFinite(budget)) {
+        return { ok: false, kind: 'budget', addNotional, totalNotional, reason: `Budget Ceiling non leggibile (${maxAllocationUsd})` };
+      }
+      if (totalNotional > budget) {
+        return {
+          ok: false, kind: 'budget', addNotional, totalNotional,
+          reason: `Budget Ceiling: notional post-DCA ${totalNotional.toFixed(2)}$ supera il limite di ${budget}$`
+        };
+      }
+    }
+
+    return { ok: true, addNotional, totalNotional };
   }
 }
 

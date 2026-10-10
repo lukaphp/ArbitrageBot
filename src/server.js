@@ -59,7 +59,10 @@ import { handleJsonRpcMcp, executeMcpTool, MCP_TOOLS_DEFINITIONS } from './mcp/h
 // ISSUE #27 — l'ordine paper lo esegue Express, che possiede il tick loop: la
 // rotta `/internal/mcp/place-order-paper` chiama l'esecuzione LOCALE, non il
 // guscio che decide se delegare.
-import { placeOrderPaperLocal } from './mcp/tools.js';
+import { placeOrderPaperLocal, runBacktestGate } from './mcp/tools.js';
+// #78 — lo stesso cancello di scrittura della config usato dai tool MCP, da un
+// modulo neutro: le rotte della dashboard non hanno più una strada a parte.
+import { validateConfigForWrite, backtestedStrategyChanged } from './perps/configGate.js';
 
 // Polyfill globale per la serializzazione di BigInt in JSON (Express, Socket.IO, logger)
 if (typeof BigInt.prototype.toJSON !== 'function') {
@@ -1092,6 +1095,100 @@ class ArbitrageBotServer {
       }
     });
 
+    /** Oggetto "semplice": né null, né array. */
+    const isPlainConfig = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+    /**
+     * Copia della config SENZA i campi che scrive solo il backend
+     * (`DERIVED_CONFIG_KEYS`, oggi `backtestSummary`). Dalla dashboard quel
+     * verdetto non può arrivare: è la MISURA del cancello, non un parametro, e
+     * un client che lo mandasse potrebbe scrivere "✅ superato" su una strategia
+     * che nessuno ha verificato. Lo scrive solo `gateBotConfigWrite`, oppure lo
+     * conserva `preserveDerivedConfig` quando la strategia misurata non è cambiata.
+     */
+    const withoutDerivedKeys = (cfg) => {
+      const out = { ...cfg };
+      for (const key of Object.keys(strategySchema.DERIVED_CONFIG_KEYS)) delete out[key];
+      return out;
+    };
+
+    /**
+     * #78 — I DUE CANCELLI DI SCRITTURA DELLA CONFIG, per le rotte della dashboard.
+     *
+     * Creazione e modifica di un bot dalla UI scrivevano la config senza nessun
+     * controllo d'insieme: si poteva salvare un DCA a 50 step, una regola che il
+     * motore ignora, un tetto su un percorso morto, o una strategia che il
+     * backtest dà in perdita netta — tutte cose che `register_bot` e
+     * `update_strategy_params` rifiutano da #46. Qui si chiamano le STESSE due
+     * funzioni, non una copia:
+     *
+     *  1. `validateConfigForWrite` — forma + percorsi di rischio. Rifiuto secco
+     *     (400) con la lista degli errori leggibili in `errors`: una config che il
+     *     motore non applicherebbe come scritta non ha una "conferma" sensata.
+     *  2. `runBacktestGate` — lo stesso guscio di I/O e la stessa soglia di MCP
+     *     (`evaluateBacktestGate`). Non lancia mai: senza candele o senza rete il
+     *     verdetto è `inconclusive`, la scrittura passa e l'incertezza resta
+     *     scritta nel riassunto salvato in config, esattamente come per MCP.
+     *     L'UNICA differenza da MCP è la risposta a `blocked`: qui c'è una
+     *     persona davanti al form, quindi invece del rifiuto secco si risponde
+     *     409 `BACKTEST_GATE` col riassunto, e la UI può rimandare la stessa
+     *     richiesta con `confirmBacktestOverride: true`. In quel caso si scrive,
+     *     il riassunto (col verdetto `blocked`) resta sul bot e la scelta finisce
+     *     nell'audit: forzare un cancello di rischio non deve essere silenzioso.
+     *
+     * L'ordine è quello di `register_bot`: prima il cancello gratuito, poi
+     * quello che costa una chiamata di rete. Nessuna scrittura avviene qui: chi
+     * chiama scrive solo se non c'è `reject`.
+     *
+     * @param candidate     config che verrebbe scritta (completa)
+     * @param coin          mercato su cui misurare il backtest
+     * @param mustBacktest  false quando la modifica non tocca ciò che il backtest
+     *                      misura (`backtestedStrategyChanged`)
+     * @param override      `confirmBacktestOverride` dal corpo: vale solo `true`
+     * @returns {{ reject?: {status:number, body:object}, config?: object, backtest?: object|null, overridden?: boolean }}
+     */
+    const gateBotConfigWrite = async ({ candidate, coin, mustBacktest, override }) => {
+      const gate = validateConfigForWrite(candidate);
+      if (!gate.ok) {
+        return {
+          reject: {
+            status: 400,
+            body: { success: false, code: 'CONFIG_INVALID', guardrail: gate.guardrail, error: gate.error, errors: gate.issues || [gate.error] }
+          }
+        };
+      }
+      if (!mustBacktest) return { config: candidate, backtest: null, overridden: false };
+
+      const backtest = await runBacktestGate(candidate, coin);
+      if (backtest.blocked && override !== true) {
+        return {
+          reject: {
+            status: 409,
+            body: { success: false, code: 'BACKTEST_GATE', error: `Backtest Gate — ${backtest.reason}`, backtestSummary: backtest.summary }
+          }
+        };
+      }
+      return {
+        config: { ...candidate, backtestSummary: backtest.summary },
+        backtest: backtest.summary,
+        overridden: backtest.blocked
+      };
+    };
+
+    /**
+     * Traccia di una scrittura avvenuta NONOSTANTE il backtest gate. Dopo la
+     * scrittura, non prima: l'audit deve raccontare un bot che esiste. Un
+     * fallimento dell'audit non annulla la scrittura già fatta (la risposta
+     * mentirebbe), ma non passa in silenzio.
+     */
+    const auditBacktestOverride = (operation, { botId, name, coin, summary }) => {
+      try {
+        db.insertAudit('human', 'bots.backtest_override', { operation, botId, name, coin, backtestSummary: summary });
+      } catch (err) {
+        logger.error(`Audit dell'override del backtest gate NON scritto (bot ${botId}): ${err.message}`);
+      }
+    };
+
     // CRIT-03-EXTRA — `data.warning` è valorizzato (stringa) quando sul mercato
     // scelto c'è già un altro bot IN ESECUZIONE sullo stesso wallet, altrimenti
     // `null`. Non è un errore e non cambia lo status HTTP: la creazione avviene
@@ -1102,13 +1199,33 @@ class ArbitrageBotServer {
     //
     // AGENT-AWARE: accetta `linked_agent_id` ('user_manual' default) e
     // `max_allocation_usd` (Budget Ceiling, null = nessun limite).
-    app.post('/api/perps/bots', (req, res) => {
+    //
+    // #78 — prima di scrivere, la config passa dagli STESSI due cancelli di
+    // `register_bot`: `validateConfigForWrite` (400 con gli errori, nulla scritto)
+    // e il backtest gate (409 `BACKTEST_GATE` col riassunto, nulla scritto, a
+    // meno che il corpo porti `confirmBacktestOverride: true`). Vedi
+    // `gateBotConfigWrite` qui sopra.
+    app.post('/api/perps/bots', async (req, res) => {
       try {
-        const { name, coin, masterAddress, config: botConfig, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent } = req.body;
+        const { name, coin, masterAddress, config: botConfig, linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent, confirmBacktestOverride } = req.body || {};
+        if (botConfig != null && !isPlainConfig(botConfig)) {
+          return res.status(400).json({ success: false, error: 'config deve essere un oggetto', errors: ['config deve essere un oggetto.'] });
+        }
+        const outcome = await gateBotConfigWrite({
+          candidate: withoutDerivedKeys(botConfig || {}),
+          coin,
+          mustBacktest: true,
+          override: confirmBacktestOverride
+        });
+        if (outcome.reject) return res.status(outcome.reject.status).json(outcome.reject.body);
+
         const state = botManager.createBot({
-          name, coin, masterAddress, network: hyperliquid.getNetwork(), config: botConfig,
+          name, coin, masterAddress, network: hyperliquid.getNetwork(), config: outcome.config,
           linked_agent_id, max_allocation_usd, actor_label, actor_id, is_managed_by_agent
         });
+        if (outcome.overridden) {
+          auditBacktestOverride('create', { botId: state.id, name: state.name, coin: state.coin, summary: outcome.backtest });
+        }
         res.json({ success: true, data: state });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });
@@ -1209,9 +1326,44 @@ class ArbitrageBotServer {
 
     // DEBT-01: `updateBot` è asincrono perché attende il tick in volo prima di
     // sostituire l'istanza — senza `await` qui si risponderebbe con una promise.
+    //
+    // #78 — una PATCH che porta `config` passa dagli stessi cancelli della
+    // creazione (`gateBotConfigWrite`), applicati alla config che verrebbe
+    // DAVVERO scritta: questa rotta SOSTITUISCE `config_json` (il form manda la
+    // config intera, e una chiave assente vuol dire "funzione spenta" — vedi
+    // `preserveDerivedConfig`), quindi la candidata è la config in arrivo con i
+    // soli campi derivati conservati, cioè ciò che `db.updateBot` persisterebbe.
+    // Il backtest si riesegue solo se cambia ciò che misura
+    // (`backtestedStrategyChanged`). Una PATCH senza `config` (nome, budget,
+    // agente collegato…) non tocca la strategia e passa com'era.
     app.patch('/api/perps/bots/:id', async (req, res) => {
       try {
-        const state = await botManager.updateBot(req.params.id, req.body);
+        const { confirmBacktestOverride, ...fields } = req.body || {};
+        if (fields.config == null) {
+          const state = await botManager.updateBot(req.params.id, fields);
+          return res.json({ success: true, data: state });
+        }
+        if (!isPlainConfig(fields.config)) {
+          return res.status(400).json({ success: false, error: 'config deve essere un oggetto', errors: ['config deve essere un oggetto.'] });
+        }
+        const row = db.getBot(req.params.id);
+        if (!row) return res.status(400).json({ success: false, error: 'Bot non trovato' });
+
+        const existing = strategySchema.extractBotConfig(row);
+        const candidate = strategySchema.preserveDerivedConfig(existing, withoutDerivedKeys(fields.config));
+        const coin = fields.coin || row.coin;
+        const outcome = await gateBotConfigWrite({
+          candidate,
+          coin,
+          mustBacktest: backtestedStrategyChanged(existing, candidate),
+          override: confirmBacktestOverride
+        });
+        if (outcome.reject) return res.status(outcome.reject.status).json(outcome.reject.body);
+
+        const state = await botManager.updateBot(req.params.id, { ...fields, config: outcome.config });
+        if (outcome.overridden) {
+          auditBacktestOverride('update', { botId: state.id, name: state.name, coin: state.coin, summary: outcome.backtest });
+        }
         res.json({ success: true, data: state });
       } catch (error) {
         res.status(400).json({ success: false, error: error.message });
@@ -1992,6 +2144,12 @@ class ArbitrageBotServer {
      *    flag. NON ferma i bot in esecuzione (quello è `/api/perps/killswitch`) e
      *    non chiude posizioni. Annunciare un effetto non prodotto è il modo
      *    peggiore di sbagliare: l'operatore crederebbe di essere protetto.
+     *
+     * #72 — «nuove aperture bloccate» vale per TUTTI: fino a #72 il flag lo
+     * leggeva solo il RiskAgent e i bot a regole continuavano ad aprire. Ora
+     * `PerpsBot` lo legge prima di ogni apertura (`src/perps/killSwitch.js`):
+     * i bot restano in esecuzione e gestiscono le posizioni già aperte, ma non
+     * ne aprono di nuove.
      */
     app.post('/api/agents/killswitch', (req, res) => {
       const on = req.body?.on !== false;

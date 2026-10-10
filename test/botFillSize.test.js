@@ -181,7 +181,7 @@ test('DCA con fill parziale: entry medio e TP/SL sulla size davvero aggiunta', a
   const dcaBroker = brokerWithFill(0.5);
   bot.broker = dcaBroker;
   notified.length = 0;
-  await bot._maybeDca({ price: MID, candles: [] });
+  await bot._maybeDca({ price: MID, candles: [] }, ACCOUNT);
 
   assert.equal(bot.position.dcaCount, 1, 'lo step di DCA è stato consumato');
   assert.equal(bot.position.size, 1.5, 'size totale = 1 + 0.5 riempita (non 1 + 1 pianificata)');
@@ -221,7 +221,7 @@ test('DCA con fill nullo: nessuna aggiunta registrata, nessuno step consumato', 
   MID = 97;
   bot.broker = brokerWithFill(null);
   notified.length = 0;
-  await bot._maybeDca({ price: MID, candles: [] });
+  await bot._maybeDca({ price: MID, candles: [] }, ACCOUNT);
 
   assert.equal(bot.position.dcaCount, 0, 'nessuno step di DCA consumato per un\'aggiunta mai avvenuta');
   assert.equal(bot.position.size, sizeBefore, 'size invariata');

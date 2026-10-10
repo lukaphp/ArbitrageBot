@@ -15,6 +15,7 @@ import riskManager from '../perps/riskManager.js';
 import portfolio from '../perps/portfolio.js';
 import execQueue from '../perps/execQueue.js';
 import db from '../db/database.js';
+import { isKillSwitchOn, KILLSWITCH_SETTING } from '../perps/killSwitch.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
 
@@ -31,19 +32,23 @@ const RISK_NEUTRAL = new Set(['new_strategy_candidate', 'rebalance_suggestion', 
  *
  * Senza questa riga un `tune_params` cadeva nel ramo delle APERTURE e veniva
  * respinto con «Nessun wallet/agent collegato»: un messaggio falso per
- * un'azione che non apre niente. Il kill-switch resta davanti a tutto, quindi a
+ * un'azione che non apre niente. Il kill-switch resta davanti a queste (solo le
+ * azioni che riducono il rischio e i suggerimenti lo precedono, #73), quindi a
  * kill-switch attivo nemmeno un cambio di configurazione passa.
  */
 const CONFIG_ONLY = new Set(['tune_params']);
 
 class RiskAgent {
-  /** Il kill-switch è ON? (flag persistito in settings). */
+  /**
+   * Il kill-switch è ON? Stessa lettura dei bot a regole (`perps/killSwitch.js`,
+   * #72): un'unica fonte, e fail-closed — flag illeggibile = attivo.
+   */
   isKillSwitchOn() {
-    return db.getSetting('killswitch', 'off') === 'on';
+    return isKillSwitchOn();
   }
 
   setKillSwitch(on) {
-    db.setSetting('killswitch', on ? 'on' : 'off');
+    db.setSetting(KILLSWITCH_SETTING, on ? 'on' : 'off');
     db.insertAudit('riskAgent', on ? 'killswitch.on' : 'killswitch.off', {});
   }
 
@@ -72,15 +77,30 @@ class RiskAgent {
   }
 
   _evaluate(action) {
-    if (this.isKillSwitchOn()) {
-      return { ok: false, reason: 'Kill-switch attivo: tutte le aperture sono bloccate.' };
-    }
+    // #73 — L'ORDINE DEI CONTROLLI È IL FIX. Il kill-switch serve a fermare
+    // l'esposizione NUOVA in emergenza, non a impedire di uscirne: se stesse
+    // davanti a tutto (com'era), una `close` o un `tighten_sl` proposti
+    // dall'agente verrebbero respinti proprio quando servono di più. Per
+    // questo le azioni che riducono il rischio e i suggerimenti (che non
+    // eseguono niente) si valutano PRIMA del kill-switch; tutto il resto —
+    // configurazioni comprese — resta dietro.
 
-    // Le azioni che riducono il rischio passano sempre.
+    // Le azioni che riducono il rischio passano sempre, anche a kill-switch attivo.
     if (RISK_REDUCING.has(action.type)) return { ok: true, reason: 'Azione che riduce il rischio.' };
 
-    // Le azioni neutre (suggerimenti) non aprono nulla: passano senza account.
+    // Le azioni neutre (suggerimenti) non aprono nulla: passano senza account,
+    // anche a kill-switch attivo — non c'è esecuzione da bloccare.
     if (RISK_NEUTRAL.has(action.type)) return { ok: true, reason: 'Suggerimento (nessuna esecuzione).' };
+
+    if (this.isKillSwitchOn()) {
+      // Una modifica di configurazione non apre niente subito, ma può alzare
+      // leva o size delle aperture successive: resta bloccata, con una
+      // motivazione che dice cosa è stato bloccato davvero.
+      if (CONFIG_ONLY.has(action.type)) {
+        return { ok: false, reason: 'Kill-switch attivo: anche le modifiche di configurazione sono bloccate.' };
+      }
+      return { ok: false, reason: 'Kill-switch attivo: tutte le aperture sono bloccate.' };
+    }
 
     // Modifica di sola configurazione: nessun ordine, nessun account richiesto.
     if (CONFIG_ONLY.has(action.type)) return { ok: true, reason: 'Modifica di configurazione (nessun ordine a mercato).' };

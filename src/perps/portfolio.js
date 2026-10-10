@@ -45,6 +45,92 @@ const DEFAULTS = {
 
 const COOLDOWN_KEY = 'portfolio_cooldowns';
 
+/**
+ * #79 — dominio di ogni limite di portafoglio: le SOLE chiavi accettate, e per
+ * ciascuna un numero finito, > 0, intero dove è un conteggio, entro un tetto.
+ *
+ * Prima `setLimits` scriveva qualunque cosa arrivasse da `POST
+ * /api/perps/portfolio`: con `maxTotalExposureUsd: 'abc'` il confronto
+ * `totale > 'abc'` è falso per ogni totale, cioè il tetto di esposizione
+ * spariva, e lo stesso per posizioni concorrenti e perdite consecutive. Un
+ * NaN non ferma niente: attraversa ogni guardia come un via libera.
+ *
+ * I tetti superiori non sono limiti di rischio ma di PLAUSIBILITÀ: fermano un
+ * refuso (uno zero di troppo) che di fatto spegnerebbe il cap pur restando un
+ * numero "valido".
+ *  - maxConcurrentPositions ≤ 50: ben oltre i mercati che la flotta segue;
+ *  - maxTotalExposureUsd ≤ 10.000.000$: ordini di grandezza sopra ogni conto reale;
+ *  - maxConsecutiveLosses ≤ 100: oltre, il cooldown non scatterebbe mai;
+ *  - cooldownMinutes ≤ 10.080 (7 giorni): oltre è un blocco, non un cooldown.
+ */
+export const LIMIT_SPECS = {
+  maxConcurrentPositions: { integer: true, max: 50 },
+  maxTotalExposureUsd: { integer: false, max: 10_000_000 },
+  maxConsecutiveLosses: { integer: true, max: 100 },
+  cooldownMinutes: { integer: false, max: 10_080 }
+};
+
+/**
+ * Valore di un limite, normalizzato a numero, oppure il motivo per cui non lo è.
+ *
+ * Le stringhe NUMERICHE sono accettate (`"5"` → 5): un form HTML produce stringhe,
+ * e rifiutare `"5"` non protegge nulla. Tutto il resto no: `""`, `null` e `false`
+ * diventerebbero 0 con `Number()`, cioè un valore che sembra valido e non è
+ * quello scritto — e 0 posizioni concorrenti bloccherebbe tutto per un campo
+ * lasciato vuoto.
+ *
+ * Funzione PURA.
+ * @returns {{ value?: number, error?: string }}
+ */
+export function parseLimitValue(key, raw) {
+  const spec = LIMIT_SPECS[key];
+  if (!spec) return { error: `${key}: chiave sconosciuta (ammesse: ${Object.keys(LIMIT_SPECS).join(', ')})` };
+  const mostra = typeof raw === 'string' ? JSON.stringify(raw) : String(raw);
+  const n = typeof raw === 'number' ? raw
+    : (typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN);
+  if (!Number.isFinite(n)) return { error: `${key}: ${mostra} non è un numero` };
+  if (n <= 0) return { error: `${key}: deve essere maggiore di zero (ricevuto ${mostra})` };
+  if (spec.integer && !Number.isInteger(n)) return { error: `${key}: deve essere un numero intero (ricevuto ${mostra})` };
+  if (n > spec.max) return { error: `${key}: oltre il massimo ammesso (${spec.max}, ricevuto ${mostra})` };
+  return { value: n };
+}
+
+/**
+ * #71 — il solo controllo di ESPOSIZIONE totale, estratto da `canOpen()` perché
+ * serve anche all'aggiunta DCA. `canOpen()` conta pure le posizioni
+ * concorrenti e il cooldown da perdite consecutive: due domande che per una
+ * DCA non hanno senso (la posizione è già contata fra le concorrenti, e il
+ * cooldown riguarda il RIENTRO a mercato, non la gestione di una posizione
+ * aperta). L'esposizione invece sì: un'aggiunta impegna capitale nuovo
+ * esattamente come un'apertura. Una sola implementazione, due chiamanti.
+ *
+ * `positions` contiene già la posizione che si sta mediando (con il suo
+ * `positionValue`): il chiamante DCA passa come `plannedNotional` la sola
+ * AGGIUNTA, mai il totale post-DCA, altrimenti la conterebbe due volte.
+ *
+ * FAIL-CLOSED su un totale non finito: prima un `plannedNotional` NaN rendeva
+ * falso il confronto `>` e il controllo passava.
+ *
+ * Funzione PURA.
+ * @returns {{ ok: boolean, reason?: string, totalNotional: number }}
+ */
+export function checkExposure({ positions, plannedNotional = 0, maxTotalExposureUsd }) {
+  const list = Array.isArray(positions) ? positions : [];
+  const totalNotional = list.reduce((s, p) => s + (p.positionValue || 0), 0) + plannedNotional;
+  if (!Number.isFinite(totalNotional)) {
+    return { ok: false, totalNotional, reason: `Esposizione totale non calcolabile (${totalNotional}), apertura negata per prudenza` };
+  }
+  // #79 — speculare: un TETTO non numerico rendeva falso il `>` qui sotto per
+  // qualunque totale, cioè il limite spariva. Anche questo blocca.
+  if (typeof maxTotalExposureUsd !== 'number' || !Number.isFinite(maxTotalExposureUsd)) {
+    return { ok: false, totalNotional, reason: `Limite di esposizione totale non valido (${maxTotalExposureUsd}), apertura negata per prudenza` };
+  }
+  if (totalNotional > maxTotalExposureUsd) {
+    return { ok: false, totalNotional, reason: `Esposizione totale ${totalNotional.toFixed(0)}$ oltre il limite (${maxTotalExposureUsd}$)` };
+  }
+  return { ok: true, totalNotional };
+}
+
 export class Portfolio {
   constructor() {
     this.cooldowns = new Map(); // botId -> timestamp di fine cooldown
@@ -153,6 +239,12 @@ export class Portfolio {
    * Il merge avviene solo se il JSON è un oggetto vero: `'42'`, `'"testo"'`,
    * `'null'` e `'[1,2]'` sono JSON validi che, spalmati sui default, produrrebbero
    * limiti con chiavi spurie invece di limiti.
+   *
+   * #79 — e chiave per chiave: un valore già PERSISTITO e non valido (scritto
+   * prima che `setLimits` validasse, es. `"abc"`) non deve spegnere il cap che
+   * rappresenta. Per quella chiave vale il default, con un warn una volta sola
+   * (`getLimits` gira a ogni tick di ogni bot). Le chiavi sconosciute non
+   * escono: nessuno le legge, e restituirle le farebbe riscrivere a `setLimits`.
    */
   getLimits() {
     try {
@@ -163,11 +255,29 @@ export class Portfolio {
         logger.warn(`Limiti di portafoglio in un formato inatteso (${typeof parsed}), uso i default`);
         return { ...DEFAULTS };
       }
-      return { ...DEFAULTS, ...parsed };
+      const limits = { ...DEFAULTS };
+      for (const [key, valore] of Object.entries(parsed)) {
+        const { value, error } = parseLimitValue(key, valore);
+        if (error) {
+          const fallback = key in DEFAULTS ? `uso il default (${DEFAULTS[key]})` : 'ignorata';
+          this._warnOnce(`Limite di portafoglio salvato non valido — ${error}: ${fallback}`);
+          continue;
+        }
+        limits[key] = value;
+      }
+      return limits;
     } catch (error) {
       logger.warn('Limiti di portafoglio non leggibili, uso i default', error.message);
       return { ...DEFAULTS };
     }
+  }
+
+  /** Warn una volta per testo: chi legge i limiti a ogni tick non deve ripeterlo. */
+  _warnOnce(riga) {
+    if (!this._avvisiDati) this._avvisiDati = new Set();
+    if (this._avvisiDati.has(riga)) return;
+    this._avvisiDati.add(riga);
+    logger.warn(riga);
   }
 
   /**
@@ -175,9 +285,29 @@ export class Portfolio {
    * viene ingoiato. Salvare i limiti è un'azione esplicita dell'utente, e
    * rispondere "salvato" a un salvataggio mai avvenuto lo farebbe operare convinto
    * di avere cap che non esistono. Un errore visibile è meglio.
+   *
+   * #79 — e per la stessa ragione si VALIDA prima di scrivere (vedi
+   * `LIMIT_SPECS`): chiavi sconosciute o valori non validi → eccezione con
+   * TUTTI i problemi in un solo messaggio (la rotta la traduce in 400), e
+   * niente viene scritto — nemmeno i campi validi della stessa richiesta.
+   * Un salvataggio a metà lascerebbe in vigore una combinazione di limiti che
+   * nessuno ha scelto.
    */
   setLimits(obj) {
-    const merged = { ...this.getLimits(), ...obj };
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+      throw new Error('Limiti di portafoglio non validi: serve un oggetto { chiave: valore }');
+    }
+    const problemi = [];
+    const valori = {};
+    for (const [key, raw] of Object.entries(obj)) {
+      const { value, error } = parseLimitValue(key, raw);
+      if (error) problemi.push(error);
+      else valori[key] = value;
+    }
+    if (problemi.length) {
+      throw new Error(`Limiti di portafoglio non validi, nessuna modifica salvata: ${problemi.join('; ')}`);
+    }
+    const merged = { ...this.getLimits(), ...valori };
     db.setSetting('portfolio_limits', JSON.stringify(merged));
     return merged;
   }
@@ -226,6 +356,15 @@ export class Portfolio {
   canOpen({ account, plannedNotional = 0, botId, consecutiveLosses = 0, reservedSlots = 0, lastLossAt = null, now = Date.now() }) {
     const L = this.getLimits();
 
+    // #79 — FAIL-CLOSED su un limite non numerico: ogni confronto con NaN è
+    // falso, quindi il limite sparirebbe invece di bloccare. `getLimits` già
+    // ripiega sui default; questa è la difesa per chi arriva qui per altre vie.
+    for (const key of Object.keys(LIMIT_SPECS)) {
+      if (typeof L[key] !== 'number' || !Number.isFinite(L[key])) {
+        return { ok: false, reason: `Limite di portafoglio ${key} non valido (${L[key]}), apertura negata per prudenza` };
+      }
+    }
+
     const until = this.cooldownInfo(botId);
     if (until) {
       // cooldownUntil (il timestamp grezzo, non la stringa formattata) è quello
@@ -245,10 +384,8 @@ export class Portfolio {
       return { ok: false, reason: `Max posizioni concorrenti (${L.maxConcurrentPositions}) raggiunto${detail}` };
     }
 
-    const totalNotional = positions.reduce((s, p) => s + (p.positionValue || 0), 0) + plannedNotional;
-    if (totalNotional > L.maxTotalExposureUsd) {
-      return { ok: false, reason: `Esposizione totale ${totalNotional.toFixed(0)}$ oltre il limite (${L.maxTotalExposureUsd}$)` };
-    }
+    const exposure = checkExposure({ positions, plannedNotional, maxTotalExposureUsd: L.maxTotalExposureUsd });
+    if (!exposure.ok) return { ok: false, reason: exposure.reason };
 
     if (consecutiveLosses >= L.maxConsecutiveLosses) {
       // Nessuna scrittura qui: l'attivazione è di `recordLoss()`.

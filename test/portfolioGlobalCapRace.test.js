@@ -43,7 +43,7 @@ client.roundPx = (px) => Math.round(px * 1e4) / 1e4;
 notifier.notify = async () => true;
 
 // Cap esplicito: il test non deve dipendere dal default né dall'esposizione.
-portfolio.setLimits({ maxConcurrentPositions: 3, maxTotalExposureUsd: 1e9, maxConsecutiveLosses: 99 });
+portfolio.setLimits({ maxConcurrentPositions: 3, maxTotalExposureUsd: 1e7, maxConsecutiveLosses: 99 });
 
 const CONFIG = {
   paper: true,

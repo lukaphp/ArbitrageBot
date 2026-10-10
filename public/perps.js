@@ -560,10 +560,12 @@ class PerpsApp {
     const banner = document.createElement('div');
     banner.id = `crash-banner-${data.botId}`;
     banner.className = 'crash-alert-banner';
+    // `botName` è testo libero (utente o agente) e arriva via socket: escape
+    // obbligatorio come in ogni altro punto che lo mette nel markup (issue #77).
     banner.innerHTML = `
       <span class="crash-alert-icon">⚠️</span>
       <span class="crash-alert-body">
-        <strong>Bot in crash rilevato:</strong> <b>${data.botName}</b> (${data.coin}) 
+        <strong>Bot in crash rilevato:</strong> <b>${this._escapeHtml(data.botName)}</b> (${this._escapeHtml(data.coin)}) 
         [${agentLabel}] — nessun tick da <b>${secs}s</b>. 
         Verifica connettività o riavvia il bot.
       </span>
@@ -1683,7 +1685,7 @@ class PerpsApp {
     try {
       this.markets = await this.api('/api/perps/markets');
       const opts = this.markets.map(m =>
-        `<option value="${m.coin}">${m.name} · max ${m.maxLeverage}x</option>`).join('');
+        `<option value="${this._escapeHtml(m.coin)}">${this._escapeHtml(m.name)} · max ${m.maxLeverage}x</option>`).join('');
       const sel1 = document.getElementById('orderMarket');
       const sel2 = document.getElementById('botMarket');
       if (sel1) sel1.innerHTML = opts;
@@ -2214,7 +2216,14 @@ class PerpsApp {
       return;
     }
 
+    // Ogni testo che finisce nel markup passa da `_escapeHtml` (issue #77):
+    // `botName` lo scrive l'utente o un agente, `rationale` e `model` arrivano
+    // da un LLM, `coin` dal server — XSS stored della stessa classe di #9/#60.
+    // I pulsanti non hanno handler inline (issue #64): `data-action`/`data-id`
+    // letti dai listener delegati collegati una volta su `#strategyHistory`.
+    const esc = (v) => this._escapeHtml(v);
     box.innerHTML = hist.map(h => {
+        const id = esc(h.id);
         const date = h.decidedAt ? new Date(h.decidedAt).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
         const badge = h.status === 'approved' ? '<span class="sh-badge ok">approvata</span>'
           : h.status === 'rejected' ? '<span class="sh-badge no">rifiutata</span>'
@@ -2223,29 +2232,29 @@ class PerpsApp {
         if (h.status === 'approved') {
           if (!h.linkedBotId) outcome = '<span class="sh-outcome muted">— bot non ancora creato</span>';
           else if (!h.botExists) outcome = '<span class="sh-outcome muted">— bot eliminato</span>';
-          else if (!h.outcome || !h.outcome.trades) outcome = `<span class="sh-outcome muted">▶️ ${h.botName} · in attesa di operazioni</span>`;
+          else if (!h.outcome || !h.outcome.trades) outcome = `<span class="sh-outcome muted">▶️ ${esc(h.botName)} · in attesa di operazioni</span>`;
           else {
             const o = h.outcome;
             const pnlCls = o.totalPnl >= 0 ? 'profit-positive' : 'profit-negative';
             const pf = isFinite(o.profitFactor) ? o.profitFactor.toFixed(2) : '∞';
-            outcome = `<span class="sh-outcome">📊 ${h.botName}: ${o.trades} op · WR ${(o.winRate * 100).toFixed(0)}% · PF ${pf} · PnL <span class="${pnlCls}">${this.fmtUsd(o.totalPnl)}</span></span>`;
+            outcome = `<span class="sh-outcome">📊 ${esc(h.botName)}: ${o.trades} op · WR ${(o.winRate * 100).toFixed(0)}% · PF ${pf} · PnL <span class="${pnlCls}">${this.fmtUsd(o.totalPnl)}</span></span>`;
           }
         }
-        const costLine = h.model ? `<div class="sh-cost">🧠 ${h.model} · elaborazione ${this._fmtCost(h.costUsd)}</div>` : '';
+        const costLine = h.model ? `<div class="sh-cost">🧠 ${esc(h.model)} · elaborazione ${this._fmtCost(h.costUsd)}</div>` : '';
         const checked = this._selectedStrategies.has(h.id) ? 'checked' : '';
         const recycle = h.status === 'expired'
-          ? `<button class="sh-recycle" title="Rilancia il backtest ora e riproponila se ha ancora edge (gratis)" onclick="perps.recycleStrategies(['${h.id}'])">♻️</button>`
+          ? `<button class="sh-recycle" title="Rilancia il backtest ora e riproponila se ha ancora edge (gratis)" data-action="recycle-strategy" data-id="${id}">♻️</button>`
           : '';
         return `
         <div class="sh-row">
           <div class="sh-line1">
-            <input type="checkbox" class="sh-check" ${checked} onchange="perps.toggleStrategySelection('${h.id}', this.checked)">
-            ${badge} <b>${h.coin || ''}</b> <span class="muted">${date}</span>
+            <input type="checkbox" class="sh-check" ${checked} data-action="toggle-strategy-selection" data-id="${id}">
+            ${badge} <b>${esc(h.coin || '')}</b> <span class="muted">${date}</span>
             ${recycle}
-            <button class="sh-export" title="Esporta questa strategia in un file JSON" onclick="perps.exportStrategies(['${h.id}'])">📤</button>
-            <button class="sh-del" title="Elimina questa strategia" onclick="perps.deleteStrategy('${h.id}')">🗑️</button>
+            <button class="sh-export" title="Esporta questa strategia in un file JSON" data-action="export-strategy" data-id="${id}">📤</button>
+            <button class="sh-del" title="Elimina questa strategia" data-action="delete-strategy" data-id="${id}">🗑️</button>
           </div>
-          ${h.rationale ? `<div class="sh-rationale">${h.rationale}</div>` : ''}
+          ${h.rationale ? `<div class="sh-rationale">${esc(h.rationale)}</div>` : ''}
           ${costLine}
           ${outcome ? `<div>${outcome}</div>` : ''}
         </div>`;
@@ -2538,11 +2547,14 @@ class PerpsApp {
       // `payload` contengono il NOME DEL BOT, che è testo scritto dall'utente (o
       // da un agente esterno) e salvato in DB. Senza escaping questa è la stessa
       // XSS stored della card bot (issue #9), su una superficie diversa.
+      // `id` finisce solo in `data-id` (contesto attributo HTML, dove
+      // `_escapeHtml` basta), mai in un `onclick` — lì l'escape HTML non
+      // protegge una stringa JS (issue #64).
       const id = this._escapeHtml(p.id);
       const isStrategy = p.type === 'new_strategy_candidate';
       const approveBtn = isStrategy
-        ? `<button class="btn btn-sm btn-primary" onclick="perps.applyStrategyProposal('${id}')">⚙️ Approva e configura</button>`
-        : `<button class="btn btn-sm btn-primary" onclick="perps.approveProposal('${id}')">✅ Approva</button>`;
+        ? `<button class="btn btn-sm btn-primary" data-action="apply-strategy-proposal" data-id="${id}">⚙️ Approva e configura</button>`
+        : `<button class="btn btn-sm btn-primary" data-action="approve-proposal" data-id="${id}">✅ Approva</button>`;
       return `
       <div class="agent-proposal">
         <div class="ap-head">
@@ -2555,7 +2567,7 @@ class PerpsApp {
         ${p.model ? `<div class="ap-cost">🧠 ${this._escapeHtml(p.model)} · costo elaborazione ${this._escapeHtml(this._fmtCost(p.costUsd))}</div>` : ''}
         <div class="ap-actions">
           ${approveBtn}
-          <button class="btn btn-sm btn-outline" onclick="perps.rejectProposal('${id}')">🚫 Rifiuta</button>
+          <button class="btn btn-sm btn-outline" data-action="reject-proposal" data-id="${id}">🚫 Rifiuta</button>
         </div>
       </div>`;
     }).join('');
@@ -2974,7 +2986,7 @@ class PerpsApp {
       document.getElementById('monitorTitle').textContent = `📡 ${m.name} · ${m.coin}`;
       document.getElementById('monitorBody').innerHTML = this._renderMonitor(m);
     } catch (e) {
-      document.getElementById('monitorBody').innerHTML = `<div class="backtest-empty">Monitor non disponibile: ${e.message}</div>`;
+      document.getElementById('monitorBody').innerHTML = `<div class="backtest-empty">Monitor non disponibile: ${this._escapeHtml(e.message)}</div>`;
     }
   }
 
@@ -2988,7 +3000,7 @@ class PerpsApp {
       <div class="mon-rule ${r.met ? 'met' : ''}">
         <div class="mon-rule-top">
           <span class="mon-dot">${r.met ? '🟢' : '⚪'}</span>
-          <span class="mon-rule-label">${r.label}</span>
+          <span class="mon-rule-label">${this._escapeHtml(r.label)}</span>
           <span class="mon-rule-sig side-badge ${r.signal === 'short' ? 'short' : 'long'}">${(r.signal || '').toUpperCase()}</span>
           <span class="mon-rule-target">${r.target}</span>
         </div>
@@ -3000,7 +3012,7 @@ class PerpsApp {
     let posBlock;
     if (m.inPosition && m.position) {
       const p = m.position;
-      posBlock = `<div class="mon-pos in"><b>${p.side.toUpperCase()} ${this.fmtNum(p.size)} ${m.coin}</b> @ ${this.fmtUsd(p.entryPx)} · TP ${p.tpPx ? this.fmtUsd(p.tpPx) : '—'} · SL ${p.slPx ? this.fmtUsd(p.slPx) : '—'}</div>`;
+      posBlock = `<div class="mon-pos in"><b>${p.side.toUpperCase()} ${this.fmtNum(p.size)} ${this._escapeHtml(m.coin)}</b> @ ${this.fmtUsd(p.entryPx)} · TP ${p.tpPx ? this.fmtUsd(p.tpPx) : '—'} · SL ${p.slPx ? this.fmtUsd(p.slPx) : '—'}</div>`;
     } else {
       posBlock = `<div class="mon-pos flat">Nessuna posizione aperta — il bot sta cercando un punto d'ingresso.</div>`;
     }
@@ -3716,6 +3728,15 @@ class PerpsApp {
     if (positionsList) positionsList.addEventListener('click', (e) => this._handleDelegatedClick(e));
     const botsList = document.getElementById('botsList');
     if (botsList) botsList.addEventListener('click', (e) => this._handleDelegatedClick(e));
+    // Issue #64: storico strategie, coda proposte e selettori strategia/rischio.
+    // Anche questi contenitori sono statici in index.html e i render toccano
+    // solo i figli via `innerHTML`, quindi un listener basta per sempre.
+    for (const containerId of ['strategyHistory', 'agentProposals', 'strategyCards', 'riskProfiles']) {
+      document.getElementById(containerId)?.addEventListener('click', (e) => this._handleDelegatedClick(e));
+    }
+    // La checkbox di selezione reagisce a `change`, non a `click`: serve il suo
+    // stato `checked` dopo il cambio, che è ciò che l'handler inline leggeva.
+    document.getElementById('strategyHistory')?.addEventListener('change', (e) => this._handleDelegatedChange(e));
   }
 
   /**
@@ -3740,6 +3761,28 @@ class PerpsApp {
       case 'edit-bot': this.editBot(id); break;
       case 'open-bot-monitor': this.openBotMonitor(id); break;
       case 'delete-bot': this.deleteBot(id); break;
+      case 'recycle-strategy': this.recycleStrategies([id]); break;
+      case 'export-strategy': this.exportStrategies([id]); break;
+      case 'delete-strategy': this.deleteStrategy(id); break;
+      case 'apply-strategy-proposal': this.applyStrategyProposal(id); break;
+      case 'approve-proposal': this.approveProposal(id); break;
+      case 'reject-proposal': this.rejectProposal(id); break;
+      case 'select-strategy': this.selectStrategy(id); break;
+      case 'select-risk': this.selectRisk(id); break;
+    }
+  }
+
+  /**
+   * Gemello di `_handleDelegatedClick` per l'evento `change` (issue #64): la
+   * checkbox di selezione dello storico strategie era
+   * `onchange="perps.toggleStrategySelection('${h.id}', this.checked)"`, stesso
+   * contesto stringa-JS. Qui l'id arriva da `data-id` come stringa inerte.
+   */
+  _handleDelegatedChange(event) {
+    const el = event.target.closest('[data-action]');
+    if (!el) return;
+    if (el.dataset.action === 'toggle-strategy-selection') {
+      this.toggleStrategySelection(el.dataset.id, el.checked);
     }
   }
 
@@ -4510,7 +4553,7 @@ class PerpsApp {
     const box = document.getElementById('strategyCards');
     if (!box) return;
     box.innerHTML = Object.entries(BOT_STRATEGIES).map(([key, s]) => `
-      <div class="strategy-card ${this.selStrategy === key ? 'selected' : ''}" onclick="perps.selectStrategy('${key}')">
+      <div class="strategy-card ${this.selStrategy === key ? 'selected' : ''}" data-action="select-strategy" data-id="${this._escapeHtml(key)}">
         <div class="strategy-card-head"><span class="strategy-emoji">${s.emoji}</span><strong>${s.name}</strong><span class="strategy-tag">${s.tag}</span></div>
         <p class="strategy-desc">${s.desc}</p>
         <p class="strategy-when">💡 ${s.when}</p>
@@ -4521,7 +4564,7 @@ class PerpsApp {
     const box = document.getElementById('riskProfiles');
     if (!box) return;
     box.innerHTML = Object.entries(RISK_PROFILES).map(([key, r]) => `
-      <div class="risk-profile ${this.selRisk === key ? 'selected' : ''}" onclick="perps.selectRisk('${key}')">
+      <div class="risk-profile ${this.selRisk === key ? 'selected' : ''}" data-action="select-risk" data-id="${this._escapeHtml(key)}">
         <div class="risk-profile-head">${r.emoji} <strong>${r.name}</strong></div>
         <div class="risk-profile-params">Leva ${r.leverage}x · ${r.sizingPercent}% equity · TP ${r.tp}% · SL ${r.sl}%</div>
         <p class="risk-profile-desc">${r.desc}</p>
@@ -4740,12 +4783,12 @@ class PerpsApp {
         method: 'POST',
         body: JSON.stringify({ coin, config, interval: config.candleInterval, lookbackDays })
       });
-      if (r.error) { box.innerHTML = `<div class="backtest-empty">⚠️ ${r.error}</div>`; return; }
+      if (r.error) { box.innerHTML = `<div class="backtest-empty">⚠️ ${this._escapeHtml(r.error)}</div>`; return; }
       box.innerHTML = this._backtestHtml(r);
       // aggiorna anche il box consulente in modalità semplice
       if (this.botMode === 'simple') this._updateConsultant(r.stats);
     } catch (e) {
-      box.innerHTML = `<div class="backtest-empty">Errore backtest: ${e.message}</div>`;
+      box.innerHTML = `<div class="backtest-empty">Errore backtest: ${this._escapeHtml(e.message)}</div>`;
     }
   }
 
@@ -4805,11 +4848,11 @@ class PerpsApp {
         method: 'POST',
         body: JSON.stringify({ coin, config, interval: config.candleInterval, lookbackDays, method, objective })
       });
-      if (r.error) { box.innerHTML = `<div class="backtest-empty">⚠️ ${r.error}</div>`; return; }
+      if (r.error) { box.innerHTML = `<div class="backtest-empty">⚠️ ${this._escapeHtml(r.error)}</div>`; return; }
       this._lastOpt = r;
       box.innerHTML = this._optimizeHtml(r);
     } catch (e) {
-      box.innerHTML = `<div class="backtest-empty">Errore ottimizzazione: ${e.message}</div>`;
+      box.innerHTML = `<div class="backtest-empty">Errore ottimizzazione: ${this._escapeHtml(e.message)}</div>`;
     }
   }
 
@@ -4902,7 +4945,7 @@ class PerpsApp {
     box.innerHTML = '<span class="spinner-sm"></span> calcolo stima…';
     try {
       const r = await this.api(`/api/perps/predict?coin=${encodeURIComponent(coin)}&interval=${interval}`);
-      if (r.error) { box.innerHTML = `<span class="muted">ML non disponibile: ${r.error}</span>`; return; }
+      if (r.error) { box.innerHTML = `<span class="muted">ML non disponibile: ${this._escapeHtml(r.error)}</span>`; return; }
       const prob = (r.probUp * 100).toFixed(0);
       const acc = (r.model.accuracy * 100).toFixed(0);
       const base = (r.model.baseline * 100).toFixed(0);
@@ -4910,7 +4953,7 @@ class PerpsApp {
       const edgeWarn = r.hasEdge ? '' : ` <span class="ml-warn">⚠️ accuratezza ≈ baseline: il modello non ha edge, non usarlo da solo.</span>`;
       box.innerHTML = `🧠 <b>Stima ML:</b> prob. rialzo <b>${prob}%</b> (${dir}) · accuratezza ${acc}% vs baseline ${base}% (n=${r.model.samples})${edgeWarn}`;
     } catch (e) {
-      box.innerHTML = `<span class="muted">ML non disponibile: ${e.message}</span>`;
+      box.innerHTML = `<span class="muted">ML non disponibile: ${this._escapeHtml(e.message)}</span>`;
     }
   }
 

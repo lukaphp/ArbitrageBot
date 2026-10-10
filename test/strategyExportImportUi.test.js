@@ -321,5 +321,6 @@ test('ogni riga dello storico offre l\'export della singola strategia', () => {
   ui.perps._renderStrategyHistory();
   const html = ui.elements.strategyHistory.innerHTML;
   assert.match(html, /class="sh-export"/);
-  assert.match(html, /perps\.exportStrategies\(\['p1'\]\)/);
+  // Issue #64: handler delegato via `data-action`/`data-id`, non più `onclick` inline.
+  assert.match(html, /data-action="export-strategy" data-id="p1"/);
 });

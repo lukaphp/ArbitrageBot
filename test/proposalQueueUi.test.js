@@ -146,10 +146,11 @@ test('tune_params: il dettaglio dichiara cosa NON cambia', () => {
 test('tune_params con patch: il bottone approva esegue, non apre il creatore bot', () => {
   const ui = loadUi();
   const html = ui.render([tuneProposal()]);
-  assert.match(html, /onclick="perps\.approveProposal\('a1b2c3d4-0000-4000-8000-000000000001'\)"/);
-  assert.equal(html.includes('applyStrategyProposal'), false,
+  // Issue #64: handler delegato via `data-action`/`data-id`, non più `onclick` inline.
+  assert.match(html, /data-action="approve-proposal" data-id="a1b2c3d4-0000-4000-8000-000000000001"/);
+  assert.equal(html.includes('apply-strategy-proposal'), false,
     'tune_params non è una candidatura di strategia: non passa dal creatore bot');
-  assert.match(html, /onclick="perps\.rejectProposal\('a1b2c3d4-0000-4000-8000-000000000001'\)"/);
+  assert.match(html, /data-action="reject-proposal" data-id="a1b2c3d4-0000-4000-8000-000000000001"/);
 });
 
 test('durate lunghe leggibili: 185 minuti diventano 3h 05m', () => {
@@ -219,8 +220,8 @@ test('un tipo che la UI non conosce resta leggibile e decidibile', () => {
   assert.match(html, /tipo_mai_visto/);
   assert.match(html, /Motivazione leggibile\./);
   assert.match(html, /foo: bar/);
-  assert.match(html, /approveProposal\('p3'\)/);
-  assert.match(html, /rejectProposal\('p3'\)/);
+  assert.match(html, /data-action="approve-proposal" data-id="p3"/);
+  assert.match(html, /data-action="reject-proposal" data-id="p3"/);
 });
 
 // ------------------------------------------------- flusso approva / rifiuta

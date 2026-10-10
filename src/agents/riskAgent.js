@@ -15,6 +15,7 @@ import riskManager from '../perps/riskManager.js';
 import portfolio from '../perps/portfolio.js';
 import execQueue from '../perps/execQueue.js';
 import db from '../db/database.js';
+import { isKillSwitchOn, KILLSWITCH_SETTING } from '../perps/killSwitch.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
 
@@ -38,13 +39,16 @@ const RISK_NEUTRAL = new Set(['new_strategy_candidate', 'rebalance_suggestion', 
 const CONFIG_ONLY = new Set(['tune_params']);
 
 class RiskAgent {
-  /** Il kill-switch è ON? (flag persistito in settings). */
+  /**
+   * Il kill-switch è ON? Stessa lettura dei bot a regole (`perps/killSwitch.js`,
+   * #72): un'unica fonte, e fail-closed — flag illeggibile = attivo.
+   */
   isKillSwitchOn() {
-    return db.getSetting('killswitch', 'off') === 'on';
+    return isKillSwitchOn();
   }
 
   setKillSwitch(on) {
-    db.setSetting('killswitch', on ? 'on' : 'off');
+    db.setSetting(KILLSWITCH_SETTING, on ? 'on' : 'off');
     db.insertAudit('riskAgent', on ? 'killswitch.on' : 'killswitch.off', {});
   }
 

@@ -19,6 +19,7 @@ import { mergeStrategyConfig, extractBotConfig } from './strategySchema.js';
 import client from './hyperliquidClient.js';
 import metrics from './metrics.js';
 import { findUnmanagedLivePositions } from './reconciler.js';
+import { isKillSwitchOn } from './killSwitch.js';
 
 class BotManager {
   constructor() {
@@ -209,7 +210,10 @@ class BotManager {
    * che non deve eseguire è il bug. Non c'è ripiego locale: chi non possiede il
    * loop delega o fallisce, non fa finta.
    *
-   * @returns {Promise<{state: object, result: 'started'|'stopped'|'restarted'|'already_running'|'already_stopped'}>}
+   * Con il kill switch attivo `start`/`restart` avviano comunque e aggiungono
+   * `warning` (#72, vedi `_killSwitchStartWarning`).
+   *
+   * @returns {Promise<{state: object, result: 'started'|'stopped'|'restarted'|'already_running'|'already_stopped', warning?: string}>}
    */
   async applyLifecycleLocal(botId, action) {
     if (!['start', 'stop', 'restart'].includes(action)) {
@@ -233,7 +237,7 @@ class BotManager {
     if (action === 'start') {
       if (bot.status === 'running') return { state: bot.getState(), result: 'already_running' };
       bot.start();
-      return { state: bot.getState(), result: 'started' };
+      return { state: bot.getState(), result: 'started', ...this._killSwitchStartWarning(bot) };
     }
     if (action === 'stop') {
       if (bot.status === 'stopped') return { state: bot.getState(), result: 'already_stopped' };
@@ -245,7 +249,7 @@ class BotManager {
     bot.stop();
     await bot.whenIdle();
     bot.start();
-    return { state: bot.getState(), result: 'restarted' };
+    return { state: bot.getState(), result: 'restarted', ...this._killSwitchStartWarning(bot) };
   }
 
   /**
@@ -473,7 +477,28 @@ class BotManager {
     const bot = this.bots.get(id);
     if (!bot) throw new Error('Bot non trovato');
     bot.start();
+    this._killSwitchStartWarning(bot);
     return bot.getState();
+  }
+
+  /**
+   * #72 — avvio con il kill switch attivo: si avvia lo stesso, e lo si DICE.
+   *
+   * Rifiutare l'avvio sembrerebbe più prudente ma non lo è: un bot riavviato
+   * con una posizione aperta deve tornare a proteggerla (guardia SL, trailing,
+   * chiusure), e con il flag attivo è proprio quello che fa — `PerpsBot` blocca
+   * solo le nuove aperture (`_killSwitchBlock`). Quello che non deve succedere è
+   * che l'operatore creda di aver riacceso un bot che opera: log + notifica, e
+   * il testo torna anche al chiamante (`warning`) per chi costruisce una risposta.
+   *
+   * @returns {{warning?: string}} oggetto vuoto se il kill switch è spento.
+   */
+  _killSwitchStartWarning(bot) {
+    if (!isKillSwitchOn()) return {};
+    const warning = 'Kill switch attivo: il bot gestisce solo le posizioni già aperte, nessuna nuova apertura finché non viene disattivato.';
+    logger.warn(`▶️ Bot ${bot.name} (${bot.coin}) avviato con il kill switch attivo — ${warning}`);
+    notifier.notify(`⚠️ <b>${bot.name}</b> (${bot.coin}) avviato con il <b>kill switch attivo</b>: gestisce solo le posizioni già aperte, <b>nessuna nuova apertura</b> finché il kill switch non viene disattivato.`);
+    return { warning };
   }
 
   stopBot(id) {

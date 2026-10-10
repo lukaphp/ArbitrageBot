@@ -26,6 +26,7 @@ import metrics from './metrics.js';
 import jev from '../agents/jev.js';
 import db from '../db/database.js';
 import { normalizeStrategyConfig } from './strategySchema.js';
+import { readKillSwitch } from './killSwitch.js';
 import { HYPERLIQUID_CONFIG } from '../config/config.js';
 import logger from '../utils/logger.js';
 
@@ -143,6 +144,10 @@ export class PerpsBot {
     // detto. Dopo un riavvio si rinotifica al più una volta — l'errore da non
     // rifare era l'opposto, cioè perdere il blocco stesso.
     this._overtradingEpisode = null;
+    // #72 — episodio di kill switch già notificato ('attivo' | 'lettura' | null).
+    // Stesso principio di `_overtradingEpisode`: una notifica per episodio, non
+    // per tick; si azzera alla prima apertura tentata con il flag spento.
+    this._killSwitchEpisode = null;
     // Guardia SL — stato dei due contatori, tenuti DISTINTI di proposito perché
     // contano due cose diverse (vedi `_ensureStopLoss`):
     //  - `_slVerifyFailures`: quante volte di fila NON siamo riusciti a leggere
@@ -645,6 +650,16 @@ export class PerpsBot {
   }
 
   async _openPosition(side, snapshot, account) {
+    // #72 — kill switch PRIMA di tutto: niente sizing, niente MTF/ML (chiamate
+    // di rete), niente ordini. Sta qui e non nel tick perché blocca solo
+    // l'INGRESSO: con il flag attivo il bot resta running e `_manageOpen`
+    // continua a gestire SL, TP, trailing e chiusure delle posizioni aperte.
+    const ks = this._killSwitchBlock(side);
+    if (ks) {
+      this.lastEval = { action: 'hold', reason: ks, ts: Date.now() };
+      return;
+    }
+
     const market = marketData.getMarkets().find(m => m.coin === this.coin);
     const szDecimals = market?.szDecimals ?? 3;
     const leverage = this.config.leverage || HYPERLIQUID_CONFIG.risk.defaultLeverage;
@@ -1035,6 +1050,42 @@ export class PerpsBot {
       ? ` (${verdict.opens} aperture nella finestra corrente)`
       : '';
     notifier.notify(`▶️ <b>${this.name}</b> (${this.coin}): frequenza di apertura <b>rientrata</b>${dettaglio} — nuove aperture di nuovo consentite.`);
+  }
+
+  /**
+   * #72 — gate del kill switch sulle NUOVE aperture. Ritorna il motivo (stringa)
+   * se bloccato, altrimenti null.
+   *
+   * Prima di #72 il flag lo leggeva solo il RiskAgent: `/api/agents/killswitch`
+   * annunciava «nuove aperture bloccate» mentre i bot a regole continuavano ad
+   * aprire. Qui si blocca SOLO l'ingresso — fermare il bot lascerebbe le
+   * posizioni aperte senza chi ne gestisce i trigger.
+   *
+   * Fail-closed (vedi `killSwitch.js`): flag illeggibile = aperture sospese, con
+   * un motivo DIVERSO da "attivo", perché all'operatore si dice cosa è successo
+   * davvero. Una notifica per episodio; passare da "attivo" a "non leggibile" è
+   * un episodio nuovo e va detto.
+   */
+  _killSwitchBlock(side) {
+    const { on, readError } = readKillSwitch();
+    if (!on) {
+      this._killSwitchEpisode = null;
+      return null;
+    }
+    const kind = readError ? 'lettura' : 'attivo';
+    const motivo = readError
+      ? `Kill switch non leggibile (${readError}): nuove aperture sospese per prudenza`
+      : 'Kill switch attivo: nuove aperture bloccate';
+    logger.warn(`Bot ${this.name}: apertura ${this.coin} non eseguita — ${motivo}`);
+    if (this._killSwitchEpisode !== kind) {
+      this._killSwitchEpisode = kind;
+      if (readError) {
+        notifier.notify(`⚠️ <b>${this.name}</b> (${this.coin}): stato del kill switch non leggibile (${readError}) — nuove aperture sospese per prudenza. Le posizioni aperte restano gestite.`, { urgent: true });
+      } else {
+        notifier.notify(`🛑 <b>${this.name}</b> (${this.coin}): segnale <b>${String(side).toUpperCase()}</b> non eseguito — <b>kill switch attivo</b>. Il bot resta attivo e continua a gestire le posizioni aperte.`);
+      }
+    }
+    return motivo;
   }
 
   /** Conferma multi-timeframe: true se il TF superiore concorda col lato (o se disattivata). */
